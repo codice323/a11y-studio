@@ -5,6 +5,7 @@ import {
   FileArchive, FileCode2, FileUp, History, Info, Layers, Link2, LoaderCircle, LockKeyhole,
   RefreshCw, RotateCcw, ScanSearch, ShieldCheck, Sparkles, X,
 } from 'lucide-react';
+import { DetectionReview } from './DetectionReview';
 import { Evidence, type EvidenceView } from './Evidence';
 import { versionLabel, type HistoryItem, type Issue, type Proposal, type State, type Verification } from './types';
 import './style.css';
@@ -399,6 +400,7 @@ function App() {
                         onClick={() => chooseHistory(item)} />,
                     ) : <Blank icon={<History />} title="暂无已解决记录">通过自动复测的修复会显示在这里。</Blank>}
                   </div>
+                  <DetectionReview detection={state.current?.detection} />
                   <div className="issue-foot"><Info size={15} /><span>已解决列表包含历史版本，当前问题以所选版本为准。</span></div>
                 </div>
                 <div className="control-panel" role="tabpanel" id="control-panel-assistant"
@@ -604,6 +606,7 @@ function Report({ state, onRollback, onOpen, onWorkspace, busy }: {
         <div className="review-list">
           <p>自动扫描覆盖部分 WCAG 规则，请结合以下人工检查。</p>
           <ul><li>键盘能否访问所有功能，焦点顺序是否合理</li><li>屏幕阅读器读出的名称和提示是否准确</li><li>图片描述是否符合语境，装饰图片是否正确标记</li><li>放大文字和页面后，内容是否仍可使用</li></ul>
+          <DetectionReview detection={state.current?.detection} report />
           {state.current?.incomplete.map(item => <div className="manual-item" key={item.ruleId}><Info size={14} />{item.help} · {item.count} 项需要进一步判断</div>)}
         </div>
         <div className="versions"><h3>版本记录</h3>{state.snapshots.map((snapshot, index) => <div key={snapshot.id}>

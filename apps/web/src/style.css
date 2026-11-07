@@ -188,6 +188,12 @@ input, select { min-width: 0; max-width: 100%; background: white; border: 1px so
 .severity.critical { color: #8e2b2b; background: #ffebeb; }
 .issue-dot.fixed, .severity.fixed { color: var(--green); background: var(--green-light); }
 .issue-foot, .preview-tip { display: flex; align-items: flex-start; gap: 7px; border-top: 1px solid var(--line); padding: 11px 13px; color: var(--muted); font-size: 12px; }
+.workbench-review { flex: 0 0 auto; border-top: 1px solid var(--line); padding: 8px 13px; font-size: 12px; }
+.detection-review summary { cursor: pointer; }
+.detection-review li + li { margin-top: 6px; }
+.detection-review code { overflow-wrap: anywhere; }
+.detection-review-body { max-height: 170px; overflow: auto; padding: 0 4px; }
+
 .evidence-target { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; padding: 0 13px 10px; font-size: 12px; }
 .evidence-target span, .rule-tags span { color: #284683; background: var(--blue-light); padding: 2px 6px; border-radius: 4px; }
 .evidence-target code { overflow-wrap: anywhere; min-width: 0; }

@@ -55,4 +55,4 @@ V2 扫描在原有结果上增加 `detection` 字段，旧扫描可没有此字�
 
 - `POST /api/projects/:id/audits/:auditId/ai-review`，请求体 `{"consent":true}`。显式确认后才向配置的模型发送最多 20 项可访问名称、角色、类型及附近文字。不会发送图片、完整 HTML 或补丁。成功后，同一扫描的重复请求返回已保存批次。模型不可用时，不影响已有规则、行为或修复记录。
 - `PATCH /api/projects/:id/audits/:auditId/ai-review/:findingId`，请求体 `{"decision":"accepted"}`。可选 `accepted`、`rejected`、`needs-review`。结果保存到对应扫描和 JSON 报告。接受项既不进入自动违规列表，也不修改文件。
-- AI 复核目前通过 API 和导出的 JSON 使用。图片 Alt 检查只看文本和邻近文字，无法辨认图片内容。
+- 工作台与结果报告显示 V2 行为证据、最佳实践及已保存的 AI 复核结果。AI 复核的请求和决定通过 API 提交。导出 ZIP 内的 JSON 保留完整证据。图片 Alt 检查只看文本和邻近文字，无法辨认图片内容。

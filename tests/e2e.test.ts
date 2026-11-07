@@ -37,6 +37,25 @@ test('静态项目的真实检测、审核修复、失败回滚、导出与异�
   const rejectedOrigin=await api('/api/projects',{method:'POST',headers:{origin:'https://untrusted.example','content-type':'application/json'},body:'{}'});assert.equal(rejectedOrigin.res.status,403);
   const browser=await chromium.launch({executablePath:process.env.CHROME_PATH||'/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',headless:true});try{const context=await browser.newContext();const page=await context.newPage();await page.goto(base);const result=await new AxeBuilder({page}).withTags(['wcag2a','wcag2aa','wcag21a','wcag21aa']).analyze();const severe=result.violations.filter(x=>x.impact==='critical'||x.impact==='serious');assert.deepEqual(severe.map(x=>x.id),[],`首页高严重度问题: ${JSON.stringify(severe.map(x=>({id:x.id,nodes:x.nodes.map(n=>({target:n.target,summary:n.failureSummary}))})))}`);
    await page.getByRole('button',{name:/慢绿生活 图片/}).click();await page.getByText('项目已导入并完成真实检测。').waitFor({timeout:15000});const work=await new AxeBuilder({page}).withTags(['wcag2a','wcag2aa','wcag21a','wcag21aa']).analyze();const workSevere=work.violations.filter(x=>x.impact==='critical'||x.impact==='serious');assert.deepEqual(workSevere.map(x=>x.id),[],`工作台高严重度问题: ${JSON.stringify(workSevere.map(x=>({id:x.id,nodes:x.nodes.map(n=>({target:n.target,summary:n.failureSummary}))})))}`);
-   await page.getByRole('button',{name:/表单控件缺少标签/}).click();await page.getByLabel('建议的文本内容').fill('电子邮箱');await page.getByRole('button',{name:'生成补丁预览'}).click();await page.getByRole('button',{name:'审核并应用'}).click();const modal=await new AxeBuilder({page}).withTags(['wcag2a','wcag2aa','wcag21a','wcag21aa']).analyze();assert.deepEqual(modal.violations.filter(x=>x.impact==='critical'||x.impact==='serious').map(x=>x.id),[]);await page.keyboard.press('Escape');assert.equal(await page.getByRole('dialog').count(),0);await page.getByRole('button',{name:'结果报告',exact:true}).click();const reportAudit=await new AxeBuilder({page}).withTags(['wcag2a','wcag2aa','wcag21a','wcag21aa']).analyze();const reportSerious=reportAudit.violations.filter(x=>x.impact==='critical'||x.impact==='serious');assert.deepEqual(reportSerious.map(x=>x.id),[],`报告页高严重度问题: ${JSON.stringify(reportSerious.map(x=>({id:x.id,nodes:x.nodes.map(n=>({target:n.target,summary:n.failureSummary}))})))}`);}finally{await browser.close()}
+   await page.getByRole('button',{name:/表单控件缺少标签/}).click();await page.getByLabel('建议的文本内容').fill('电子邮箱');await page.getByRole('button',{name:'生成补丁预览'}).click();await page.getByRole('button',{name:'审核并应用'}).click();const modal=await new AxeBuilder({page}).withTags(['wcag2a','wcag2aa','wcag21a','wcag21aa']).analyze();assert.deepEqual(modal.violations.filter(x=>x.impact==='critical'||x.impact==='serious').map(x=>x.id),[]);await page.keyboard.press('Escape');assert.equal(await page.getByRole('dialog').count(),0);await page.getByRole('button',{name:'结果报告',exact:true}).click();const reportAudit=await new AxeBuilder({page}).withTags(['wcag2a','wcag2aa','wcag21a','wcag21aa']).analyze();const reportSerious=reportAudit.violations.filter(x=>x.impact==='critical'||x.impact==='serious');assert.deepEqual(reportSerious.map(x=>x.id),[],`报告页高严重度问题: ${JSON.stringify(reportSerious.map(x=>({id:x.id,nodes:x.nodes.map(n=>({target:n.target,summary:n.failureSummary}))})))}`);
+   await page.getByRole('button',{name:'切换项目'}).click();
+   const browserFixture='<!doctype html><html lang="zh-CN"><title>上传验收</title><main><h1>验收</h1><input id="email" type="email"></main></html>';
+   await page.locator('input[type=file]').setInputFiles({name:'browser-upload.html',mimeType:'text/html',buffer:Buffer.from(browserFixture)});
+   await page.getByText('项目已导入并完成真实检测。').waitFor();
+   await page.getByRole('button',{name:/表单控件缺少标签/}).click();
+   await page.getByRole('button',{name:'AI 生成建议'}).click();
+   await page.getByText('AI 修复建议',{exact:true}).waitFor();
+   await page.getByRole('button',{name:'审核并应用'}).click();
+   await page.getByRole('button',{name:'确认并验证'}).click();
+   await page.getByRole('table').getByRole('cell',{name:/电子邮箱/}).waitFor();
+   await page.getByRole('button',{name:'切换项目'}).click();
+   await page.getByRole('button',{name:'ZIP',exact:true}).click();
+   await page.locator('input[type=file]').setInputFiles({
+    name:'browser-upload.zip',mimeType:'application/zip',buffer:await zip([{name:'index.html',value:browserFixture}]),
+   });
+   await page.getByText('项目已导入并完成真实检测。').waitFor();
+   await page.getByRole('button',{name:/表单控件缺少标签/}).waitFor();
+   await page.getByText('V2 检测证据 · 已完成',{exact:true}).waitFor();
+  }finally{await browser.close()}
  } finally {server?.kill('SIGTERM');await new Promise<void>(r=>mock?.close(()=>r()));fs.rmSync(tmp,{recursive:true,force:true});}
 });

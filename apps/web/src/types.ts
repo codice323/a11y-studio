@@ -1,3 +1,5 @@
+import type { DetectionEvidence } from '../../../packages/shared/types';
+
 export type Bounds = { x: number; y: number; width: number; height: number };
 
 export type Issue = {
@@ -18,6 +20,7 @@ export type Scan = {
   snapshotId: string;
   issues: Issue[];
   incomplete: { ruleId: string; help: string; count: number }[];
+  detection?: DetectionEvidence;
   screenshot: string;
   size: { width: number; height: number };
 };

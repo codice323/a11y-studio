@@ -37,7 +37,7 @@ test('URL 快照从首页导入，经真实扫描、修复和三视图复测后�
     } else if (req.url === '/page') {
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' }).end(`<!doctype html>
         <html lang="zh-CN"><head><title>URL 导入测试</title><link rel="stylesheet" href="/theme.css"></head>
-        <body><main><h1>静态快照测试</h1><img src="/sample.png" alt="测试图"><button id="target"></button>
+        <body><main><h1>静态快照测试</h1><img src="/sample.png" alt="测试图"><button id="target"></button><button id="skipped" tabindex="-1">归档</button><button id="focusless" style="outline:none">保存</button>
         <script>document.querySelector("#target").textContent="脚本内容"</script></main></body></html>`);
     } else {
       res.writeHead(404).end();
@@ -100,6 +100,19 @@ test('URL 快照从首页导入，经真实扫描、修复和三视图复测后�
       const assistantTab = page.getByRole('tab', { name: 'AI 修复助手' });
       const assistantPanel = page.getByRole('tabpanel', { name: 'AI 修复助手' });
       assert.equal(await issuesTab.getAttribute('aria-selected'), 'true');
+      const reviewToggle = page.locator('.workbench-review > summary');
+      await reviewToggle.click();
+      const review = page.getByRole('region', { name: 'V2 检测证据' });
+      await review.getByText('#skipped', { exact: true }).waitFor();
+      await review.locator(':scope > ul').getByText('#focusless', { exact: true }).waitFor();
+      assert.match(await review.innerText(), /待复核/);
+      assert.match(await review.innerText(), /浏览器观测/);
+      await review.getByText(/实际 Tab 顺序/).click();
+      assert.ok(await review.locator('ol').getByText('#focusless', { exact: true }).isVisible());
+      assert.equal(await page.getByRole('region', { name: '待处理问题' }).getByRole('button').count(), 1);
+      assert.deepEqual(await page.locator('.workbench > div').evaluateAll(columns =>
+        columns.map(column => column.getBoundingClientRect().height)), [controls.height, evidence.height]);
+      await reviewToggle.click();
       await issuesTab.press('ArrowRight');
       assert.equal(await assistantTab.getAttribute('aria-selected'), 'true');
       assert.ok(await assistantTab.evaluate(tab => tab === document.activeElement));
@@ -166,6 +179,9 @@ test('URL 快照从首页导入，经真实扫描、修复和三视图复测后�
       assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
       await page.getByRole('button', { name: '结果报告', exact: true }).click();
       assert.equal(await page.locator('.metrics > div').count(), 4);
+      await page.getByRole('heading', { name: 'V2 检测证据' }).waitFor();
+      assert.ok(await page.getByText('#skipped', { exact: true }).isVisible());
+      assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
       await page.getByRole('button', { name: /按钮缺少名称.*查看证据/ }).click();
       await page.getByRole('button', { name: '无障碍语义' }).click();
       await page.getByRole('table').getByText('打开导航', { exact: false }).waitFor({ timeout: 25000 });
@@ -175,6 +191,11 @@ test('URL 快照从首页导入，经真实扫描、修复和三视图复测后�
       assert.match(strFromU8(archive['website/index.html']), /aria-label="打开导航"/);
       assert.ok(archive['website/style-1.css']);
       assert.ok(archive['website/image-1.png']);
+      const exported = JSON.parse(strFromU8(archive['report/report.json']));
+      assert.equal(exported.current.detection.behavior.status, 'completed');
+      assert.ok(exported.current.detection.behavior.findings.some((item: { selector: string; status: string }) =>
+        item.selector === '#skipped' && item.status === 'needs-review'));
+      assert.equal(exported.current.issues.length, 0);
       const state = await (await api('/api/projects/' + project.id)).json();
       const historic = state.verifications[0];
       const rolled = await api(`/api/projects/${project.id}/rollback`, { snapshotId: state.snapshots[0].id });
