@@ -32,13 +32,18 @@ test('键盘探查将跳过项、顺序与状态不一致标为待复核', () =>
     { ...base, selector: '#unreached' },
     { ...base, selector: '#radio', radio: true },
     { ...base, selector: '#managed', tabindex: -1, managed: true },
+    { ...base, selector: '#first', tabindex: 1 },
+    { ...base, selector: '#previous' },
     { ...base, selector: '#order', tabindex: 2 },
     { ...base, selector: '#expanded', expanded: 'true', controlledHidden: true },
   ];
-  const results = keyboardFindings(controls, ['#order', '#expanded'], false);
+  const results = keyboardFindings(controls, ['#first', '#order', '#previous', '#expanded'], false);
   assert.deepEqual(results.map(item => item.selector), ['#skipped', '#order', '#expanded']);
+  const order = results.find(item => item.ruleId === 'focus-order-positive-tabindex');
+  assert.equal(order?.evidence.overtakenSelector, '#previous');
+  assert.equal(order?.evidence.overtakenTabPosition, 3);
   assert.ok(results.every(item => item.status === 'needs-review'));
-  assert.ok(keyboardFindings(controls, ['#order', '#expanded'], true).some(item => item.selector === '#unreached'));
+  assert.ok(keyboardFindings(controls, ['#first', '#order', '#previous', '#expanded'], true).some(item => item.selector === '#unreached'));
 });
 
 test('AI 是可选复核流程，失败不改变扫描，人工决定不升级为确定违规', async t => {

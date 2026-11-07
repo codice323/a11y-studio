@@ -49,6 +49,10 @@ V2 扫描在原有结果上增加 `detection` 字段，旧扫描可没有此字�
 | `detection.behavior` | 静态 Tab 轨迹、证据、覆盖边界和语义候选。状态有 `completed`、`partial`、`unavailable`。行为发现有 `observed` 或 `needs-review` |
 | `detection.ai.findings` | 可选疑似结果与人工决定。接受后的条目仍保留 AI 来源，属于人工认可项 |
 
+`issues` 和 `detection.violations` 保持确定性规则违规口径。`detection.incomplete`、最佳实践及行为发现独立记录。`observed` 表示浏览器提供了可核验的事实，例如计算出的可访问名称为空。`needs-review` 表示启发式风险或需要交互上下文的证据，均不会加入自动修复问题列表。
+
+`focus-order-positive-tabindex` 记录真实 Tab 轨迹相对 DOM 顺序的逆序，并附上被超越的控件选择器。正 `tabindex` 本身仍可由 axe 最佳实践报告，但行为探查需要观察到逆序才发出提示。DOM 顺序是阅读顺序的近似，需结合业务任务判断。`focus-style-unchanged` 比较控件、伪元素和最多四层近邻祖先的计算样式，忽略全透明轮廓、边框和阴影。遮挡、对比度、远处指示器和动态交互仍需要人工复核。
+
 - `POST /api/projects/:id/audits/:auditId/ai-review`，请求体 `{"consent":true}`。显式确认后才向配置的模型发送最多 20 项可访问名称、角色、类型及附近文字。不会发送图片、完整 HTML 或补丁。成功后，同一扫描的重复请求返回已保存批次。模型不可用时，不影响已有规则、行为或修复记录。
 - `PATCH /api/projects/:id/audits/:auditId/ai-review/:findingId`，请求体 `{"decision":"accepted"}`。可选 `accepted`、`rejected`、`needs-review`。结果保存到对应扫描和 JSON 报告。接受项既不进入自动违规列表，也不修改文件。
 - AI 复核目前通过 API 和导出的 JSON 使用。图片 Alt 检查只看文本和邻近文字，无法辨认图片内容。

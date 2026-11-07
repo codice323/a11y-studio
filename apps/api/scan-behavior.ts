@@ -6,7 +6,7 @@ const MAX_TAB_STEPS = 75;
 const BUDGET_MS = 6500;
 const limitNotes = [
   '仅检查禁用页面脚本的静态 Chromium 快照。动态组件的按键处理、打开后的菜单及业务操作需要人工验证。',
-  '焦点样式比较基于计算样式，不能判断复杂背景、动画、遮挡或全部可见焦点模式。',
+  '焦点探查比较控件、伪元素及至多四层近邻祖先的计算样式，无法判定遮挡、对比度、动画或全部焦点样式。',
 ];
 
 type Control = {
@@ -26,18 +26,35 @@ type Control = {
 
 export function keyboardFindings(controls: Control[], sequence: string[], complete: boolean): BehaviorFinding[] {
   const results: BehaviorFinding[] = [];
-  const reached = new Set(sequence);
+  const tabPositions = new Map(sequence.map((selector, index) => [selector, index + 1]));
+  const domPositions = new Map(controls.map((control, index) => [control.selector, index]));
+  // Compare only reached, unmanaged controls. A positive tabindex is a risk only
+  // when it actually moves a control ahead of an earlier control in the DOM.
+  let latestTabStop: { control: Control; position: number } | undefined;
+  const overtaken = new Map<string, Control>();
+  for (const control of controls) {
+    const position = tabPositions.get(control.selector);
+    if (control.managed || position === undefined) continue;
+    if (latestTabStop && position < latestTabStop.position) {
+      if (control.tabindex > 0) overtaken.set(control.selector, latestTabStop.control);
+    } else {
+      latestTabStop = { control, position };
+    }
+  }
   for (const control of controls) {
     const { selector, role, tabindex, radio, managed, tabbableCandidate, expanded, controlledHidden } = control;
-    if (tabbableCandidate && !radio && !managed && !reached.has(selector) && (tabindex < 0 || complete)) {
+    if (tabbableCandidate && !radio && !managed && !tabPositions.has(selector) && (tabindex < 0 || complete)) {
       results.push({ ruleId: 'keyboard-unreached', selector, status: 'needs-review',
         explanation: '在静态快照中未通过 Tab 到达此控件。请复核是否有其他键盘入口或组件导航。',
         evidence: { role, tabindex, completedTabCycle: complete } });
     }
-    if (reached.has(selector) && tabindex > 0) {
+    const earlier = overtaken.get(selector);
+    if (earlier) {
       results.push({ ruleId: 'focus-order-positive-tabindex', selector, status: 'needs-review',
-        explanation: 'Tab 到达了使用正 tabindex 的控件。请对照实际 Tab 次序和阅读顺序。',
-        evidence: { tabindex, tabPosition: sequence.indexOf(selector) + 1 } });
+        explanation: '此正 tabindex 控件在实际 Tab 轨迹中先于 DOM 位置更早的控件。请结合阅读和操作顺序复核。',
+        evidence: { basis: 'tab-dom-order-inversion', tabindex, tabPosition: tabPositions.get(selector)!,
+          domPosition: domPositions.get(selector)! + 1, overtakenSelector: earlier.selector,
+          overtakenTabPosition: tabPositions.get(earlier.selector)! } });
     }
     if ((expanded === 'true' && controlledHidden === true) || (expanded === 'false' && controlledHidden === false)) {
       results.push({ ruleId: 'expanded-visibility-mismatch', selector, status: 'needs-review',
@@ -52,31 +69,75 @@ export async function scanBehavior(page: Page, signal?: AbortSignal): Promise<Be
   const started = Date.now();
   const withinBudget = () => { signal?.throwIfAborted(); return Date.now() - started < BUDGET_MS; };
   const handles = await page.evaluateHandle(limit => {
-    const selectorFor = (element: Element): string => {
-      if (element.id && document.querySelectorAll('#' + CSS.escape(element.id)).length === 1) return '#' + CSS.escape(element.id);
-      const tag = CSS.escape(element.localName);
-      const parent = element.parentElement;
-      if (!parent) return tag;
-      const index = Array.from(parent.children).filter(child => child.localName === element.localName).indexOf(element) + 1;
-      return selectorFor(parent) + ' > ' + tag + ':nth-of-type(' + index + ')';
+    // Playwright serializes this callback. Object methods avoid tsx/esbuild's
+    // module-scoped __name helper, which is unavailable in the page realm.
+    const probe = {
+      selectorFor(element: Element): string {
+        if (element.id && document.querySelectorAll('#' + CSS.escape(element.id)).length === 1) return '#' + CSS.escape(element.id);
+        const tag = CSS.escape(element.localName);
+        const parent = element.parentElement;
+        if (!parent) return tag;
+        const index = Array.from(parent.children).filter(child => child.localName === element.localName).indexOf(element) + 1;
+        return probe.selectorFor(parent) + ' > ' + tag + ':nth-of-type(' + index + ')';
+      },
+      shown(element: Element) {
+        return element.getClientRects().length > 0 && element.checkVisibility({ opacityProperty: true, visibilityProperty: true });
+      },
+      visibleColor(color: string) {
+        // Computed colors can serialize as legacy rgba() or CSS Color 4 with an alpha.
+        return color !== 'transparent' && !/^rgba\([^)]*,\s*0(?:\.0+)?\s*\)$/.test(color)
+          && !/\/\s*0(?:\.0+)?%?\s*\)$/.test(color);
+      },
+      outline(style: CSSStyleDeclaration) {
+        return style.outlineStyle !== 'none' && parseFloat(style.outlineWidth) > 0
+          && probe.visibleColor(style.outlineColor) ? style.outline + '|' + style.outlineOffset : '';
+      },
+      border(style: CSSStyleDeclaration) {
+        return ['top', 'right', 'bottom', 'left'].map(side => {
+          const prefix = 'border-' + side + '-';
+          const color = style.getPropertyValue(prefix + 'color');
+          const width = style.getPropertyValue(prefix + 'width');
+          const line = style.getPropertyValue(prefix + 'style');
+          return parseFloat(width) > 0 && !['none', 'hidden'].includes(line) && probe.visibleColor(color)
+            ? width + ' ' + line + ' ' + color : '';
+        });
+      },
+      shadow(style: CSSStyleDeclaration) {
+        return style.boxShadow === 'none' ? [] : style.boxShadow.split(/,(?![^()]*\))/).filter(shadow => {
+          const color = shadow.trim().match(/^[a-z]+\([^)]*\)/)?.[0];
+          return !color || probe.visibleColor(color);
+        });
+      },
+      signature(element: Element) {
+        const layers = [];
+        let node: Element | null = element;
+        for (let depth = 0; node && depth <= 4; depth++, node = node.parentElement) {
+          if (depth > 0 && (node === document.body || node === document.documentElement)) break;
+          for (const pseudo of ['', '::before', '::after']) {
+            const style = getComputedStyle(node, pseudo || null);
+            if ((pseudo && ['none', 'normal'].includes(style.content)) || ['none', 'contents'].includes(style.display)
+                || style.visibility !== 'visible' || Number(style.opacity) === 0) {
+              layers.push(null);
+              continue;
+            }
+            layers.push([
+              probe.outline(style), probe.shadow(style), probe.border(style),
+              probe.visibleColor(style.backgroundColor) ? style.backgroundColor : '', style.backgroundImage,
+              depth === 0 || pseudo ? style.color : '', depth === 0 || pseudo ? style.textDecoration : '',
+              pseudo ? style.content : '',
+            ]);
+          }
+        }
+        return JSON.stringify(layers);
+      },
     };
-    const shown = (element: Element) => element.getClientRects().length > 0
-      && element.checkVisibility({ opacityProperty: true, visibilityProperty: true });
-    const signature = (element: Element) => ['', '::before', '::after'].map(pseudo => {
-      const style = getComputedStyle(element, pseudo || null);
-      return [
-        style.outlineStyle === 'none' ? '' : style.outline,
-        style.boxShadow, style.border, style.backgroundColor, style.backgroundImage,
-        style.color, style.textDecoration, style.content,
-      ];
-    }).flat().join('|');
     const native = 'a[href], button, input:not([type=hidden]), select, textarea, summary, [contenteditable=true]';
     const widgets = '[role=button],[role=link],[role=checkbox],[role=radio],[role=switch],[role=tab],[role=menuitem],[role=textbox],[role=combobox]';
     const candidates = document.querySelectorAll<HTMLElement>(native + ',' + widgets + ',[tabindex],img[alt]');
     const sampled: HTMLElement[] = [];
     let truncated = false;
     for (const element of candidates) {
-      if (!shown(element) || element.matches(':disabled') || element.closest('[inert]')) continue;
+      if (!probe.shown(element) || element.matches(':disabled') || element.closest('[inert]')) continue;
       if (sampled.length === limit) { truncated = true; break; }
       sampled.push(element);
     }
@@ -87,16 +148,16 @@ export async function scanBehavior(page: Page, signal?: AbortSignal): Promise<Be
       const selected = element.getAttribute('aria-selected');
       const context = element.closest<HTMLElement>('label,fieldset,figure,li,p') ?? element.parentElement;
       return {
-        selector: selectorFor(element),
+        selector: probe.selectorFor(element),
         role: element.getAttribute('role') || element.localName,
         tabindex: element.tabIndex,
         radio: element.matches('input[type=radio], [role=radio]'),
         managed: Boolean(element.closest('[role=tablist],[role=radiogroup],[role=listbox],[role=menu],[role=tree],[role=grid],[role=toolbar]')),
         tabbableCandidate: element.matches(native + ',' + widgets),
-        focusStyle: document.activeElement === element ? null : signature(element),
+        focusStyle: document.activeElement === element ? null : probe.signature(element),
         declaredState: checked !== null ? { name: 'checked', value: checked } : selected !== null ? { name: 'selected', value: selected } : null,
         expanded: element.getAttribute('aria-expanded'),
-        controlledHidden: targets.length === 1 ? !shown(targets[0]) : null,
+        controlledHidden: targets.length === 1 ? !probe.shown(targets[0]) : null,
         kind: element.matches('img') ? 'image' : element.matches('input:not([type=button],[type=submit],[type=reset],[type=image]),select,textarea,[role=textbox],[role=combobox]') ? 'form' : 'action',
         context: context?.innerText?.replace(/\s+/g, ' ').trim().slice(0, 260) ?? '',
       };
@@ -106,7 +167,7 @@ export async function scanBehavior(page: Page, signal?: AbortSignal): Promise<Be
       readFocus() {
         const element = document.activeElement;
         if (!element || element === document.body || element === document.documentElement) return null;
-        return { selector: selectorFor(element), focusStyle: signature(element), focusVisible: element.matches(':focus-visible') };
+        return { selector: probe.selectorFor(element), focusStyle: probe.signature(element), focusVisible: element.matches(':focus-visible') };
       },
     };
   }, MAX_CONTROLS);
@@ -129,10 +190,10 @@ export async function scanBehavior(page: Page, signal?: AbortSignal): Promise<Be
       seen.add(active.selector);
       tabSequence.push(active.selector);
       const control = bySelector.get(active.selector);
-      if (control && active.focusStyle === control.focusStyle) {
+      if (control?.focusStyle != null && active.focusStyle === control.focusStyle) {
         findings.push({ ruleId: 'focus-style-unchanged', selector: active.selector, status: 'needs-review',
-          explanation: '实际 Tab 聚焦后，目标元素与其伪元素的主要计算样式未观察到变化。请检查外层焦点样式与实际可见性。',
-          evidence: { focusVisiblePseudoClass: active.focusVisible, tabPosition: tabSequence.length, sampledStylesChanged: false } });
+          explanation: '实际 Tab 聚焦后，采样区域未观察到可见样式变化。请复核焦点提示及其对比度。',
+          evidence: { basis: 'sampled-focus-paint-unchanged', focusVisiblePseudoClass: active.focusVisible, tabPosition: tabSequence.length, sampledStylesChanged: false } });
       }
     }
     findings.push(...keyboardFindings(controls, tabSequence, complete));
