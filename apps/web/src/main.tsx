@@ -1,47 +1,579 @@
-import React,{useEffect,useRef,useState} from 'react';import {createRoot} from 'react-dom/client';import {diffWordsWithSpace} from 'diff';import {Activity,ArrowRight,ArrowUpRight,Check,CheckCircle2,ChevronDown,ChevronRight,Code2,Download,Eye,FileCode2,FileUp,Info,Layers,LoaderCircle,LockKeyhole,PanelLeft,Play,RefreshCw,RotateCcw,ScanSearch,ShieldCheck,Sparkles,X} from 'lucide-react';import './style.css';
+import { useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react';
+import { createRoot } from 'react-dom/client';
+import {
+  Activity, ArrowRight, ArrowUpRight, Check, CheckCircle2, ChevronRight, Code2, Download,
+  FileArchive, FileCode2, FileUp, History, Info, Layers, Link2, LoaderCircle, LockKeyhole,
+  RefreshCw, RotateCcw, ScanSearch, ShieldCheck, Sparkles, X,
+} from 'lucide-react';
+import { Evidence, type EvidenceView } from './Evidence';
+import { versionLabel, type HistoryItem, type Issue, type Proposal, type State, type Verification } from './types';
+import './style.css';
 
-type Issue={id:string;ruleId:string;selector:string;impact:string;help:string;description:string;html:string;helpUrl:string;bounds:{x:number;y:number;width:number;height:number}|null};
-type Scan={id:string;snapshotId:string;issues:Issue[];incomplete:{ruleId:string;help:string;count:number}[];screenshot:string;size:{width:number;height:number}};
-type Snapshot={id:string;parent_id:string|null;description:string;created_at:string};
-type Verification={status:string;reason:string;resolved:Issue[];remaining:Issue[];added:Issue[];createdAt:string;beforeHash:string;afterHash:string;diff?:string;proposalReason?:string;wcag?:string[];wcagUrl?:string};
-type State={project:{id:string;name:string;entry:string;currentSnapshot:string};snapshots:Snapshot[];baseline:Scan|null;current:Scan|null;summary:{initial:number|null;resolved:number;remaining:number;added:number};verifications:Verification[]};
-type Proposal={id:string;issueId:string;source:string;reason:string;guidance:string;wcag:string[];wcagTitle:string;wcagUrl:string;risk:string;before:string;after:string;patch:{operation:string;value:string;targetFile:string;selector:string}};
-const issueNames:Record<string,[string,string]>={'image-alt':['图片缺少替代文本','屏幕阅读器用户无法了解这张图片的内容。'],'label':['表单控件缺少标签','用户可能无法判断输入框的用途。'],'button-name':['按钮缺少名称','屏幕阅读器无法读出按钮的用途。'],'link-name':['链接缺少名称','用户无法了解链接的目标。'],'color-contrast':['文字对比度不足','低视力用户可能难以看清文字。']};
-const impactName:Record<string,string>={critical:'严重',serious:'较严重',moderate:'中等',minor:'轻微',unknown:'待复核'};const fixable=['image-alt','label','button-name','link-name','color-contrast'];
-async function request(url:string,opts:RequestInit={}){const res=await fetch(url,opts);const data=await res.json();if(!res.ok)throw new Error(data.error||`请求失败 (${res.status})`);return data;}
-const post=(url:string,data:unknown)=>request(url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)});
-async function waitJob(id:string){for(let i=0;i<120;i++){const j=await request('/api/jobs/'+id);if(j.status==='completed')return j.result;if(j.status==='failed'||j.status==='cancelled')throw new Error(j.status==='cancelled'?'任务已取消。':j.error||'任务失败');await new Promise(r=>setTimeout(r,500));}throw new Error('任务仍在运行，请稍后刷新。');}
-function App(){const [state,setState]=useState<State|null>(null),[projects,setProjects]=useState<any[]>([]),[fixtures,setFixtures]=useState<any[]>([]),[issueId,setIssueId]=useState(''),[proposal,setProposal]=useState<Proposal|null>(null),[input,setInput]=useState(''),[busy,setBusy]=useState(''),[error,setError]=useState(''),[notice,setNotice]=useState(''),[filter,setFilter]=useState('all'),[view,setView]=useState<'current'|'baseline'>('current'),[tab,setTab]=useState<'preview'|'diff'>('preview'),[page,setPage]=useState<'workspace'|'report'>('workspace'),[ai,setAi]=useState(false),[confirmApply,setConfirmApply]=useState(false),[jobId,setJobId]=useState(''),[knowledge,setKnowledge]=useState<{title:string;url:string;guidance:string}|null>(null);const fileRef=useRef<HTMLInputElement>(null);const highlightRef=useRef<HTMLDivElement>(null);const issue=state?.current?.issues.find(i=>i.id===issueId);const scan=view==='baseline'?state?.baseline:state?.current;
- useEffect(()=>{if(issueId&&view==='current'&&tab==='preview')highlightRef.current?.scrollIntoView({block:'nearest',inline:'nearest',behavior:'smooth'});},[issueId,view,tab]);
- useEffect(()=>{if(!issue){setKnowledge(null);return;}let active=true;request('/api/knowledge/'+encodeURIComponent(issue.ruleId)).then(k=>{if(active)setKnowledge(k)}).catch(()=>{if(active)setKnowledge(null)});return()=>{active=false}},[issue?.id]);
- async function refresh(pid:string){const next=await request('/api/projects/'+pid);setState(next);return next as State;}
- async function reloadProjects(){setProjects(await request('/api/projects'));}
- useEffect(()=>{Promise.all([request('/api/fixtures'),request('/api/projects'),request('/api/status')]).then(([f,p,s])=>{setFixtures(f);setProjects(p);setAi(s.configured)}).catch((e:Error)=>setError(e.message));},[]);
- function start(label:string){setBusy(label);setError('');setNotice('');}function fail(e:unknown){setError(e instanceof Error?e.message:'请求失败。');}function finish(){setBusy('');setJobId('');}
- async function create(data:FormData){start('正在导入项目并扫描…');try{const p=await request('/api/projects',{method:'POST',body:data});await reloadProjects();setIssueId('');setProposal(null);setView('current');setPage('workspace');const job=await post(`/api/projects/${p.id}/audits`,{});setJobId(job.id);await waitJob(job.id);await refresh(p.id);setNotice('项目已导入并完成真实检测。');}catch(e){fail(e)}finally{finish()}}
- async function fromFixture(fixture:string){const f=new FormData();f.set('fixture',fixture);await create(f)}
- async function fromFile(file:File){if(file.size>8*1024*1024){setError('文件不能超过 8 MB。');return;}const data=new FormData();data.set('file',file);await create(data);}
- async function openProject(pid:string){start('正在加载项目…');try{const next=await refresh(pid);setIssueId('');setProposal(null);setPage('workspace');setView('current');if(!next.current){const j=await post(`/api/projects/${pid}/audits`,{});setJobId(j.id);await waitJob(j.id);await refresh(pid)}}catch(e){fail(e)}finally{finish()}}
- async function scanAgain(){if(!state)return;start('正在运行无障碍检测…');try{const j=await post(`/api/projects/${state.project.id}/audits`,{});setJobId(j.id);await waitJob(j.id);await refresh(state.project.id);setIssueId('');setProposal(null);setNotice('检测完成。');}catch(e){fail(e)}finally{finish()}}
- async function propose(source:'ai'|'manual'){if(!state||!issue)return;start(source==='ai'?'正在生成 AI 建议…':'正在生成补丁预览…');try{const p=await post(`/api/projects/${state.project.id}/issues/${issue.id}/proposals`,{source,value:input});setProposal(p);setInput(p.patch.value);setTab('diff');setNotice('建议已生成，请检查内容后决定是否应用。');}catch(e){fail(e)}finally{finish()}}
- async function apply(){if(!proposal||!state)return;setConfirmApply(false);start('正在应用补丁并重新验证…');try{const j=await post(`/api/proposals/${proposal.id}/apply`,{});setJobId(j.id);const result=await waitJob(j.id);await refresh(state.project.id);setProposal(null);setIssueId('');setView('current');setTab('preview');if(result.status==='passed')setNotice(result.reason);else setError(result.reason);}catch(e){fail(e)}finally{finish()}}
- async function reject(){if(!proposal)return;try{await post(`/api/proposals/${proposal.id}/reject`,{});setProposal(null);setTab('preview');setNotice('建议已保留原样。');}catch(e){fail(e)}}
- async function goBack(id:string){if(!state)return;start('正在切换版本…');try{await post(`/api/projects/${state.project.id}/rollback`,{snapshotId:id});await refresh(state.project.id);setProposal(null);setIssueId('');setView('current');setNotice('已恢复到所选有效版本。');}catch(e){fail(e)}finally{finish()}}
- const chooseIssue=(item:Issue)=>{setIssueId(item.id);setProposal(null);setInput(item.ruleId==='color-contrast'?'#1c2731':'');setView('current');setTab('preview')};
- const filtered=state?.current?.issues.filter(i=>filter==='all'||i.impact===filter)||[];
- return <div className="app"><aside className="sidebar"><a className="logo" href="/" aria-label="A11y Studio 首页"><span className="logomark"><span/><span/><span/><span/></span><span><strong>A11y Studio</strong><small>ACCESSIBILITY WORKSPACE</small></span></a><div className="navlabel">工作空间</div><button className={'nav '+(page==='workspace'?'active':'')} onClick={()=>setPage('workspace')}><ScanSearch size={17}/>诊断工作台 <ChevronRight size={14}/></button><button className={'nav '+(page==='report'?'active':'')} onClick={()=>setPage('report')} disabled={!state}><Activity size={17}/>结果报告</button><div className="sidebar-bottom"><div className="sidebox"><ShieldCheck size={19}/><strong>修复，有据可查</strong><p>每一步修改都经过审核与复测。</p></div><div className="local-status"><i/>本地工作区 <span>V1.0</span></div></div></aside><main><header className="topbar"><div>工作空间 <span>/</span> <b>{page==='report'?'结果报告':'诊断工作台'}</b></div><div className="topright"><span className="pill"><i/>本地模式</span><span className="avatar">A</span></div></header><div className="content">
- <div className="page-intro"><div><div className="eyebrow"><span/>ACCESSIBILITY WORKSPACE</div><h1>{state?(page==='report'?'结果报告':'网页无障碍工作台'):'让每一个网页，更容易被使用'}<span>.</span></h1><p>{state?(page==='report'?'回顾问题变化、验证证据与待人工检查项。':'从发现问题到安全修复，每一步都清晰可见。'):'导入静态网页，发现障碍、审核修复并验证效果。'}</p></div>{state&&<div className="intro-actions"><button className="secondary" onClick={()=>{setState(null);setIssueId('');setProposal(null)}}><Layers size={15}/>切换项目</button><a className="button dark" href={`/api/projects/${state.project.id}/export`}><Download size={15}/>导出项目</a></div>}</div>
- {error&&<div className="alert error" role="alert"><Info size={17}/><span>{error}</span><button onClick={()=>setError('')} aria-label="关闭提示"><X size={16}/></button></div>}{notice&&<div className="alert success" role="status"><CheckCircle2 size={17}/><span>{notice}</span><button onClick={()=>setNotice('')} aria-label="关闭提示"><X size={16}/></button></div>}{busy&&<div className="busy" role="status"><LoaderCircle className="spin" size={16}/>{busy}{jobId&&<button className="cancel-job" onClick={()=>void post('/api/jobs/'+jobId+'/cancel',{}).catch(fail)}>取消任务</button>}</div>}
- {!state?<div className="onboarding"><section className="import-card"><div className="card-heading"><div><span className="section-tag">START A PROJECT</span><h2>导入网页项目</h2><p>选择你拥有或有权使用的静态网页，开始一次检测。</p></div><span className="section-icon"><FileCode2 size={20}/></span></div><div className="dropzone" onDragOver={e=>e.preventDefault()} onDrop={e=>{e.preventDefault();const f=e.dataTransfer.files[0];if(f)void fromFile(f)}}><div className="upload-icon"><FileUp size={24}/></div><b>拖入网页项目，或选择文件</b><span>支持 HTML / ZIP · 最大 8 MB</span><input ref={fileRef} id="upload" type="file" accept=".html,.htm,.zip" hidden onChange={e=>{const f=e.target.files?.[0];if(f)void fromFile(f);e.currentTarget.value=''}}/><button className="button dark" disabled={!!busy} onClick={()=>fileRef.current?.click()}>选择文件 <ArrowRight size={15}/></button></div><div className="import-note"><LockKeyhole size={15}/>静态资源在隔离环境中渲染，页面自带脚本不会执行。</div></section><section className="examples"><div className="section-title"><div><span className="section-tag">TRY A DEMO</span><h2>从示例开始</h2></div><span>选择一个网页体验完整流程</span></div><div className="example-list">{fixtures.map((f,i)=><button key={f.id} className="example-card" disabled={!!busy} onClick={()=>void fromFixture(f.id)}><span className="example-number">0{i+1}</span><span><b>{f.name}</b><small>{f.description}</small></span><ArrowUpRight size={17}/></button>)}</div>{projects.length>0&&<><div className="section-title recent-title"><div><span className="section-tag">RECENT PROJECTS</span><h2>最近项目</h2></div></div><div className="recent-list">{projects.slice(0,6).map(p=><button key={p.id} onClick={()=>void openProject(p.id)} disabled={!!busy}><FileCode2 size={16}/><span>{p.name}</span><ChevronRight size={15}/></button>)}</div></>}</section><section className="steps"><div><ScanSearch/><span>01</span><b>发现问题</b><small>自动检测并定位页面元素</small></div><div><Sparkles/><span>02</span><b>审核修复</b><small>结合规范生成可控补丁</small></div><div><ShieldCheck/><span>03</span><b>验证结果</b><small>复测、记录并导出证据</small></div></section></div>:
- page==='workspace'?<><div className="project-strip"><div className="project-symbol"><FileCode2 size={19}/></div><div className="project-title"><b>{state.project.name}</b><span>{state.project.entry} · 当前版本 {state.snapshots.findIndex(s=>s.id===state.project.currentSnapshot) < 0 ? '—' : 'V'+state.snapshots.findIndex(s=>s.id===state.project.currentSnapshot)}</span></div><div className="project-actions"><button className="secondary" onClick={()=>void scanAgain()} disabled={!!busy}><RefreshCw size={14}/>重新检测</button><select aria-label="切换项目版本" value={state.project.currentSnapshot} onChange={e=>void goBack(e.target.value)} disabled={!!busy}>{state.snapshots.map((s,i)=><option key={s.id} value={s.id}>V{i} · {s.description}</option>)}</select></div></div>
- <div className="metrics"><div><span>初始问题</span><strong>{state.summary.initial??'—'}</strong><small>自动检测结果</small></div><div><span>已验证解决</span><strong>{state.summary.resolved}</strong><small>相对原始版本</small></div><div><span>原有问题残留</span><strong>{state.summary.remaining}</strong><small>需要继续处理</small></div><div><span>新增问题</span><strong>{state.summary.added}</strong><small>相对原始版本</small></div></div>
- <div className="workbench"><section className="issues panel"><div className="panel-head"><div><span className="kicker">01 / DETECT</span><h2>问题列表 <em>{state.current?.issues.length||0}</em></h2></div><select aria-label="按严重程度筛选" value={filter} onChange={e=>setFilter(e.target.value)}><option value="all">全部程度</option><option value="critical">严重</option><option value="serious">较严重</option><option value="moderate">中等</option><option value="minor">轻微</option></select></div><div className="issue-list">{filtered.length?filtered.map(i=><button key={i.id} className={'issue '+(i.id===issueId?'selected':'')} onClick={()=>chooseIssue(i)}><span className={'issue-dot '+i.impact}>!</span><span><b>{issueNames[i.ruleId]?.[0]||i.help}</b><small>{i.selector||'页面级问题'}</small><em className={'severity '+i.impact}>{impactName[i.impact]||'待复核'}</em></span><ChevronRight size={15}/></button>):<div className="blank"><CheckCircle2/><b>没有匹配的问题</b><p>仍需要进行人工无障碍检查。</p></div>}</div><div className="issue-foot"><Info size={15}/><span>自动检测覆盖部分问题，仍需人工复核。</span></div></section>
- <section className="preview panel"><div className="panel-head"><div><span className="kicker">02 / INSPECT</span><h2>网页与代码</h2></div><div className="tab-group"><button className={tab==='preview'?'on':''} onClick={()=>setTab('preview')}>网页预览</button><button className={tab==='diff'?'on':''} onClick={()=>setTab('diff')}>源码差异</button></div></div>{tab==='preview'?<><div className="preview-toolbar"><div className="version-tabs"><button className={view==='baseline'?'on':''} onClick={()=>setView('baseline')}>原始版本</button><button className={view==='current'?'on':''} onClick={()=>setView('current')}>当前版本</button></div><span><i/>隔离渲染</span></div><div className="screen-wrap">{scan?.screenshot?<div className="screen"><div className="browserbar"><span className="traffic"><i/><i/><i/></span><div><LockKeyhole size={11}/> {state.project.entry}</div><span>···</span></div><div className="screen-image"><img src={scan.screenshot} alt={`${view==='baseline'?'原始':'当前'}网页截图`}/>{view==='current'&&issue?.bounds&&scan.size&&<div ref={highlightRef} className="highlight" style={{left:`${issue.bounds.x/scan.size.width*100}%`,top:`${issue.bounds.y/scan.size.height*100}%`,width:`${issue.bounds.width/scan.size.width*100}%`,height:`${issue.bounds.height/scan.size.height*100}%`}}><span>当前问题</span></div>}</div></div>:<div className="blank"><Eye/><b>尚无截图</b><p>扫描后可查看页面预览。</p></div>}</div><div className="preview-tip"><Info size={14}/>预览禁止运行上传网页的脚本，并阻断外部网络。</div></>:<div className="diff-wrap">{proposal?<><div className="diff-title"><Code2 size={15}/>{proposal.patch.targetFile}<span>实际文件差异 · 等待确认</span></div><pre className="diff">{diffWordsWithSpace(proposal.before,proposal.after).map((part,i)=><span key={i} className={part.added?'added':part.removed?'removed':'unchanged'} aria-label={part.added?'新增内容':part.removed?'删除内容':undefined}>{part.value}</span>)}</pre></>:<div className="blank"><Code2/><b>尚未生成补丁</b><p>选择一个问题并生成建议后，这里会展示实际代码差异。</p></div>}</div>}</section>
- <section className="assistant panel"><div className="panel-head"><div><span className="kicker">03 / REPAIR</span><h2>修复助手</h2></div><span className="ai-pill"><Sparkles size={13}/> {ai?'AI 已配置':'AI 未配置'}</span></div>{issue?<div className="assistant-body"><div className="issue-heading"><span className="issue-dot">!</span><div><h3>{issueNames[issue.ruleId]?.[0]||issue.help}</h3><span>{issue.ruleId} · {impactName[issue.impact]||issue.impact}</span></div></div><div className="detail-block"><h4>使用影响</h4><p>{issueNames[issue.ruleId]?.[1]||issue.description}</p></div><div className="detail-block"><h4>问题元素</h4><code>{issue.html}</code></div><div className="detail-block"><h4>修复依据</h4><a href={proposal?.wcagUrl||knowledge?.url||issue.helpUrl} target="_blank" rel="noreferrer">{proposal?.wcagTitle||knowledge?.title||'查看规则与规范说明'} <ArrowUpRight size={12}/></a>{(proposal?.guidance||knowledge?.guidance)&&<p>{proposal?.guidance||knowledge?.guidance}</p>}</div>{fixable.includes(issue.ruleId)?<><label className="input-label" htmlFor="repair-value">{issue.ruleId==='color-contrast'?'修复颜色':'建议的文本内容'}</label><input id="repair-value" value={input} onChange={e=>setInput(e.target.value)} placeholder={issue.ruleId==='image-alt'?'描述图片；装饰图片可留空':'请填写符合实际用途的名称'}/><p className="muted note">请结合页面语境核对。使用 AI 时会向配置的模型服务发送相关局部代码。</p><div className="repair-actions"><button className="button dark" disabled={!!busy} onClick={()=>void propose('manual')}><Code2 size={15}/>生成补丁预览</button><button className="secondary" disabled={!!busy} onClick={()=>void propose('ai')}><Sparkles size={15}/>AI 生成建议</button></div>{proposal&&<div className="proposal"><div className="proposal-head"><b>{proposal.source==='ai'?'AI 修复建议':'人工修复建议'}</b><span>待审核</span></div><p>{proposal.reason}</p><p className="muted">{proposal.risk}</p><div className="repair-actions"><button className="button dark" disabled={!!busy} onClick={()=>setConfirmApply(true)}><Check size={15}/>审核并应用</button><button className="secondary" onClick={()=>void reject()}>保留原样</button></div><small>修改内容后，点击“生成补丁预览”可重新生成。</small></div>}</>:<p className="manual-only">此问题暂不支持自动补丁，请参考规则说明进行人工修复。</p>}</div>:<div className="blank assistant-empty"><span className="empty-spark"><Sparkles size={21}/></span><b>选择一个问题</b><p>查看用户影响、修复依据和可审核的补丁。</p></div>}</section></div>
- <div className="bottom-note"><ShieldCheck size={16}/> 原始文件始终保留。修复会在副本中验证，失败时继续使用上一个有效版本。<button onClick={()=>setPage('report')}>查看完整报告 <ArrowRight size={14}/></button></div></>:<Report state={state} onRollback={goBack} onWorkspace={()=>setPage('workspace')} busy={!!busy}/>}
- <footer><span>© A11y Studio <i>·</i> See the barriers. Fix the web.</span><span>为更包容的网页体验而设计</span></footer></div></main>
- {confirmApply&&<ConfirmDialog onClose={()=>setConfirmApply(false)} onConfirm={()=>void apply()}/> }</div>}
-function ConfirmDialog({onClose,onConfirm}:{onClose:()=>void;onConfirm:()=>void}){const ref=useRef<HTMLDialogElement>(null);useEffect(()=>{ref.current?.showModal()},[]);return <dialog ref={ref} className="modal" aria-labelledby="confirm-title" onClose={onClose}><button className="close" aria-label="关闭" onClick={onClose}><X size={18}/></button><span className="section-icon"><ShieldCheck size={20}/></span><h2 id="confirm-title">确认应用修复？</h2><p>系统会修改当前版本的副本，并重新扫描、检查页面结构与控件聚焦。验证失败时会继续保留原版本。</p><div className="confirm-actions"><button className="secondary" onClick={onClose}>再检查一下</button><button className="button dark" onClick={onConfirm}>确认并验证 <ArrowRight size={15}/></button></div></dialog>}
-function Report({state,onRollback,onWorkspace,busy}:{state:State;onRollback:(id:string)=>void;onWorkspace:()=>void;busy:boolean}){return <div className="report"><div className="metrics"><div><span>初始问题</span><strong>{state.summary.initial??'—'}</strong><small>原始版本扫描</small></div><div><span>已解决</span><strong>{state.summary.resolved}</strong><small>相对原始版本</small></div><div><span>残留</span><strong>{state.summary.remaining}</strong><small>原有问题</small></div><div><span>新增</span><strong>{state.summary.added}</strong><small>需要进一步检查</small></div></div><div className="report-grid"><section className="panel report-section"><div className="panel-head"><div><span className="kicker">VALIDATION</span><h2>修复与验证记录</h2></div></div>{state.verifications.length?state.verifications.map((v,i)=><div className="log-row" key={i}><span className={'log-icon '+(v.status==='passed'?'ok':'failed')}>{v.status==='passed'?<Check size={15}/>:<X size={15}/>}</span><div><b>{v.status==='passed'?'验证通过':'验证失败 · 已回滚'}</b><p>{v.reason}</p><small>{new Date(v.createdAt).toLocaleString('zh-CN')} · 解决 {v.resolved.length} / 残留 {v.remaining.length} / 新增 {v.added.length}</small>{v.diff&&<details><summary>查看修复证据与源码差异</summary><p>{v.proposalReason}</p><p>规范：{v.wcag?.join('、')||'规则依据'} {v.wcagUrl&&<a href={v.wcagUrl} target="_blank" rel="noreferrer">查看依据</a>}</p><pre className="evidence-diff">{v.diff}</pre><small>修改前 SHA-256：{v.beforeHash}<br/>修改后 SHA-256：{v.afterHash}</small></details>}</div></div>):<div className="blank"><ShieldCheck/><b>暂无修复记录</b><p>在工作台审核并应用补丁后，验证证据会出现在这里。</p></div>}</section><section className="panel report-section"><div className="panel-head"><div><span className="kicker">MANUAL REVIEW</span><h2>人工复核清单</h2></div></div><div className="review-list"><p>自动检测不能证明网页完全符合无障碍标准。建议逐项检查：</p><ul><li>键盘能否访问所有功能，焦点顺序是否合理</li><li>使用屏幕阅读器时，名称和提示是否准确</li><li>图片描述是否符合上下文，装饰图片是否合适</li><li>放大文字和缩放页面时，内容是否仍可使用</li></ul>{state.current?.incomplete?.map(i=><div className="manual-item" key={i.ruleId}><Info size={14}/>{i.help} · {i.count} 项需要进一步判断</div>)}</div><div className="versions"><h3>版本记录</h3>{state.snapshots.map((s,i)=><div key={s.id}><span><b>V{i}</b> {s.description}{s.id===state.project.currentSnapshot?' · 当前':''}</span>{s.id!==state.project.currentSnapshot&&<button disabled={busy} onClick={()=>onRollback(s.id)}><RotateCcw size={13}/>恢复</button>}</div>)}</div></section></div><div className="report-actions"><button className="secondary" onClick={onWorkspace}>返回工作台</button><a className="button dark" href={`/api/projects/${state.project.id}/export`}><Download size={15}/>下载源码与报告</a></div></div>}
+const issueNames: Record<string, [string, string]> = {
+  'image-alt': ['图片缺少替代文本', '屏幕阅读器用户无法了解这张图片的内容。'],
+  label: ['表单控件缺少标签', '用户可能无法判断输入框的用途。'],
+  'button-name': ['按钮缺少名称', '屏幕阅读器无法读出按钮的用途。'],
+  'link-name': ['链接缺少名称', '用户无法了解链接的目标。'],
+  'color-contrast': ['文字对比度不足', '低视力用户可能难以看清文字。'],
+};
+const impactName: Record<string, string> = {
+  critical: '严重', serious: '较严重', moderate: '中等', minor: '轻微', unknown: '待复核',
+};
+const issueTitle = (issue: Issue) => issueNames[issue.ruleId]?.[0] ?? issue.help;
+const dateText = (date: string) => new Date(date).toLocaleString('zh-CN');
+type Fixture = { id: string; name: string; description: string };
+type Project = { id: string; name: string; assets?: { stylesheets: number; images: number; skipped: number } };
+type Knowledge = { title: string; url: string; guidance: string; refs: string[] };
+type Source = 'html' | 'zip' | 'url';
+type Selection = { issueId: string } | { history: HistoryItem } | null;
 
-createRoot(document.getElementById('root')!).render(<App/>);
+async function request<T>(url: string, options?: RequestInit): Promise<T> {
+  const response = await fetch(url, options);
+  const data = await response.json().catch(() => null);
+  if (!response.ok || (data === null && response.headers.get('content-type')?.includes('text/html'))) {
+    throw new Error(data?.error ?? `服务请求失败（HTTP ${response.status}）。`);
+  }
+  return data as T;
+}
+
+function post<T>(url: string, data: unknown = {}) {
+  return request<T>(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data) });
+}
+
+async function waitJob<T>(id: string): Promise<T> {
+  for (let i = 0; i < 120; i++) {
+    const job = await request<{ status: string; result: T; error?: string }>('/api/jobs/' + id);
+    if (job.status === 'completed') return job.result;
+    if (job.status === 'failed') throw new Error(job.error ?? '任务失败。');
+    if (job.status === 'cancelled') throw new Error('任务已取消。');
+    await new Promise(resolve => setTimeout(resolve, 500));
+  }
+  throw new Error('任务仍在运行，请稍后重新打开项目查看结果。');
+}
+
+function App() {
+  const [state, setState] = useState<State | null>(null);
+  const [projects, setProjects] = useState<Project[]>([]);
+  const [fixtures, setFixtures] = useState<Fixture[]>([]);
+  const [selection, setSelection] = useState<Selection>(null);
+  const [proposal, setProposal] = useState<Proposal | null>(null);
+  const [input, setInput] = useState('');
+  const [busy, setBusy] = useState('');
+  const [jobId, setJobId] = useState('');
+  const [cancelRequested, setCancelRequested] = useState(false);
+  const [error, setError] = useState('');
+  const [notice, setNotice] = useState('');
+  const [filter, setFilter] = useState('all');
+  const [view, setView] = useState<EvidenceView>('visual');
+  const [list, setList] = useState<'open' | 'history'>('open');
+  const [page, setPage] = useState<'workspace' | 'report'>('workspace');
+  const [ai, setAi] = useState(false);
+  const [confirmApply, setConfirmApply] = useState(false);
+  const [knowledge, setKnowledge] = useState<Knowledge | null>(null);
+  const running = useRef(false);
+  const heading = useRef<HTMLHeadingElement>(null);
+  const feedback = useRef<HTMLDivElement>(null);
+  const evidenceFocus = useRef<HTMLDivElement>(null);
+  const issue = state?.current?.issues.find(item => selection && 'issueId' in selection && item.id === selection.issueId);
+  const history = selection && 'history' in selection ? selection.history : undefined;
+  const selectedRule = (history?.issue ?? issue)?.ruleId;
+  const route = state ? '/api/projects/' + state.project.id : '';
+  const working = Boolean(busy);
+
+  async function loadHome() {
+    try {
+      const [examples, recent, status] = await Promise.all([
+        request<Fixture[]>('/api/fixtures'), request<Project[]>('/api/projects'),
+        request<{ configured: boolean }>('/api/status'),
+      ]);
+      setFixtures(examples);
+      setProjects(recent);
+      setAi(status.configured);
+    } catch (problem) {
+      setError(problem instanceof Error ? problem.message : '无法加载工作区。');
+    }
+  }
+
+  useEffect(() => { void loadHome(); }, []);
+  useEffect(() => {
+    setKnowledge(null);
+    if (!selectedRule) return;
+    const controller = new AbortController();
+    void request<Knowledge | null>('/api/knowledge/' + encodeURIComponent(selectedRule), { signal: controller.signal })
+      .then(value => { if (!controller.signal.aborted) setKnowledge(value); })
+      .catch(() => {});
+    return () => controller.abort();
+  }, [selectedRule]);
+
+  function run(label: string, action: () => Promise<void>) {
+    if (running.current) return;
+    running.current = true;
+    setBusy(label);
+    setError('');
+    setNotice('');
+    void action().catch(problem => {
+      setError(problem instanceof Error ? problem.message : '操作失败，请重试。');
+      requestAnimationFrame(() => feedback.current?.focus());
+    }).finally(() => {
+      running.current = false;
+      setBusy('');
+      setJobId('');
+      setCancelRequested(false);
+    });
+  }
+
+  async function runJob<T>(url: string) {
+    const job = await post<{ id: string }>(url);
+    setJobId(job.id);
+    try { return await waitJob<T>(job.id); }
+    finally { setJobId(''); setCancelRequested(false); }
+  }
+
+  async function cancelJob() {
+    setCancelRequested(true);
+    try { await post('/api/jobs/' + jobId + '/cancel'); }
+    catch (problem) {
+      setCancelRequested(false);
+      setError(problem instanceof Error ? problem.message : '取消请求失败。');
+    }
+  }
+
+  async function refresh(pid: string) {
+    const next = await request<State>('/api/projects/' + pid);
+    setState(next);
+    return next;
+  }
+
+  function openPage(next: 'workspace' | 'report') {
+    setPage(next);
+    requestAnimationFrame(() => heading.current?.focus());
+  }
+
+  function resetSelection() {
+    setSelection(null);
+    setProposal(null);
+    setFilter('all');
+    setView('visual');
+    setList('open');
+  }
+
+  function openProject(pid: string) {
+    run('正在加载项目…', async () => {
+      resetSelection();
+      openPage('workspace');
+      const next = await refresh(pid);
+      if (!next.current) {
+        setBusy('正在扫描项目快照…');
+        await runJob('/api/projects/' + pid + '/audits');
+        await refresh(pid);
+      }
+    });
+  }
+
+  function createProject(data: FormData | string) {
+    run(typeof data === 'string' ? '正在获取公开网页与静态资源…' : '正在导入项目…', async () => {
+      const project = typeof data === 'string'
+        ? await post<Project>('/api/projects/import-url', { url: data })
+        : await request<Project>('/api/projects', { method: 'POST', body: data });
+      setProjects(previous => [project, ...previous.filter(item => item.id !== project.id)]);
+      resetSelection();
+      await refresh(project.id);
+      openPage('workspace');
+      setBusy('正在运行真实无障碍检测…');
+      await runJob('/api/projects/' + project.id + '/audits');
+      await refresh(project.id);
+      const assets = project.assets;
+      setNotice(assets
+        ? `URL 快照已导入并完成检测。保存 ${assets.stylesheets} 个样式表、${assets.images} 张图片，跳过或未能获取 ${assets.skipped} 处资源引用。`
+        : '项目已导入并完成真实检测。');
+    });
+  }
+
+  function scanAgain() {
+    if (!state) return;
+    run('正在运行无障碍检测…', async () => {
+      await runJob(route + '/audits');
+      await refresh(state.project.id);
+      if (!history) resetSelection();
+      setNotice('检测完成。');
+    });
+  }
+
+  function chooseIssue(item: Issue) {
+    setSelection({ issueId: item.id });
+    setProposal(null);
+    setInput(item.ruleId === 'color-contrast' ? '#1c2731' : '');
+    setView('visual');
+  }
+
+  function chooseHistory(item: HistoryItem, nextView: EvidenceView = 'visual', moveFocus = false) {
+    setList('history');
+    setSelection({ history: item });
+    setProposal(null);
+    setView(nextView);
+    setPage('workspace');
+    if (moveFocus) requestAnimationFrame(() => evidenceFocus.current?.focus());
+  }
+
+  function propose(source: 'ai' | 'manual') {
+    if (!issue) return;
+    run(source === 'ai' ? '正在生成 AI 建议…' : '正在生成补丁预览…', async () => {
+      const next = await post<Proposal>(route + '/issues/' + issue.id + '/proposals', { source, value: input });
+      setProposal(next);
+      setInput(next.patch.value);
+      setView('diff');
+      setNotice('建议已生成，请审核实际源码差异。');
+    });
+  }
+
+  function apply() {
+    if (!proposal || !state) return;
+    setConfirmApply(false);
+    run('正在应用补丁并重新验证…', async () => {
+      const result = await runJob<Verification>('/api/proposals/' + proposal.id + '/apply');
+      await refresh(state.project.id);
+      setProposal(null);
+      const target = result.resolved.find(item => item.id === result.patch?.issueId) ?? result.resolved[0];
+      if (result.status === 'passed' && target) {
+        chooseHistory({ verification: result, issue: target }, 'semantics', true);
+        setNotice(result.reason);
+      } else {
+        setView('visual');
+        setError(result.reason);
+        requestAnimationFrame(() => feedback.current?.focus());
+      }
+    });
+  }
+
+  function reject() {
+    if (!proposal) return;
+    run('正在关闭补丁建议…', async () => {
+      await post('/api/proposals/' + proposal.id + '/reject');
+      setProposal(null);
+      setView('visual');
+      setNotice('建议已拒绝，当前版本继续使用。');
+    });
+  }
+
+  function rollback(id: string) {
+    if (!state) return;
+    run('正在恢复版本…', async () => {
+      await post(route + '/rollback', { snapshotId: id });
+      await refresh(state.project.id);
+      if (!history) resetSelection();
+      setNotice('已恢复到所选有效版本。历史证据仍可查看。');
+    });
+  }
+
+  const records = state?.verifications.flatMap(verification =>
+    verification.status === 'passed' ? verification.resolved.map(item => ({ verification, issue: item })) : [],
+  ) ?? [];
+  const unresolved = state?.current?.issues ?? [];
+  const filtered = unresolved.filter(item => filter === 'all' || item.impact === filter);
+
+  return <div className="app">
+    <a className="skip-link" href="#page-title">跳到主要内容</a>
+    <aside className="sidebar">
+      <a className="logo" href="/" aria-label="A11y Studio 首页">
+        <span className="logomark"><span /><span /><span /><span /></span>
+        <span><strong>A11y Studio</strong><small>ACCESSIBILITY WORKSPACE</small></span>
+      </a>
+      <nav aria-label="工作空间导航">
+        <div className="navlabel">工作空间</div>
+        <button className={'nav ' + (page === 'workspace' ? 'active' : '')} aria-current={page === 'workspace' ? 'page' : undefined} onClick={() => openPage('workspace')}><ScanSearch size={17} />诊断工作台</button>
+        <button className={'nav ' + (page === 'report' ? 'active' : '')} aria-current={page === 'report' ? 'page' : undefined} disabled={!state} onClick={() => openPage('report')}><Activity size={17} />结果报告</button>
+      </nav>
+      <div className="sidebar-bottom">
+        <div className="sidebox"><ShieldCheck size={19} /><strong>受控修复</strong><p>审核补丁、复测副本、保留版本。</p></div>
+        <div className="local-status"><i />本地工作区</div>
+      </div>
+    </aside>
+    <main className={state ? undefined : 'home-page'}>
+      <header className="topbar"><div>工作空间 <span>/</span> <b>{state ? page === 'report' ? '结果报告' : '诊断工作台' : '导入项目'}</b></div><div className="topright"><span className="pill"><i />本地模式</span></div></header>
+      <div className={state ? 'content' : 'content home-content'}>
+        <div className={'page-intro' + (state ? '' : ' hero')}>
+          <div><div className="eyebrow"><span />ACCESSIBILITY WORKSPACE</div>
+            <h1 id="page-title" tabIndex={-1} ref={heading}>{state ? page === 'report' ? '结果报告' : '网页无障碍工作台' : '让每个人，都能更好地使用网页'}</h1>
+            <p>{state ? page === 'report' ? '回顾实际问题变化、验证证据和人工复核项。' : '定位问题、审核补丁，并对比修复前后的证据。' : '面向网页开发者、设计师和小型团队的 AI 无障碍检测与智能修复平台。用户上传自己的网页后，系统自动检测问题、可视化定位、解释影响、提供 AI 修复方案，并在用户确认后修改代码，重新验证修复效果，最终导出网页和检测报告。'}</p>
+          </div>
+          {state && <div className="intro-actions">
+            <button className="secondary" disabled={working} onClick={() => { setState(null); resetSelection(); openPage('workspace'); setError(''); setNotice(''); }}><Layers size={15} />切换项目</button>
+            <ExportButton route={route} disabled={working} />
+          </div>}
+        </div>
+        {error && <div className="alert error" role="alert" tabIndex={-1} ref={feedback}><Info size={17} /><span>{error}</span><button onClick={() => setError('')} aria-label="关闭错误提示"><X size={16} /></button></div>}
+        {notice && <div className="alert success" role="status"><CheckCircle2 size={17} /><span>{notice}</span><button onClick={() => setNotice('')} aria-label="关闭操作提示"><X size={16} /></button></div>}
+        {busy && <div className="busy"><span role="status"><LoaderCircle className="spin" size={16} />{busy}</span>{jobId && <button className="cancel-job" disabled={cancelRequested} onClick={() => void cancelJob()}>{cancelRequested ? '正在取消…' : '取消任务'}</button>}</div>}
+
+        {!state ? <Home fixtures={fixtures} projects={projects} busy={working} onCreate={createProject} onOpen={openProject} onError={setError} /> :
+          page === 'report' ? <Report state={state} busy={working} onRollback={rollback} onOpen={(item) => chooseHistory(item, 'visual', true)} onWorkspace={() => openPage('workspace')} /> :
+          <>
+            <div className="project-strip">
+              <div className="project-symbol"><FileCode2 size={19} /></div>
+              <div className="project-title"><b>{state.project.name}</b><span>{state.project.entry} · 当前版本 {versionLabel(state, state.project.currentSnapshot)}</span></div>
+              <div className="project-actions">
+                <button className="secondary" onClick={scanAgain} disabled={working}><RefreshCw size={14} />重新检测</button>
+                <select aria-label="切换项目版本" value={state.project.currentSnapshot} onChange={event => rollback(event.target.value)} disabled={working}>
+                  {state.snapshots.map((snapshot, index) => <option key={snapshot.id} value={snapshot.id}>V{index} · {snapshot.description}</option>)}
+                </select>
+              </div>
+            </div>
+            <Metrics state={state} />
+            <div className="workbench">
+              <section className="issues panel" aria-labelledby="issue-list-title">
+                <div className="panel-head"><div><span className="kicker">01 / DIAGNOSE</span><h2 id="issue-list-title">问题与历史</h2></div></div>
+                <div className="evidence-tabs list-tabs" role="group" aria-label="问题列表范围">
+                  <button aria-pressed={list === 'open'} onClick={() => setList('open')}>待处理 <span>{unresolved.length}</span></button>
+                  <button aria-pressed={list === 'history'} onClick={() => setList('history')}>已解决 <span>{records.length}</span></button>
+                </div>
+                {list === 'open' && unresolved.length > 0 && <div className="filter-row"><label htmlFor="severity-filter">严重程度</label>
+                  <select id="severity-filter" value={filter} onChange={event => setFilter(event.target.value)}>
+                    <option value="all">全部</option>
+                    {Object.entries(impactName).map(([id, label]) => <option key={id} value={id}>{label}</option>)}
+                  </select>
+                </div>}
+                <div className="issue-list">
+                  {list === 'open' ? filtered.length ? filtered.map(item =>
+                    <IssueButton key={item.id} issue={item} active={issue?.id === item.id} disabled={working} onClick={() => chooseIssue(item)} />,
+                  ) : <Blank icon={<CheckCircle2 />} title={!state.current ? '等待首次检测' : unresolved.length ? '没有匹配的问题' : '当前无待处理问题'}>
+                    {!state.current ? '扫描完成后会显示检测结果。' : unresolved.length ? '请选择其他严重程度。' : records.length ? '可在「已解决」中查看历史证据。' : '仍可在报告中查看人工复核清单。'}
+                  </Blank> : records.length ? records.map(item =>
+                    <IssueButton key={item.verification.id + item.issue.id} issue={item.issue}
+                      active={history?.verification.id === item.verification.id && history.issue.id === item.issue.id}
+                      disabled={working} history={`${versionLabel(state, item.verification.fromSnapshot)} → ${versionLabel(state, item.verification.toSnapshot)}`}
+                      onClick={() => chooseHistory(item)} />,
+                  ) : <Blank icon={<History />} title="暂无已解决记录">通过自动复测的修复会显示在这里。</Blank>}
+                </div>
+                <div className="issue-foot"><Info size={15} /><span>已解决列表包含历史版本，当前问题以所选版本为准。</span></div>
+              </section>
+              <div className="evidence-column" role="group" tabIndex={-1} ref={evidenceFocus} aria-label="修复证据">
+                <Evidence state={state} issue={issue} history={history} proposal={proposal} view={view} onView={setView} />
+              </div>
+              <Assistant issue={issue} history={history} knowledge={knowledge} ai={ai} busy={working} proposal={proposal}
+                input={input} onInput={setInput} onPropose={propose} onConfirm={() => setConfirmApply(true)} onReject={reject} />
+            </div>
+            <div className="bottom-note"><ShieldCheck size={16} /><span>修复应用于本地副本。自动复测结果和人工检查项见报告。</span><button onClick={() => openPage('report')}>查看完整报告 <ArrowRight size={14} /></button></div>
+          </>}
+        <footer><span>A11y Studio · 网页无障碍工作区</span><span>基于 Chromium 和 axe-core</span></footer>
+      </div>
+    </main>
+    {confirmApply && <ConfirmDialog onClose={() => setConfirmApply(false)} onConfirm={apply} />}
+  </div>;
+}
+
+function Blank({ icon, title, children }: { icon: ReactNode; title: string; children: ReactNode }) {
+  return <div className="blank">{icon}<b>{title}</b><p>{children}</p></div>;
+}
+
+function Home({ fixtures, projects, busy, onCreate, onOpen, onError }: {
+  fixtures: Fixture[]; projects: Project[]; busy: boolean;
+  onCreate: (data: FormData | string) => void; onOpen: (id: string) => void; onError: (error: string) => void;
+}) {
+  const [source, setSource] = useState<Source>('html');
+  const [url, setUrl] = useState('');
+  const fileInput = useRef<HTMLInputElement>(null);
+  function chooseFile(file: File) {
+    if (busy) return;
+    if (!/\.(?:html?|zip)$/i.test(file.name)) return onError('请选择 HTML 或 ZIP 文件。');
+    if (file.size > 8 * 1024 * 1024) return onError('文件不能超过 8 MB。');
+    const data = new FormData();
+    data.set('file', file);
+    onCreate(data);
+  }
+
+  function submitUrl(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!busy) onCreate(url.trim());
+  }
+
+  return <div className="onboarding">
+    <section className="import-card" aria-labelledby="import-title">
+      <div className="card-heading"><div><span className="section-tag">NEW PROJECT</span><h2 id="import-title">导入网页项目</h2><p>选择你拥有或获准检测的网页。</p></div><span className="section-icon"><FileUp size={20} /></span></div>
+      <div className="evidence-tabs import-tabs" role="group" aria-label="网页导入方式">
+        <button aria-pressed={source === 'html'} disabled={busy} onClick={() => setSource('html')}><FileCode2 size={16} />HTML</button>
+        <button aria-pressed={source === 'zip'} disabled={busy} onClick={() => setSource('zip')}><FileArchive size={16} />ZIP</button>
+        <button aria-pressed={source === 'url'} disabled={busy} onClick={() => setSource('url')}><Link2 size={16} />URL</button>
+      </div>
+      {source === 'url' ? <form className="url-form" onSubmit={submitUrl}>
+        <label htmlFor="page-url">公开网页地址</label>
+        <input id="page-url" type="url" inputMode="url" placeholder="https://example.com/page" value={url} maxLength={2048} required disabled={busy} onChange={event => setUrl(event.target.value)} aria-describedby="url-scope" />
+        <p id="url-scope">获取静态 HTML 与受支持的同源资源。登录内容和依赖脚本渲染的页面可能无法完整呈现。修复仅保存到本地快照。</p>
+        <button className="button dark" disabled={busy}>导入 URL 并检测 <ArrowRight size={15} /></button>
+      </form> : <div className="dropzone" onDragOver={event => event.preventDefault()} onDrop={event => {
+        event.preventDefault();
+        const file = event.dataTransfer.files[0];
+        if (file) chooseFile(file);
+      }}>
+        <div className="upload-icon"><FileUp size={24} /></div>
+        <b>{source === 'html' ? '上传单个 HTML 文件' : '上传静态网页 ZIP'}</b>
+        <span>{source === 'html' ? '支持 .html / .htm' : '可包含 HTML、CSS 与本地图片'} · 可拖放 · 最大 8 MB</span>
+        <input ref={fileInput} type="file" accept={source === 'html' ? '.html,.htm' : '.zip'} hidden onChange={event => {
+          const file = event.target.files?.[0];
+          if (file) chooseFile(file);
+          event.target.value = '';
+        }} />
+        <button className="button dark" disabled={busy} onClick={() => fileInput.current?.click()}>选择文件 <ArrowRight size={15} /></button>
+      </div>}
+      <div className="import-note"><LockKeyhole size={15} />网页自带脚本不会在检测环境中执行。</div>
+    </section>
+    <section className="examples">
+      <div className="section-title"><div><span className="section-tag">DEMO PROJECTS</span><h2>从示例开始</h2></div></div>
+      <div className="example-list">{fixtures.map((fixture, index) => <button key={fixture.id} className="example-card" disabled={busy} onClick={() => {
+        const form = new FormData();
+        form.set('fixture', fixture.id);
+        onCreate(form);
+      }}><span className="example-number">0{index + 1}</span><span><b>{fixture.name}</b><small>{fixture.description}</small></span><ArrowUpRight size={17} /></button>)}</div>
+      {projects.length > 0 && <><div className="section-title recent-title"><div><span className="section-tag">RECENT PROJECTS</span><h2>最近项目</h2></div></div>
+        <div className="recent-list">{projects.slice(0, 6).map(project => <button key={project.id} onClick={() => onOpen(project.id)} disabled={busy}><FileCode2 size={16} /><span>{project.name}</span><ChevronRight size={15} /></button>)}</div></>}
+    </section>
+    <section className="steps" aria-label="修复流程">
+      <div><ScanSearch /><span>01</span><b>发现问题</b><small>运行真实扫描，定位页面元素</small></div>
+      <div><Sparkles /><span>02</span><b>审核修复</b><small>查看规范、建议和实际源码差异</small></div>
+      <div><ShieldCheck /><span>03</span><b>验证结果</b><small>复测、比较证据并导出报告</small></div>
+    </section>
+  </div>;
+}
+
+function IssueButton({ issue, active, history, disabled, onClick }: {
+  issue: Issue; active: boolean; history?: string; disabled: boolean; onClick: () => void;
+}) {
+  return <button className={'issue ' + (active ? 'selected' : '')} aria-pressed={active} disabled={disabled} onClick={onClick}>
+    <span className={'issue-dot' + (history ? ' fixed' : '')} aria-hidden="true">{history ? <Check size={16} /> : '!'}</span>
+    <span><b>{issueTitle(issue)}</b><small>{issue.selector || '页面级问题'}</small>
+      <em className={'severity ' + (history ? 'fixed' : issue.impact)}>{history ?? impactName[issue.impact] ?? '待复核'}</em></span><ChevronRight size={15} />
+  </button>;
+}
+
+function Assistant({ issue, history, knowledge, ai, busy, proposal, input, onInput, onPropose, onConfirm, onReject }: {
+  issue?: Issue; history?: HistoryItem; knowledge: Knowledge | null; ai: boolean; busy: boolean;
+  proposal: Proposal | null; input: string; onInput: (value: string) => void;
+  onPropose: (source: 'ai' | 'manual') => void; onConfirm: () => void; onReject: () => void;
+}) {
+  const target = history?.issue ?? issue;
+  const verification = history?.verification;
+  const refs = verification?.wcag ?? proposal?.wcag ?? knowledge?.refs ?? target?.wcag ?? [];
+  return <section className="assistant panel" aria-labelledby="assistant-title">
+    <div className="panel-head"><div><span className="kicker">03 / {history ? 'VERIFY' : 'REPAIR'}</span><h2 id="assistant-title">{history ? '验证结论' : '修复助手'}</h2></div>
+      {!history && <span className="ai-pill"><Sparkles size={13} />{ai ? 'AI 已配置' : 'AI 未配置'}</span>}
+    </div>
+    {target ? <div className="assistant-body">
+      <div className="issue-heading"><span className={'issue-dot' + (history ? ' fixed' : '')} aria-hidden="true">{history ? <Check size={16} /> : '!'}</span><div><h3>{issueTitle(target)}</h3><span>{target.ruleId} · {impactName[target.impact] ?? target.impact}</span></div></div>
+      <div className="detail-block"><h4>使用影响</h4><p>{issueNames[target.ruleId]?.[1] ?? target.description}</p></div>
+      <div className="detail-block"><h4>{history ? '修复前元素' : '问题元素'}</h4><code>{target.html}</code></div>
+      <div className="detail-block"><h4>规则与 WCAG 依据</h4>
+        {refs.length > 0 && <div className="rule-tags">{refs.map(ref => <span key={ref}>{ref}</span>)}</div>}
+        <a href={verification?.wcagUrl || proposal?.wcagUrl || knowledge?.url || target.helpUrl} target="_blank" rel="noreferrer">{proposal?.wcagTitle || knowledge?.title || '查看规则与规范说明'} <ArrowUpRight size={12} /></a>
+        {(proposal?.guidance || knowledge?.guidance) && <p>{proposal?.guidance || knowledge?.guidance}</p>}
+      </div>
+      {verification ? <div className="verification-card">
+        <h4><CheckCircle2 size={16} />复测通过</h4>
+        <p>{verification.reason}</p>
+        <ul>
+          <li>该问题在修复后扫描中消失</li>
+          {verification.structurePassed && <li>页面结构检查通过</li>}
+          {verification.functionPassed && <li>静态控件与聚焦检查通过</li>}
+          <li>新增自动检测问题 {verification.added.length} 项</li>
+          {verification.contrastCheck?.valid && <li>对比度 {verification.contrastCheck.ratio.toFixed(2)}:1，要求 {verification.contrastCheck.required}:1</li>}
+        </ul>
+        <p>{verification.proposalReason}</p><small>{dateText(verification.createdAt)}</small>
+      </div> : issueNames[target.ruleId] ? <>
+        <label className="input-label" htmlFor="repair-value">{target.ruleId === 'color-contrast' ? '修复颜色' : '建议的文本内容'}</label>
+        <input id="repair-value" value={input} maxLength={160} disabled={busy} onChange={event => onInput(event.target.value)}
+          placeholder={target.ruleId === 'image-alt' ? '描述图片，装饰图片可留空' : target.ruleId === 'color-contrast' ? '#1c2731' : '填写符合实际用途的名称'} />
+        <p className="muted note">{ai ? 'AI 建议会向配置的模型服务发送相关局部代码。' : '可手动填写内容并生成补丁。配置模型服务后可使用 AI 建议。'}</p>
+        <div className="repair-actions">
+          <button className="button dark" disabled={busy} onClick={() => onPropose('manual')}><Code2 size={15} />生成补丁预览</button>
+          <button className="secondary" disabled={busy || !ai} onClick={() => onPropose('ai')}><Sparkles size={15} />AI 生成建议</button>
+        </div>
+        {proposal && <div className="proposal">
+          <div className="proposal-head"><b>{proposal.source === 'ai' ? 'AI 修复建议' : '人工修复建议'}</b><span>待审核</span></div>
+          <p>{proposal.reason}</p><p className="muted">{proposal.risk}</p>
+          <div className="repair-actions">
+            <button className="button dark" disabled={busy || input !== proposal.patch.value} onClick={onConfirm}><Check size={15} />审核并应用</button>
+            <button className="secondary" disabled={busy} onClick={onReject}>保留原样</button>
+          </div>
+          <small>{input !== proposal.patch.value ? '输入已更新，请重新生成补丁预览。' : '应用前请核对源码差异。'}</small>
+        </div>}
+      </> : <p className="manual-only">此规则需要人工处理。可查看规范和报告中的复核项。</p>}
+    </div> : <Blank icon={<Sparkles />} title="选择一个问题">查看使用影响、修复依据和可审核的补丁。</Blank>}
+  </section>;
+}
+
+function Metrics({ state }: { state: State }) {
+  return <div className="metrics">
+    <div><span>初始问题</span><strong>{state.summary.initial ?? '—'}</strong><small>原始版本扫描</small></div>
+    <div className="metric-ok"><span>已解决</span><strong>{state.current ? state.summary.resolved : '—'}</strong><small>相对原始版本</small></div>
+    <div><span>原有问题残留</span><strong>{state.current ? state.summary.remaining : '—'}</strong><small>仍需处理</small></div>
+    <div><span>新增问题</span><strong>{state.current ? state.summary.added : '—'}</strong><small>相对原始版本</small></div>
+  </div>;
+}
+
+function ExportButton({ route, disabled }: { route: string; disabled: boolean }) {
+  return disabled ? <button className="button dark" disabled><Download size={15} />导出项目 ZIP</button>
+    : <a className="button dark" href={route + '/export'}><Download size={15} />导出项目 ZIP</a>;
+}
+
+function Report({ state, onRollback, onOpen, onWorkspace, busy }: {
+  state: State; onRollback: (id: string) => void; onOpen: (item: HistoryItem) => void; onWorkspace: () => void; busy: boolean;
+}) {
+  return <div className="report">
+    <Metrics state={state} />
+    <div className="export-banner"><span className="section-icon"><Download size={19} /></span><div><h2>导出源码与报告</h2><p>ZIP 包含当前本地快照、扫描截图、HTML / JSON 报告和验证日志。</p></div><ExportButton route={'/api/projects/' + state.project.id} disabled={busy} /></div>
+    <div className="report-grid">
+      <section className="panel report-section"><div className="panel-head"><div><span className="kicker">VALIDATION</span><h2>修复与验证记录</h2></div></div>
+        {state.verifications.length ? state.verifications.map(item => <div className="log-row" key={item.id}>
+          <span className={'log-icon ' + (item.status === 'passed' ? 'ok' : 'failed')} aria-hidden="true">{item.status === 'passed' ? <Check size={15} /> : <X size={15} />}</span>
+          <div><b>{item.status === 'passed' ? '验证通过' : '验证失败 · 已保留原版本'} · {versionLabel(state, item.fromSnapshot)} → {versionLabel(state, item.toSnapshot)}</b>
+            <p>{item.reason}</p><small>{dateText(item.createdAt)} · 解决 {item.resolved.length} / 残留 {item.remaining.length} / 新增 {item.added.length}</small>
+            {item.status === 'passed' && item.resolved.map(resolved => <button className="record-link" key={resolved.id} disabled={busy} onClick={() => onOpen({ issue: resolved, verification: item })}>{issueTitle(resolved)} · 查看证据 <ArrowRight size={14} /></button>)}
+            {item.diff && <details><summary>补丁与源码校验</summary>
+              <p>{item.proposalReason}</p>
+              {item.wcagUrl && <a href={item.wcagUrl} target="_blank" rel="noreferrer">{item.wcag?.join('、') || '规范依据'}</a>}
+              <pre className="evidence-diff" tabIndex={0} aria-label="修复补丁">{item.diff}</pre>
+              <small className="file-hashes">修改前 SHA-256 {item.beforeHash}<br />修改后 SHA-256 {item.afterHash}</small>
+            </details>}
+          </div>
+        </div>) : <Blank icon={<ShieldCheck />} title="暂无修复记录">审核并应用补丁后，验证证据会显示在这里。</Blank>}
+      </section>
+      <section className="panel report-section"><div className="panel-head"><div><span className="kicker">MANUAL REVIEW</span><h2>人工复核与版本</h2></div></div>
+        <div className="review-list">
+          <p>自动扫描覆盖部分 WCAG 规则，请结合以下人工检查。</p>
+          <ul><li>键盘能否访问所有功能，焦点顺序是否合理</li><li>屏幕阅读器读出的名称和提示是否准确</li><li>图片描述是否符合语境，装饰图片是否正确标记</li><li>放大文字和页面后，内容是否仍可使用</li></ul>
+          {state.current?.incomplete.map(item => <div className="manual-item" key={item.ruleId}><Info size={14} />{item.help} · {item.count} 项需要进一步判断</div>)}
+        </div>
+        <div className="versions"><h3>版本记录</h3>{state.snapshots.map((snapshot, index) => <div key={snapshot.id}>
+          <span><b>V{index}</b> {snapshot.description}{snapshot.id === state.project.currentSnapshot ? ' · 当前' : ''}</span>
+          {snapshot.id !== state.project.currentSnapshot && <button disabled={busy} aria-label={`恢复版本 V${index}`} onClick={() => onRollback(snapshot.id)}><RotateCcw size={13} />恢复</button>}
+        </div>)}</div>
+      </section>
+    </div>
+    <div className="report-actions"><button className="secondary" onClick={onWorkspace}>返回工作台</button></div>
+  </div>;
+}
+
+function ConfirmDialog({ onClose, onConfirm }: { onClose: () => void; onConfirm: () => void }) {
+  const dialog = useRef<HTMLDialogElement>(null);
+  const cancel = useRef<HTMLButtonElement>(null);
+  useEffect(() => {
+    const element = dialog.current;
+    const previous = document.activeElement;
+    element?.showModal();
+    cancel.current?.focus();
+    return () => {
+      element?.close();
+      if (previous instanceof HTMLElement && previous.isConnected) previous.focus();
+    };
+  }, []);
+  return <dialog ref={dialog} className="modal" aria-labelledby="confirm-title" aria-describedby="confirm-description" onCancel={event => { event.preventDefault(); onClose(); }}>
+    <button className="close" aria-label="关闭" onClick={onClose}><X size={18} /></button>
+    <span className="section-icon"><ShieldCheck size={20} /></span>
+    <h2 id="confirm-title">确认应用修复？</h2>
+    <p id="confirm-description">系统会修改当前版本的副本，并重新扫描、检查页面结构与控件聚焦。复测失败时继续使用上一个有效版本。</p>
+    <div className="confirm-actions">
+      <button ref={cancel} className="secondary" onClick={onClose}>再检查一下</button>
+      <button className="button dark" onClick={onConfirm}>确认并验证 <ArrowRight size={15} /></button>
+    </div>
+  </dialog>;
+}
+
+createRoot(document.getElementById('root')!).render(<App />);

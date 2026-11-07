@@ -18,10 +18,17 @@ async function extract(buffer:Buffer, dest:string) {
     });zip.readEntry();
   });
 }
-export async function createProject(opts:{fixture?:string; file?:Express.Multer.File}) {
+export async function createProject(opts:{fixture?:string; file?:Express.Multer.File; captured?: { name: string; files: Map<string, Buffer> }}) {
   const pid=id(),sid=id(), dest=snapshotDir(pid,sid);fs.mkdirSync(dest,{recursive:true});
   try {let name='未命名项目';
     if(opts.fixture){ if(!['demo-form','demo-contrast','demo-mixed'].includes(opts.fixture))throw new Error('示例不存在。');name=({'demo-form':'课程报名','demo-contrast':'自然笔记','demo-mixed':'慢绿生活'} as Record<string,string>)[opts.fixture];fs.cpSync(path.join(ROOT,'fixtures',opts.fixture),dest,{recursive:true}); }
+    else if(opts.captured){
+      name = opts.captured.name;
+      for (const [filename, bytes] of opts.captured.files) {
+        validName(filename);
+        fs.writeFileSync(safePath(dest, filename), bytes);
+      }
+    }
     else if(opts.file){name=opts.file.originalname; const ext=path.extname(name).toLowerCase();if(ext==='.zip')await extract(opts.file.buffer,dest);else if(['.html','.htm'].includes(ext))fs.writeFileSync(path.join(dest,'index.html'),opts.file.buffer);else throw new Error('请上传 HTML 或 ZIP 文件。');}
     else throw new Error('请选择示例或上传项目。');
     const files=walk(dest);const html=files.filter(x=>/\.html?$/i.test(x)).sort();if(!html.length)throw new Error('项目中未找到 HTML 文件。');
