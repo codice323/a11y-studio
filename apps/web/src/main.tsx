@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react';
+import { useEffect, useRef, useState, type FormEvent, type KeyboardEvent, type ReactNode } from 'react';
 import { createRoot } from 'react-dom/client';
 import {
   Activity, ArrowRight, ArrowUpRight, Check, CheckCircle2, ChevronRight, Code2, Download,
@@ -19,6 +19,8 @@ const issueNames: Record<string, [string, string]> = {
 const impactName: Record<string, string> = {
   critical: '严重', serious: '较严重', moderate: '中等', minor: '轻微', unknown: '待复核',
 };
+const severityOrder = new Map(Object.keys(impactName).map((impact, index) => [impact, index]));
+const severityRank = (impact: string) => severityOrder.get(impact) ?? 4;
 const issueTitle = (issue: Issue) => issueNames[issue.ruleId]?.[0] ?? issue.help;
 const dateText = (date: string) => new Date(date).toLocaleString('zh-CN');
 type Fixture = { id: string; name: string; description: string };
@@ -26,6 +28,11 @@ type Project = { id: string; name: string; assets?: { stylesheets: number; image
 type Knowledge = { title: string; url: string; guidance: string; refs: string[] };
 type Source = 'html' | 'zip' | 'url';
 type Selection = { issueId: string } | { history: HistoryItem } | null;
+const controlTabs = [
+  { id: 'issues', label: '问题与历史' },
+  { id: 'assistant', label: 'AI 修复助手' },
+] as const;
+type ControlTab = typeof controlTabs[number]['id'];
 
 async function request<T>(url: string, options?: RequestInit): Promise<T> {
   const response = await fetch(url, options);
@@ -56,8 +63,7 @@ function App() {
   const [projects, setProjects] = useState<Project[]>([]);
   const [fixtures, setFixtures] = useState<Fixture[]>([]);
   const [selection, setSelection] = useState<Selection>(null);
-  const [proposal, setProposal] = useState<Proposal | null>(null);
-  const [input, setInput] = useState('');
+  const [drafts, setDrafts] = useState<Record<string, { value: string; proposal: Proposal | null }>>({});
   const [busy, setBusy] = useState('');
   const [jobId, setJobId] = useState('');
   const [cancelRequested, setCancelRequested] = useState(false);
@@ -66,6 +72,7 @@ function App() {
   const [filter, setFilter] = useState('all');
   const [view, setView] = useState<EvidenceView>('visual');
   const [list, setList] = useState<'open' | 'history'>('open');
+  const [controlTab, setControlTab] = useState<ControlTab>('issues');
   const [page, setPage] = useState<'workspace' | 'report'>('workspace');
   const [ai, setAi] = useState(false);
   const [confirmApply, setConfirmApply] = useState(false);
@@ -74,8 +81,14 @@ function App() {
   const heading = useRef<HTMLHeadingElement>(null);
   const feedback = useRef<HTMLDivElement>(null);
   const evidenceFocus = useRef<HTMLDivElement>(null);
+  const assistantPanel = useRef<HTMLDivElement>(null);
+  const tabButtons = useRef<Partial<Record<ControlTab, HTMLButtonElement | null>>>({});
   const issue = state?.current?.issues.find(item => selection && 'issueId' in selection && item.id === selection.issueId);
   const history = selection && 'history' in selection ? selection.history : undefined;
+  const draftKey = issue && state ? `${state.project.currentSnapshot}:${issue.id}` : '';
+  const draft = drafts[draftKey];
+  const proposal = draft?.proposal ?? null;
+  const input = draft?.value ?? (issue?.ruleId === 'color-contrast' ? '#1c2731' : '');
   const selectedRule = (history?.issue ?? issue)?.ruleId;
   const route = state ? '/api/projects/' + state.project.id : '';
   const working = Boolean(busy);
@@ -151,7 +164,8 @@ function App() {
 
   function resetSelection() {
     setSelection(null);
-    setProposal(null);
+    setControlTab('issues');
+    setDrafts({});
     setFilter('all');
     setView('visual');
     setList('open');
@@ -201,17 +215,48 @@ function App() {
 
   function chooseIssue(item: Issue) {
     setSelection({ issueId: item.id });
-    setProposal(null);
-    setInput(item.ruleId === 'color-contrast' ? '#1c2731' : '');
-    setView('visual');
+    openAssistant();
   }
 
-  function chooseHistory(item: HistoryItem, nextView: EvidenceView = 'visual', moveFocus = false) {
+  function openAssistant(moveFocus = true) {
+    setControlTab('assistant');
+    requestAnimationFrame(() => {
+      if (!assistantPanel.current) return;
+      assistantPanel.current.scrollTop = 0;
+      if (moveFocus) assistantPanel.current.focus({ preventScroll: true });
+    });
+  }
+
+  function handleControlTabKey(event: KeyboardEvent<HTMLButtonElement>, tab: ControlTab) {
+    let next: ControlTab;
+    switch (event.key) {
+      case 'Home': next = 'issues'; break;
+      case 'End': next = 'assistant'; break;
+      case 'ArrowLeft':
+      case 'ArrowRight': next = tab === 'issues' ? 'assistant' : 'issues'; break;
+      default: return;
+    }
+    event.preventDefault();
+    setControlTab(next);
+    tabButtons.current[next]?.focus();
+  }
+
+  function selectList(next: 'open' | 'history') {
+    if (next === list) return;
+    setList(next);
+    setSelection(null);
+  }
+
+  function saveDraft(value: string, next: Proposal | null) {
+    setDrafts(previous => ({ ...previous, [draftKey]: { value, proposal: next } }));
+  }
+
+  function chooseHistory(item: HistoryItem, nextView: EvidenceView = view, moveFocus = false) {
     setList('history');
     setSelection({ history: item });
-    setProposal(null);
     setView(nextView);
     setPage('workspace');
+    openAssistant(!moveFocus);
     if (moveFocus) requestAnimationFrame(() => evidenceFocus.current?.focus());
   }
 
@@ -219,8 +264,7 @@ function App() {
     if (!issue) return;
     run(source === 'ai' ? '正在生成 AI 建议…' : '正在生成补丁预览…', async () => {
       const next = await post<Proposal>(route + '/issues/' + issue.id + '/proposals', { source, value: input });
-      setProposal(next);
-      setInput(next.patch.value);
+      saveDraft(next.patch.value, next);
       setView('diff');
       setNotice('建议已生成，请审核实际源码差异。');
     });
@@ -232,7 +276,7 @@ function App() {
     run('正在应用补丁并重新验证…', async () => {
       const result = await runJob<Verification>('/api/proposals/' + proposal.id + '/apply');
       await refresh(state.project.id);
-      setProposal(null);
+      saveDraft(input, null);
       const target = result.resolved.find(item => item.id === result.patch?.issueId) ?? result.resolved[0];
       if (result.status === 'passed' && target) {
         chooseHistory({ verification: result, issue: target }, 'semantics', true);
@@ -249,7 +293,7 @@ function App() {
     if (!proposal) return;
     run('正在关闭补丁建议…', async () => {
       await post('/api/proposals/' + proposal.id + '/reject');
-      setProposal(null);
+      saveDraft(input, null);
       setView('visual');
       setNotice('建议已拒绝，当前版本继续使用。');
     });
@@ -269,7 +313,9 @@ function App() {
     verification.status === 'passed' ? verification.resolved.map(item => ({ verification, issue: item })) : [],
   ) ?? [];
   const unresolved = state?.current?.issues ?? [];
-  const filtered = unresolved.filter(item => filter === 'all' || item.impact === filter);
+  const filtered = unresolved
+    .filter(item => filter === 'all' || (filter === 'unknown' ? severityRank(item.impact) === 4 : item.impact === filter))
+    .sort((a, b) => severityRank(a.impact) - severityRank(b.impact) || a.id.localeCompare(b.id));
 
   return <div className="app">
     <a className="skip-link" href="#page-title">跳到主要内容</a>
@@ -318,39 +364,53 @@ function App() {
                 </select>
               </div>
             </div>
-            <Metrics state={state} />
             <div className="workbench">
-              <section className="issues panel" aria-labelledby="issue-list-title">
-                <div className="panel-head"><div><span className="kicker">01 / DIAGNOSE</span><h2 id="issue-list-title">问题与历史</h2></div></div>
-                <div className="evidence-tabs list-tabs" role="group" aria-label="问题列表范围">
-                  <button aria-pressed={list === 'open'} onClick={() => setList('open')}>待处理 <span>{unresolved.length}</span></button>
-                  <button aria-pressed={list === 'history'} onClick={() => setList('history')}>已解决 <span>{records.length}</span></button>
+              <div className="workbench-controls panel">
+                <div className="evidence-tabs control-tabs" role="tablist" aria-label="诊断工作台操作">
+                  {controlTabs.map(({ id, label }) => (
+                    <button key={id} type="button" role="tab" id={`control-tab-${id}`}
+                      ref={button => { tabButtons.current[id] = button; }}
+                      aria-controls={`control-panel-${id}`} aria-selected={controlTab === id}
+                      tabIndex={controlTab === id ? 0 : -1} onClick={() => setControlTab(id)}
+                      onKeyDown={event => handleControlTabKey(event, id)}>{label}</button>
+                  ))}
                 </div>
-                {list === 'open' && unresolved.length > 0 && <div className="filter-row"><label htmlFor="severity-filter">严重程度</label>
-                  <select id="severity-filter" value={filter} onChange={event => setFilter(event.target.value)}>
-                    <option value="all">全部</option>
-                    {Object.entries(impactName).map(([id, label]) => <option key={id} value={id}>{label}</option>)}
-                  </select>
-                </div>}
-                <div className="issue-list">
-                  {list === 'open' ? filtered.length ? filtered.map(item =>
-                    <IssueButton key={item.id} issue={item} active={issue?.id === item.id} disabled={working} onClick={() => chooseIssue(item)} />,
-                  ) : <Blank icon={<CheckCircle2 />} title={!state.current ? '等待首次检测' : unresolved.length ? '没有匹配的问题' : '当前无待处理问题'}>
-                    {!state.current ? '扫描完成后会显示检测结果。' : unresolved.length ? '请选择其他严重程度。' : records.length ? '可在「已解决」中查看历史证据。' : '仍可在报告中查看人工复核清单。'}
-                  </Blank> : records.length ? records.map(item =>
-                    <IssueButton key={item.verification.id + item.issue.id} issue={item.issue}
-                      active={history?.verification.id === item.verification.id && history.issue.id === item.issue.id}
-                      disabled={working} history={`${versionLabel(state, item.verification.fromSnapshot)} → ${versionLabel(state, item.verification.toSnapshot)}`}
-                      onClick={() => chooseHistory(item)} />,
-                  ) : <Blank icon={<History />} title="暂无已解决记录">通过自动复测的修复会显示在这里。</Blank>}
+                <div className="control-panel issues-control-panel" role="tabpanel" id="control-panel-issues"
+                  aria-labelledby="control-tab-issues" tabIndex={0} hidden={controlTab !== 'issues'}>
+                  <div className="evidence-tabs list-tabs" role="group" aria-label="问题列表范围">
+                    <button aria-pressed={list === 'open'} disabled={working} onClick={() => selectList('open')}>待处理 <span>{unresolved.length}</span></button>
+                    <button aria-pressed={list === 'history'} disabled={working} onClick={() => selectList('history')}>已解决 <span>{records.length}</span></button>
+                  </div>
+                  {list === 'open' && unresolved.length > 0 && <div className="filter-row"><label htmlFor="severity-filter">严重程度</label>
+                    <select id="severity-filter" value={filter} onChange={event => setFilter(event.target.value)}>
+                      <option value="all">全部</option>
+                      {Object.entries(impactName).map(([id, label]) => <option key={id} value={id}>{label}</option>)}
+                    </select>
+                  </div>}
+                  <div className="issue-list" role="region" aria-label={list === 'open' ? '待处理问题' : '已解决问题'}>
+                    {list === 'open' ? filtered.length ? filtered.map(item =>
+                      <IssueButton key={item.id} issue={item} active={issue?.id === item.id} disabled={working} onClick={() => chooseIssue(item)} />,
+                    ) : <Blank icon={<CheckCircle2 />} title={!state.current ? '等待首次检测' : unresolved.length ? '没有匹配的问题' : '当前无待处理问题'}>
+                      {!state.current ? '扫描完成后会显示检测结果。' : unresolved.length ? '请选择其他严重程度。' : records.length ? '可在「已解决」中查看历史证据。' : '仍可在报告中查看人工复核清单。'}
+                    </Blank> : records.length ? records.map(item =>
+                      <IssueButton key={item.verification.id + item.issue.id} issue={item.issue}
+                        active={history?.verification.id === item.verification.id && history.issue.id === item.issue.id}
+                        disabled={working} history={`${versionLabel(state, item.verification.fromSnapshot)} → ${versionLabel(state, item.verification.toSnapshot)}`}
+                        onClick={() => chooseHistory(item)} />,
+                    ) : <Blank icon={<History />} title="暂无已解决记录">通过自动复测的修复会显示在这里。</Blank>}
+                  </div>
+                  <div className="issue-foot"><Info size={15} /><span>已解决列表包含历史版本，当前问题以所选版本为准。</span></div>
                 </div>
-                <div className="issue-foot"><Info size={15} /><span>已解决列表包含历史版本，当前问题以所选版本为准。</span></div>
-              </section>
-              <div className="evidence-column" role="group" tabIndex={-1} ref={evidenceFocus} aria-label="修复证据">
+                <div className="control-panel" role="tabpanel" id="control-panel-assistant"
+                  aria-labelledby="control-tab-assistant" tabIndex={0} ref={assistantPanel} hidden={controlTab !== 'assistant'}>
+                  <Assistant issue={issue} history={history} knowledge={knowledge} ai={ai} busy={working} proposal={proposal}
+                    input={input} onInput={value => saveDraft(value, proposal)} onPropose={propose} onConfirm={() => setConfirmApply(true)}
+                    onReject={reject} onShowPatch={() => { setView('diff'); evidenceFocus.current?.focus(); }} />
+                </div>
+              </div>
+              <div className="evidence-column" role="group" tabIndex={-1} ref={evidenceFocus} aria-label="修复效果对比">
                 <Evidence state={state} issue={issue} history={history} proposal={proposal} view={view} onView={setView} />
               </div>
-              <Assistant issue={issue} history={history} knowledge={knowledge} ai={ai} busy={working} proposal={proposal}
-                input={input} onInput={setInput} onPropose={propose} onConfirm={() => setConfirmApply(true)} onReject={reject} />
             </div>
             <div className="bottom-note"><ShieldCheck size={16} /><span>修复应用于本地副本。自动复测结果和人工检查项见报告。</span><button onClick={() => openPage('report')}>查看完整报告 <ArrowRight size={14} /></button></div>
           </>}
@@ -439,23 +499,26 @@ function IssueButton({ issue, active, history, disabled, onClick }: {
 }) {
   return <button className={'issue ' + (active ? 'selected' : '')} aria-pressed={active} disabled={disabled} onClick={onClick}>
     <span className={'issue-dot' + (history ? ' fixed' : '')} aria-hidden="true">{history ? <Check size={16} /> : '!'}</span>
-    <span><b>{issueTitle(issue)}</b><small>{issue.selector || '页面级问题'}</small>
-      <em className={'severity ' + (history ? 'fixed' : issue.impact)}>{history ?? impactName[issue.impact] ?? '待复核'}</em></span><ChevronRight size={15} />
+    <span className="issue-summary"><b>{issueTitle(issue)}</b>
+      <em className={'severity ' + (history ? 'fixed' : issue.impact)}>{impactName[issue.impact] ?? '待复核'}</em>
+      <small title={issue.selector}>{issue.selector || '页面级问题'}{history && ` · ${history}`}</small></span><ChevronRight size={15} />
   </button>;
 }
 
-function Assistant({ issue, history, knowledge, ai, busy, proposal, input, onInput, onPropose, onConfirm, onReject }: {
+function Assistant({ issue, history, knowledge, ai, busy, proposal, input, onInput, onPropose, onConfirm, onReject, onShowPatch }: {
   issue?: Issue; history?: HistoryItem; knowledge: Knowledge | null; ai: boolean; busy: boolean;
   proposal: Proposal | null; input: string; onInput: (value: string) => void;
   onPropose: (source: 'ai' | 'manual') => void; onConfirm: () => void; onReject: () => void;
+  onShowPatch: () => void;
 }) {
   const target = history?.issue ?? issue;
   const verification = history?.verification;
   const refs = verification?.wcag ?? proposal?.wcag ?? knowledge?.refs ?? target?.wcag ?? [];
-  return <section className="assistant panel" aria-labelledby="assistant-title">
-    <div className="panel-head"><div><span className="kicker">03 / {history ? 'VERIFY' : 'REPAIR'}</span><h2 id="assistant-title">{history ? '验证结论' : '修复助手'}</h2></div>
-      {!history && <span className="ai-pill"><Sparkles size={13} />{ai ? 'AI 已配置' : 'AI 未配置'}</span>}
-    </div>
+  return <>
+    {!history && <div className="assistant-toolbar">
+      <span className="ai-pill"><Sparkles size={13} />{ai ? 'AI 已配置' : 'AI 未配置'}</span>
+      {issue && issueNames[issue.ruleId] && !busy && <a href="#repair-value">前往修复操作</a>}
+    </div>}
     {target ? <div className="assistant-body">
       <div className="issue-heading"><span className={'issue-dot' + (history ? ' fixed' : '')} aria-hidden="true">{history ? <Check size={16} /> : '!'}</span><div><h3>{issueTitle(target)}</h3><span>{target.ruleId} · {impactName[target.impact] ?? target.impact}</span></div></div>
       <div className="detail-block"><h4>使用影响</h4><p>{issueNames[target.ruleId]?.[1] ?? target.description}</p></div>
@@ -475,7 +538,9 @@ function Assistant({ issue, history, knowledge, ai, busy, proposal, input, onInp
           <li>新增自动检测问题 {verification.added.length} 项</li>
           {verification.contrastCheck?.valid && <li>对比度 {verification.contrastCheck.ratio.toFixed(2)}:1，要求 {verification.contrastCheck.required}:1</li>}
         </ul>
-        <p>{verification.proposalReason}</p><small>{dateText(verification.createdAt)}</small>
+        {verification.proposalReason && <p><b>历史修复方案</b> {verification.proposalReason}</p>}
+        <small>{dateText(verification.createdAt)}</small>
+        {verification.diff && <button type="button" className="secondary history-patch" onClick={onShowPatch}>查看历史补丁</button>}
       </div> : issueNames[target.ruleId] ? <>
         <label className="input-label" htmlFor="repair-value">{target.ruleId === 'color-contrast' ? '修复颜色' : '建议的文本内容'}</label>
         <input id="repair-value" value={input} maxLength={160} disabled={busy} onChange={event => onInput(event.target.value)}
@@ -496,7 +561,7 @@ function Assistant({ issue, history, knowledge, ai, busy, proposal, input, onInp
         </div>}
       </> : <p className="manual-only">此规则需要人工处理。可查看规范和报告中的复核项。</p>}
     </div> : <Blank icon={<Sparkles />} title="选择一个问题">查看使用影响、修复依据和可审核的补丁。</Blank>}
-  </section>;
+  </>;
 }
 
 function Metrics({ state }: { state: State }) {

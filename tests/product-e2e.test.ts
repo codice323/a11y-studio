@@ -83,27 +83,89 @@ test('URL 快照从首页导入，经真实扫描、修复和三视图复测后�
       await page.getByRole('button', { name: '导入 URL 并检测' }).click();
       await page.getByText(/URL 快照已导入并完成检测/).waitFor({ timeout: 15000 });
       assert.deepEqual(hits.slice(1).sort(), ['/page', '/sample.png', '/theme.css']);
-      await page.getByRole('button', { name: /按钮缺少名称/ }).click();
+      await page.setViewportSize({ width: 1440, height: 900 });
+      const [controls, evidence] = await page.locator('.workbench > div').evaluateAll(columns =>
+        columns.map(column => {
+          const { x, y, width, height } = column.getBoundingClientRect();
+          return { x, y, width, height };
+        }),
+      );
+      assert.equal(controls.y, evidence.y);
+      assert.equal(controls.height, evidence.height);
+      assert.ok(evidence.x > controls.x && evidence.width >= controls.width * 1.9);
+      assert.equal(await page.locator('.metrics').count(), 0);
+      await page.getByText('当前为原始版本 V0，尚无修复后版本。').waitFor();
+      assert.equal(await page.locator('.shots img').count(), 1);
+      const issuesTab = page.getByRole('tab', { name: '问题与历史' });
+      const assistantTab = page.getByRole('tab', { name: 'AI 修复助手' });
+      const assistantPanel = page.getByRole('tabpanel', { name: 'AI 修复助手' });
+      assert.equal(await issuesTab.getAttribute('aria-selected'), 'true');
+      await issuesTab.press('ArrowRight');
+      assert.equal(await assistantTab.getAttribute('aria-selected'), 'true');
+      assert.ok(await assistantTab.evaluate(tab => tab === document.activeElement));
+      await assistantTab.press('Home');
+      assert.equal(await issuesTab.getAttribute('aria-selected'), 'true');
+      const [importedProject] = await (await api('/api/projects')).json();
+      const initialState = await (await api('/api/projects/' + importedProject.id)).json();
+      const buttonIssue = initialState.current.issues.find((item: { ruleId: string }) => item.ruleId === 'button-name');
+      const severity = page.getByLabel('严重程度');
+      await severity.selectOption(buttonIssue.impact);
+      const issueButton = page.getByRole('button', { name: /按钮缺少名称/ });
+      const proposalRequests: string[] = [];
+      page.on('request', request => {
+        if (request.method() === 'POST' && new URL(request.url()).pathname.endsWith('/proposals')) {
+          proposalRequests.push(request.postDataJSON().source);
+        }
+      });
+      await issueButton.click();
+      await assistantPanel.waitFor();
+      await page.waitForFunction(() => document.activeElement?.id === 'control-panel-assistant');
+      assert.equal(await page.locator('.shots .highlight').count(), 1);
+      assert.deepEqual(proposalRequests, []);
       await page.getByLabel('建议的文本内容').fill('打开导航');
       await page.getByRole('button', { name: '生成补丁预览' }).click();
+      const pendingDiff = page.getByLabel('待审核的源码差异');
+      await pendingDiff.waitFor();
       await page.getByRole('button', { name: '审核并应用' }).click();
       assert.equal(await page.evaluate(() => document.activeElement?.textContent), '再检查一下');
+      await page.keyboard.press('Escape');
+      await issuesTab.click();
+      assert.equal(await issueButton.getAttribute('aria-pressed'), 'true');
+      assert.equal(await severity.inputValue(), buttonIssue.impact);
+      assert.ok(await pendingDiff.isVisible());
+      await issueButton.click();
+      assert.equal(await assistantTab.getAttribute('aria-selected'), 'true');
+      assert.equal(await page.getByLabel('建议的文本内容').inputValue(), '打开导航');
+      assert.ok(await pendingDiff.isVisible());
+      assert.deepEqual(proposalRequests, ['manual']);
+      const currentHeights = await page.locator('.workbench > div').evaluateAll(columns =>
+        columns.map(column => column.getBoundingClientRect().height),
+      );
+      assert.deepEqual(currentHeights, [controls.height, evidence.height]);
+      await page.getByRole('button', { name: '审核并应用' }).click();
       await page.getByRole('button', { name: '确认并验证' }).click();
       const semantics = page.getByRole('table');
       await semantics.getByText('打开导航', { exact: false }).waitFor({ timeout: 25000 });
       assert.match(await semantics.innerText(), /可访问名称\s+（空）\s+打开导航/);
       assert.match(await semantics.innerText(), /角色\s+button\s+button/);
-      await page.getByRole('button', { name: '代码 Diff' }).click();
+      assert.equal(await assistantTab.getAttribute('aria-selected'), 'true');
+      assert.equal(await page.getByRole('button', { name: '审核并应用' }).count(), 0);
+      await page.getByRole('button', { name: '查看历史补丁' }).click();
       assert.match(await page.getByLabel('已保存的源码差异').innerText(), /aria-label="打开导航"/);
-      await page.getByRole('button', { name: '视觉对比' }).click();
+      await page.getByRole('button', { name: '页面对照' }).click();
       assert.equal(await page.locator('.shots img').count(), 2);
       await page.waitForFunction(() => document.querySelectorAll('.shots .highlight').length === 2);
       await page.getByRole('button', { name: '仅修复后' }).click();
       assert.equal(await page.locator('.shots img').count(), 1);
+      await page.getByRole('button', { name: /放大修复后/ }).click();
+      assert.equal(await page.locator('.shots .zoomed').count(), 1);
+      await page.setViewportSize({ width: 375, height: 780 });
+      await issuesTab.click();
       await page.getByRole('button', { name: /待处理\s*0/ }).click();
       await page.getByText('当前无待处理问题', { exact: true }).waitFor();
       assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
       await page.getByRole('button', { name: '结果报告', exact: true }).click();
+      assert.equal(await page.locator('.metrics > div').count(), 4);
       await page.getByRole('button', { name: /按钮缺少名称.*查看证据/ }).click();
       await page.getByRole('button', { name: '无障碍语义' }).click();
       await page.getByRole('table').getByText('打开导航', { exact: false }).waitFor({ timeout: 25000 });
