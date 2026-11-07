@@ -109,3 +109,31 @@ test('URL 导入拒绝非 HTML、非 2xx 和超限响应', async t => {
   await assert.rejects(captureUrlSnapshot(upstream + '/large'), /超过大小/);
   await assert.rejects(captureUrlSnapshot(upstream + '/stream-large'), /超过大小/);
 });
+
+test('代理合成 DNS 使用公网解析并固定连接到校验后的真实地址', async t => {
+  const { visited } = upstreamResponses(t, {
+    [upstream + '/page']: { body: '<html><head><title>DNS</title><link rel="stylesheet" href="/style.css"></head><body><h1>内容</h1></body></html>' },
+    [upstream + '/style.css']: { type: 'text/css', body: 'h1{color:#123456}' },
+  }, { 'public-source.net': ['198.18.0.25'] });
+  const queries: string[] = [];
+  t.mock.method(globalThis, 'fetch', async (input: string | URL | Request) => {
+    const url = new URL(String(input));
+    assert.equal(url.hostname, 'dns.alidns.com');
+    queries.push(url.searchParams.get('type') ?? '');
+    return new Response(JSON.stringify({Status:0, Answer:url.searchParams.get('type') === 'A' ? [{type:1,data:publicIp}] : []}), {status:200,headers:{'Content-Type':'application/json'}});
+  });
+  const snapshot = await captureUrlSnapshot(upstream + '/page');
+  assert.equal(snapshot.assets.stylesheets, 1);
+  assert.deepEqual(visited, [upstream + '/page', upstream + '/style.css']);
+  assert.deepEqual(queries.sort(), ['A','AAAA']);
+});
+
+test('代理合成 DNS 的公网解析结果包含私网时仍拒绝连接', async t => {
+  const { visited } = upstreamResponses(t, {}, { 'public-source.net': ['198.18.0.25'] });
+  t.mock.method(globalThis, 'fetch', async (input: string | URL | Request) => {
+    const url = new URL(String(input));
+    return new Response(JSON.stringify({Status:0, Answer:url.searchParams.get('type') === 'A' ? [{type:1,data:publicIp},{type:1,data:'10.0.0.1'}] : []}), {status:200,headers:{'Content-Type':'application/json'}});
+  });
+  await assert.rejects(captureUrlSnapshot(upstream + '/page'), /非公网/);
+  assert.deepEqual(visited, []);
+});

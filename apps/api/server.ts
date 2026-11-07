@@ -18,16 +18,18 @@ app.post('/api/projects',upload.single('file'),async(req,res,next)=>{try{res.sta
 let activeUrlImports = 0;
 app.post('/api/projects/import-url', async (req,res,next) => {
  const url = req.body?.url;
+ const mode = req.body?.mode ?? 'static';
  if (typeof url !== 'string' || !url.trim() || url.length > 2048) return res.status(400).json({error:'请输入完整的网页 URL。'});
+ if (mode !== 'static' && mode !== 'rendered') return res.status(400).json({error:'URL 采集模式无效。'});
  if (activeUrlImports >= 2) return res.status(429).json({error:'URL 导入任务过多，请稍后重试。'});
  const controller = new AbortController();
  res.on('close', () => { if (!res.writableEnded) controller.abort(); });
  activeUrlImports++;
  try {
-  const captured = await captureUrlSnapshot(url.trim(), controller.signal);
+  const captured = await captureUrlSnapshot(url.trim(), controller.signal, mode);
   controller.signal.throwIfAborted();
   const created = await createProject({captured});
-  res.status(201).json({...created, assets: captured.assets});
+  res.status(201).json({...created, assets: captured.assets, rendering: captured.rendering});
  } catch (error) { if (!controller.signal.aborted) next(error); }
  finally { activeUrlImports--; }
 });

@@ -50,6 +50,8 @@ export type Verification = {
   proposalReason?: string;
   wcag?: string[];
   wcagUrl?: string;
+  agentTrace?: { tool: string; summary: string }[];
+  sources?: { id: string; title: string; refs: string[]; url: string; text: string }[];
 };
 
 export type State = {
@@ -73,6 +75,8 @@ export type Proposal = {
   before: string;
   after: string;
   patch: { operation: string; value: string; targetFile: string; selector: string };
+  agentTrace?: { tool: string; summary: string }[];
+  sources?: { id: string; title: string; refs: string[]; url: string; text: string }[];
 };
 
 export type HistoryItem = { issue: Issue; verification: Verification };

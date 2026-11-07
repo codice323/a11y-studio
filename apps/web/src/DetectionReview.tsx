@@ -1,4 +1,5 @@
-import type { DetectionEvidence } from '../../../packages/shared/types';
+import { useState } from 'react';
+import type { AiAuditFinding, DetectionEvidence } from '../../../packages/shared/types';
 
 const behaviorStatus = {
   completed: '已完成',
@@ -8,7 +9,11 @@ const behaviorStatus = {
 
 const aiDecision = { accepted: '人工认可', rejected: '人工排除', 'needs-review': '待复核' };
 
-export function DetectionReview({ detection, report = false }: { detection?: DetectionEvidence; report?: boolean }) {
+export function DetectionReview({ detection, report = false, aiConfigured = false, busy = false, onReview, onDecision }: {
+  detection?: DetectionEvidence; report?: boolean; aiConfigured?: boolean; busy?: boolean;
+  onReview?: () => void; onDecision?: (id: string, decision: AiAuditFinding['decision']) => void;
+}) {
+  const [consent, setConsent] = useState(false);
   if (!detection) return null;
   const { behavior, bestPractices, ai } = detection;
   const practices = [...bestPractices.violations, ...bestPractices.incomplete];
@@ -35,11 +40,26 @@ export function DetectionReview({ detection, report = false }: { detection?: Det
       <summary>axe 最佳实践（{practices.length} 条规则结果）</summary>
       <ul>{practices.map((rule, index) => <li key={rule.id + ':' + index}>{rule.help} · {rule.nodes.length} 个节点</li>)}</ul>
     </details>}
-    {ai && <details>
+    {!report && !ai && <div className="ai-review-controls">
+      <h4>AI 语义辅助复核</h4>
+      <p>DeepSeek 将检查最多 20 个候选元素的名称、角色和附近文本；结果是疑点，需人工确认，不计入确定违规。</p>
+      <label><input type="checkbox" checked={consent} disabled={busy || !aiConfigured} onChange={event => setConsent(event.target.checked)} /> 我同意将上述页面文本发送给模型服务</label>
+      <button type="button" className="secondary" disabled={busy || !aiConfigured || !consent || !behavior.semanticCandidates.length} onClick={onReview}>开始 AI 辅助复核</button>
+      {!aiConfigured && <p>请先配置模型服务。</p>}
+      {!behavior.semanticCandidates.length && <p>本次检测没有可复核的候选元素。</p>}
+    </div>}
+    {ai && <details open>
       <summary>AI 辅助复核（{ai.findings.length} 条疑似结果）</summary>
+      <p>仅根据文本判断，不能代替人工或实际辅助技术测试。</p>
+      {ai.findings.length === 0 && <p>模型未发现需要提示的疑点，不代表页面完全无障碍。</p>}
       {ai.findings.length > 0 && <ul>{ai.findings.map(item => <li key={item.id}>
         <strong>{aiDecision[item.decision]}</strong> · {item.explanation}
         <br /><code>{item.candidate.selector}</code>
+        {!report && onDecision && <div className="ai-review-actions" aria-label="人工复核结果">
+          <button type="button" className="secondary" disabled={busy || item.decision === 'accepted'} onClick={() => onDecision(item.id, 'accepted')}>确认疑点</button>
+          <button type="button" className="secondary" disabled={busy || item.decision === 'rejected'} onClick={() => onDecision(item.id, 'rejected')}>排除此项</button>
+          {item.decision !== 'needs-review' && <button type="button" className="secondary" disabled={busy} onClick={() => onDecision(item.id, 'needs-review')}>恢复待复核</button>}
+        </div>}
       </li>)}</ul>}
     </details>}
   </>;

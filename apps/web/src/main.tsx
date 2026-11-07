@@ -6,6 +6,7 @@ import {
   RefreshCw, RotateCcw, ScanSearch, ShieldCheck, Sparkles, X,
 } from 'lucide-react';
 import { DetectionReview } from './DetectionReview';
+import type { AiAuditFinding } from '../../../packages/shared/types';
 import { Evidence, type EvidenceView } from './Evidence';
 import { versionLabel, type HistoryItem, type Issue, type Proposal, type State, type Verification } from './types';
 import './style.css';
@@ -25,7 +26,8 @@ const severityRank = (impact: string) => severityOrder.get(impact) ?? 4;
 const issueTitle = (issue: Issue) => issueNames[issue.ruleId]?.[0] ?? issue.help;
 const dateText = (date: string) => new Date(date).toLocaleString('zh-CN');
 type Fixture = { id: string; name: string; description: string };
-type Project = { id: string; name: string; assets?: { stylesheets: number; images: number; skipped: number } };
+type Project = { id: string; name: string; assets?: { stylesheets: number; images: number; skipped: number }; rendering?: { mode: string; requests: number; blocked: number; empty: boolean } };
+type UrlImport = { url: string; mode: 'static' | 'rendered' };
 type Knowledge = { title: string; url: string; guidance: string; refs: string[] };
 type Source = 'html' | 'zip' | 'url';
 type Selection = { issueId: string } | { history: HistoryItem } | null;
@@ -185,10 +187,10 @@ function App() {
     });
   }
 
-  function createProject(data: FormData | string) {
-    run(typeof data === 'string' ? '正在获取公开网页与静态资源…' : '正在导入项目…', async () => {
-      const project = typeof data === 'string'
-        ? await post<Project>('/api/projects/import-url', { url: data })
+  function createProject(data: FormData | UrlImport) {
+    run(!(data instanceof FormData) ? '正在采集公开网页，请稍候…' : '正在导入项目…', async () => {
+      const project = !(data instanceof FormData)
+        ? await post<Project>('/api/projects/import-url', data)
         : await request<Project>('/api/projects', { method: 'POST', body: data });
       setProjects(previous => [project, ...previous.filter(item => item.id !== project.id)]);
       resetSelection();
@@ -199,7 +201,9 @@ function App() {
       await refresh(project.id);
       const assets = project.assets;
       setNotice(assets
-        ? `URL 快照已导入并完成检测。保存 ${assets.stylesheets} 个样式表、${assets.images} 张图片，跳过或未能获取 ${assets.skipped} 处资源引用。`
+        ? project.rendering?.empty
+          ? '网页已采集，但渲染后的主体仍为空。网站可能需要登录、验证或受限制的请求；本次结果不能代表完整网页。'
+          : `URL 快照已导入并完成检测${project.rendering ? '（已运行页面脚本）' : ''}。保存 ${assets.stylesheets} 个样式表、${assets.images} 张图片，跳过或未能获取 ${assets.skipped} 处资源引用${project.rendering?.blocked ? `，拦截 ${project.rendering.blocked} 个请求` : ''}。`
         : '项目已导入并完成真实检测。');
     });
   }
@@ -211,6 +215,28 @@ function App() {
       await refresh(state.project.id);
       if (!history) resetSelection();
       setNotice('检测完成。');
+    });
+  }
+
+  function reviewWithAi() {
+    if (!state?.current) return;
+    const auditId = state.current.id;
+    run('正在进行 AI 语义复核…', async () => {
+      await post(`${route}/audits/${auditId}/ai-review`, { consent: true });
+      await refresh(state.project.id);
+      setNotice('AI 语义复核已完成，请逐项人工确认。');
+    });
+  }
+
+  function decideAiFinding(id: string, decision: AiAuditFinding['decision']) {
+    if (!state?.current) return;
+    const auditId = state.current.id;
+    run('正在保存人工复核结果…', async () => {
+      await request(`${route}/audits/${auditId}/ai-review/${id}`, {
+        method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ decision }),
+      });
+      await refresh(state.project.id);
+      setNotice('人工复核结果已保存。');
     });
   }
 
@@ -261,9 +287,9 @@ function App() {
     if (moveFocus) requestAnimationFrame(() => evidenceFocus.current?.focus());
   }
 
-  function propose(source: 'ai' | 'manual') {
+  function propose(source: 'ai' | 'agent' | 'manual') {
     if (!issue) return;
-    run(source === 'ai' ? '正在生成 AI 建议…' : '正在生成补丁预览…', async () => {
+    run(source === 'agent' ? 'AI 正在读取问题并检索规范…' : source === 'ai' ? '正在生成 AI 建议…' : '正在生成补丁预览…', async () => {
       const next = await post<Proposal>(route + '/issues/' + issue.id + '/proposals', { source, value: input });
       saveDraft(next.patch.value, next);
       setView('diff');
@@ -357,7 +383,7 @@ function App() {
           <>
             <div className="project-strip">
               <div className="project-symbol"><FileCode2 size={19} /></div>
-              <div className="project-title"><b>{state.project.name}</b><span>{state.project.entry} · 当前版本 {versionLabel(state, state.project.currentSnapshot)}</span></div>
+              <div className="project-title"><b>{state.project.name}</b><span>本地快照：{state.project.entry} · 当前版本 {versionLabel(state, state.project.currentSnapshot)}</span></div>
               <div className="project-actions">
                 <button className="secondary" onClick={scanAgain} disabled={working}><RefreshCw size={14} />重新检测</button>
                 <select aria-label="切换项目版本" value={state.project.currentSnapshot} onChange={event => rollback(event.target.value)} disabled={working}>
@@ -400,7 +426,7 @@ function App() {
                         onClick={() => chooseHistory(item)} />,
                     ) : <Blank icon={<History />} title="暂无已解决记录">通过自动复测的修复会显示在这里。</Blank>}
                   </div>
-                  <DetectionReview detection={state.current?.detection} />
+                  <DetectionReview key={state.current?.id} detection={state.current?.detection} aiConfigured={ai} busy={working} onReview={reviewWithAi} onDecision={decideAiFinding} />
                   <div className="issue-foot"><Info size={15} /><span>已解决列表包含历史版本，当前问题以所选版本为准。</span></div>
                 </div>
                 <div className="control-panel" role="tabpanel" id="control-panel-assistant"
@@ -429,10 +455,11 @@ function Blank({ icon, title, children }: { icon: ReactNode; title: string; chil
 
 function Home({ fixtures, projects, busy, onCreate, onOpen, onError }: {
   fixtures: Fixture[]; projects: Project[]; busy: boolean;
-  onCreate: (data: FormData | string) => void; onOpen: (id: string) => void; onError: (error: string) => void;
+  onCreate: (data: FormData | UrlImport) => void; onOpen: (id: string) => void; onError: (error: string) => void;
 }) {
   const [source, setSource] = useState<Source>('html');
   const [url, setUrl] = useState('');
+  const [urlMode, setUrlMode] = useState<'static' | 'rendered'>('rendered');
   const fileInput = useRef<HTMLInputElement>(null);
   function chooseFile(file: File) {
     if (busy) return;
@@ -445,7 +472,7 @@ function Home({ fixtures, projects, busy, onCreate, onOpen, onError }: {
 
   function submitUrl(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (!busy) onCreate(url.trim());
+    if (!busy) onCreate({ url: url.trim(), mode: urlMode });
   }
 
   return <div className="onboarding">
@@ -459,7 +486,11 @@ function Home({ fixtures, projects, busy, onCreate, onOpen, onError }: {
       {source === 'url' ? <form className="url-form" onSubmit={submitUrl}>
         <label htmlFor="page-url">公开网页地址</label>
         <input id="page-url" type="url" inputMode="url" placeholder="https://example.com/page" value={url} maxLength={2048} required disabled={busy} onChange={event => setUrl(event.target.value)} aria-describedby="url-scope" />
-        <p id="url-scope">获取静态 HTML 与受支持的同源资源。登录内容和依赖脚本渲染的页面可能无法完整呈现。修复仅保存到本地快照。</p>
+        <fieldset className="url-mode"><legend>网页采集方式</legend>
+          <label><input type="radio" name="url-mode" value="rendered" checked={urlMode === 'rendered'} disabled={busy} onChange={() => setUrlMode('rendered')} />执行 JavaScript 后采集（推荐）</label>
+          <label><input type="radio" name="url-mode" value="static" checked={urlMode === 'static'} disabled={busy} onChange={() => setUrlMode('static')} />仅采集静态 HTML</label>
+        </fieldset>
+        <p id="url-scope">动态采集会在独立浏览器中运行网页脚本，限制网络请求。登录、验证、交互及部分资源可能无法还原；修复只保存到本地快照。</p>
         <button className="button dark" disabled={busy}>导入 URL 并检测 <ArrowRight size={15} /></button>
       </form> : <div className="dropzone" onDragOver={event => event.preventDefault()} onDrop={event => {
         event.preventDefault();
@@ -476,7 +507,7 @@ function Home({ fixtures, projects, busy, onCreate, onOpen, onError }: {
         }} />
         <button className="button dark" disabled={busy} onClick={() => fileInput.current?.click()}>选择文件 <ArrowRight size={15} /></button>
       </div>}
-      <div className="import-note"><LockKeyhole size={15} />网页自带脚本不会在检测环境中执行。</div>
+      <div className="import-note"><LockKeyhole size={15} />{source === 'url' && urlMode === 'rendered' ? '采集时运行脚本，检测和修复使用不执行脚本的本地快照。' : '网页自带脚本不会在检测环境中执行。'}</div>
     </section>
     <section className="examples">
       <div className="section-title"><div><span className="section-tag">DEMO PROJECTS</span><h2>从示例开始</h2></div></div>
@@ -510,7 +541,7 @@ function IssueButton({ issue, active, history, disabled, onClick }: {
 function Assistant({ issue, history, knowledge, ai, busy, proposal, input, onInput, onPropose, onConfirm, onReject, onShowPatch }: {
   issue?: Issue; history?: HistoryItem; knowledge: Knowledge | null; ai: boolean; busy: boolean;
   proposal: Proposal | null; input: string; onInput: (value: string) => void;
-  onPropose: (source: 'ai' | 'manual') => void; onConfirm: () => void; onReject: () => void;
+  onPropose: (source: 'ai' | 'agent' | 'manual') => void; onConfirm: () => void; onReject: () => void;
   onShowPatch: () => void;
 }) {
   const target = history?.issue ?? issue;
@@ -541,6 +572,8 @@ function Assistant({ issue, history, knowledge, ai, busy, proposal, input, onInp
           {verification.contrastCheck?.valid && <li>对比度 {verification.contrastCheck.ratio.toFixed(2)}:1，要求 {verification.contrastCheck.required}:1</li>}
         </ul>
         {verification.proposalReason && <p><b>历史修复方案</b> {verification.proposalReason}</p>}
+        {verification.agentTrace && <div><h4>AI 工具调用记录</h4><ol>{verification.agentTrace.map((step, index) => <li key={index}>{step.summary} <code>{step.tool}</code></li>)}</ol></div>}
+        {verification.sources && <div><h4>检索依据</h4><ul>{verification.sources.map(source => <li key={source.id}><a href={source.url} target="_blank" rel="noreferrer">{source.title} · {source.refs.join('、')}</a></li>)}</ul></div>}
         <small>{dateText(verification.createdAt)}</small>
         {verification.diff && <button type="button" className="secondary history-patch" onClick={onShowPatch}>查看历史补丁</button>}
       </div> : issueNames[target.ruleId] ? <>
@@ -551,10 +584,13 @@ function Assistant({ issue, history, knowledge, ai, busy, proposal, input, onInp
         <div className="repair-actions">
           <button className="button dark" disabled={busy} onClick={() => onPropose('manual')}><Code2 size={15} />生成补丁预览</button>
           <button className="secondary" disabled={busy || !ai} onClick={() => onPropose('ai')}><Sparkles size={15} />AI 生成建议</button>
+          <button className="secondary" disabled={busy || !ai} onClick={() => onPropose('agent')}><Sparkles size={15} />AI 检索并分析</button>
         </div>
         {proposal && <div className="proposal">
-          <div className="proposal-head"><b>{proposal.source === 'ai' ? 'AI 修复建议' : '人工修复建议'}</b><span>待审核</span></div>
+          <div className="proposal-head"><b>{proposal.source === 'agent' ? 'AI 检索修复建议' : proposal.source === 'ai' ? 'AI 修复建议' : '人工修复建议'}</b><span>待审核</span></div>
           <p>{proposal.reason}</p><p className="muted">{proposal.risk}</p>
+          {proposal.agentTrace && <div><h4>AI 工具调用</h4><ol>{proposal.agentTrace.map((step, index) => <li key={index}>{step.summary} <code>{step.tool}</code></li>)}</ol></div>}
+          {proposal.sources && <div><h4>检索到的规范依据</h4><p>以下是基于 WCAG 2.2 的本地中文摘要，请结合原文核对。</p><ul>{proposal.sources.map(source => <li key={source.id}><a href={source.url} target="_blank" rel="noreferrer">{source.title} · {source.refs.join('、')} <ArrowUpRight size={12} /></a><p>{source.text}</p></li>)}</ul></div>}
           <div className="repair-actions">
             <button className="button dark" disabled={busy || input !== proposal.patch.value} onClick={onConfirm}><Check size={15} />审核并应用</button>
             <button className="secondary" disabled={busy} onClick={onReject}>保留原样</button>

@@ -8,7 +8,7 @@
 | GET /api/fixtures | 三个内置示例 |
 | GET /api/projects | 项目列表 |
 | POST /api/projects | multipart 文件 `file` 或字段 `fixture`，创建 V0 |
-| POST /api/projects/import-url | 获取公开网页的本地静态快照，创建 V0 |
+| POST /api/projects/import-url | 采集公开网页的本地快照，创建 V0 |
 | GET /api/projects/:id | 项目、版本、当前与初始扫描及报告摘要 |
 | POST /api/projects/:id/audits | 扫描当前版本 |
 | GET /api/audits/:id/screenshot | 扫描截图 |
@@ -23,13 +23,14 @@
 
 补丁只允许 `set-alt`、`set-label`、`set-name`、`set-color`；后端重新检查规则、目标、版本与文件哈希。模型只提供值和解释，用户审核确认。URL 导入只允许符合下述限制的公开网页。
 
-## URL 静态快照
+## URL 快照
 
-`POST /api/projects/import-url` 接收 JSON `{"url":"https://example.com/page"}`。成功返回 HTTP 201 和常规项目字段 `id`、`name`、`entry`、`currentSnapshot`、`createdAt`，另含 `assets: {stylesheets,images,skipped}`。前两项为保存的文件数，`skipped` 为跳过或未获取的资源引用计数。资源缺失时仍可创建静态项目。创建后，调用已有的扫描接口。应用补丁只会写入本地项目副本。
+`POST /api/projects/import-url` 接收 JSON `{"url":"https://example.com/page","mode":"rendered"}`。`mode` 可为 `rendered` 或 `static`，省略时为 `static`，界面默认选择 `rendered`。成功返回 HTTP 201 和常规项目字段，以及 `assets: {stylesheets,images,skipped}`；动态采集额外返回 `rendering: {mode,requests,blocked,empty}`。空白或缺少资源的快照不代表完整网页。应用补丁只会写入本地项目副本。
 
-- 主页面须为公开 HTTP(S) 地址，使用默认端口且没有 URL 凭据。对主页面和资源的每一跳检查全部 DNS 地址，拒绝任一非公网地址。连接固定到已校验的 IP，HTTPS 继续验证原始域名的证书。最多跟随四次重定向。
-- 仅获取最终页面同源的 CSS 和 PNG、JPEG、GIF、WebP。CSS 的普通 `url()` 图片引用会尝试转为本地文件。每次最多尝试八个样式表和二十个不同图片，HTML 限 2 MB、CSS 限 256 KB、单图限 1 MB，响应体总量限 8 MB。单项请求含 DNS 和重定向限 6.5 秒，资源获取总期限 20 秒。
-- 请求无用户登录状态，按静态内容保存。脚本、嵌入内容和外部资源不执行或加载，嵌套 CSS 导入、响应式图片资源和不受支持的格式会被跳过。请求失败、目标不受支持或校验失败时返回 400 和错误说明。并发上限触发时返回 429。
+- 主页面须为公开 HTTP(S) 地址，使用默认端口且没有 URL 凭据。对主页面和资源的每一跳检查全部 DNS 地址，拒绝任一非公网地址。若本机代理 DNS 对域名仅返回 198.18.0.0/15 合成地址，使用阿里云公共 DNS 查询域名（不发送路径或参数）；校验其 A/AAAA 结果均为公网地址后固定连接到已校验的真实 IP。IP 字面量、普通私网或混合 DNS 结果不会触发回退。HTTPS 继续验证原始域名的证书。最多跟随四次重定向。
+- 静态模式仅获取最终页面同源的 CSS 和 PNG、JPEG、GIF、WebP，动态模式还尝试跨源公开资源。CSS 的普通 `url()` 图片引用会尝试转为本地文件。每次最多尝试八个样式表和二十个不同图片，HTML 限 2 MB、静态 CSS 限 256 KB、动态 CSS 限 2 MB、单图限 1 MB，响应体总量静态限 8 MB、动态限 24 MB。单项请求含 DNS 和重定向限 6.5 秒，静态采集总期限 20 秒，动态采集 45 秒。
+- 动态模式在独立无登录 Chromium 中执行脚本，最多 100 个请求；只允许 GET，WebSocket 和 service worker 禁用，所有请求由服务端验证公网地址并固定连接。渲染后的 DOM 去除脚本并保存，后续检测不会再次执行脚本。登录、POST、验证码、复杂交互及部分资源可能无法还原；采集结果不能直接修改原站或 JavaScript 源码。
+- 静态模式不执行脚本。两种模式均不保留嵌套 CSS 导入、响应式图片资源和不支持的格式。请求失败、目标不受支持或校验失败时返回 400，并发上限触发时返回 429。
 
 ## 浏览器语义证据
 
