@@ -1,10 +1,14 @@
-import fs from 'node:fs';import path from 'node:path';import {chromium,type Browser,type Page} from 'playwright-core';import AxeBuilder from '@axe-core/playwright';import * as cheerio from 'cheerio';
+import fs from 'node:fs';import path from 'node:path';import {chromium,type Browser,type Page} from 'playwright-core';import * as cheerio from 'cheerio';
 import {db,id,now,hash,DATA,safePath,snapshotDir,snapshot,audit} from './storage';
+import { scanRules } from './scan-rules';
+import { scanBehavior, unavailableBehavior } from './scan-behavior';
+import type { BehaviorAudit, DetectionEvidence } from '../../packages/shared/types';
+
 let activeScans=0;const MAX_SCANS=2;
 const mime:Record<string,string>={'.html':'text/html; charset=utf-8','.htm':'text/html; charset=utf-8','.css':'text/css; charset=utf-8','.png':'image/png','.jpg':'image/jpeg','.jpeg':'image/jpeg','.gif':'image/gif','.webp':'image/webp'};
 export function sanitizedHtml(source:string){const $=cheerio.load(source);$('script,iframe,object,embed,base,meta[http-equiv]').remove();$('*').each((_,el)=>{for(const attr of Object.keys((el as any).attribs||{}))if(/^on/i.test(attr)||['srcdoc','formaction'].includes(attr.toLowerCase())||(/^(href|src|action)$/i.test(attr)&&/^\s*javascript:/i.test($(el).attr(attr)||'')))$(el).removeAttr(attr)});return $.html();}
 function executable(){ const candidates=[process.env.CHROME_PATH,'/Applications/Google Chrome.app/Contents/MacOS/Google Chrome','/usr/bin/chromium','/usr/bin/chromium-browser','/usr/bin/google-chrome'].filter(Boolean) as string[];return candidates.find(x=>fs.existsSync(x));}
-async function withSnapshotPage<T>(projectId: string, snapshotId: string, signal: AbortSignal | undefined, inspect: (page: Page) => Promise<T>) {
+export async function withSnapshotPage<T>(projectId: string, snapshotId: string, signal: AbortSignal | undefined, inspect: (page: Page) => Promise<T>) {
  const snap = snapshot(projectId, snapshotId);
  const dir = snapshotDir(projectId, snapshotId);
  let browser: Browser | undefined;
@@ -63,7 +67,16 @@ export async function runAudit(projectId:string,snapshotId:string,signal?:AbortS
  db.prepare('INSERT INTO audits VALUES(?,?,?,?,?,?,?)').run(auditId,projectId,snapshotId,'running',null,null,created);
  try {
   return await withSnapshotPage(projectId, snapshotId, signal, async page => {
-  const results=await Promise.race([new AxeBuilder({page}).withTags(['wcag2a','wcag2aa','wcag21a','wcag21aa','wcag22aa']).analyze(),new Promise<never>((_,reject)=>{const timer=setTimeout(()=>reject(new Error('扫描超时。')),30000);timer.unref();})]);
+  const rulesStarted = performance.now();
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  const results = await Promise.race([
+   scanRules(page),
+   new Promise<never>((_, reject) => {
+    timeout = setTimeout(() => reject(new Error('扫描超时。')), 30000);
+    timeout.unref();
+   }),
+  ]).finally(() => clearTimeout(timeout));
+  const rulesMs = performance.now() - rulesStarted;
   const issues=[];for(const violation of results.violations)for(const node of violation.nodes){const selector=typeof node.target[0]==='string'?node.target[0]:'';let bounds=null;try {const box=selector?await page.locator(selector).first().boundingBox({timeout:1500}):null;if(box)bounds=box;}catch{} issues.push({id:hash(violation.id+'|'+selector).slice(0,20),ruleId:violation.id,selector,impact:violation.impact||'unknown',help:violation.help,description:violation.description,helpUrl:violation.helpUrl,html:node.html,wcag:violation.tags.filter((t:string)=>/^wcag\d/.test(t)),bounds});}
   const functionChecks=await page.evaluate(()=>{const controls=Array.from(document.querySelectorAll<HTMLElement>('a[href],button,input,select,textarea,[tabindex]'));if(controls.length>2000)throw new Error('交互控件超过检测上限。');return controls.map((el,index)=>{
     const style=getComputedStyle(el),visible=style.display!=='none'&&style.visibility!=='hidden'&&el.getClientRects().length>0,disabled=el.hasAttribute('disabled');let focusable=false;
@@ -83,7 +96,32 @@ export async function runAudit(projectId:string,snapshotId:string,signal?:AbortS
     return {ratio,required,uncertain,valid:!uncertain&&ratio>=required&&styles.display!=='none'&&styles.visibility!=='hidden'};
    },{timeout:1500});}catch{contrastCheck={ratio:0,required:4.5,valid:false,uncertain:true};}}
   const size=await page.evaluate(()=>({width:document.documentElement.scrollWidth,height:document.documentElement.scrollHeight}));if(size.width>5000||size.height>10000)throw new Error('页面尺寸超过扫描限制。');fs.mkdirSync(path.join(DATA,'screenshots'),{recursive:true});await page.screenshot({path:path.join(DATA,'screenshots',auditId+'.png'),fullPage:true,timeout:10000});
-  const result={id:auditId,projectId,snapshotId,status:'completed',issues,incomplete:results.incomplete.map((x:any)=>({ruleId:x.id,help:x.help,count:x.nodes.length})),passes:results.passes.length,functionChecks,contrastCheck,screenshot:`/api/audits/${auditId}/screenshot`,size,createdAt:created};
+  // Leave the existing screenshot and repair regression signature independent of the Tab probe.
+  const behaviorStarted = performance.now();
+  let behavior: BehaviorAudit;
+  let behaviorTimeout: ReturnType<typeof setTimeout> | undefined;
+  try {
+   const inspect = async () => {
+    await page.reload({ waitUntil: 'load', timeout: 5000 });
+    return scanBehavior(page, signal);
+   };
+   behavior = await Promise.race([
+    inspect(),
+    new Promise<never>((_, reject) => {
+     behaviorTimeout = setTimeout(() => reject(new Error('行为检测超时。')), 13000);
+     behaviorTimeout.unref();
+    }),
+   ]);
+  } catch {
+   signal?.throwIfAborted();
+   behavior = unavailableBehavior();
+  } finally {
+   clearTimeout(behaviorTimeout);
+  }
+  const { engine, violations, incomplete, bestPractices, passes } = results;
+  const timing = { rulesMs, behaviorMs: performance.now() - behaviorStarted };
+  const detection: DetectionEvidence = { schemaVersion: 2, engine, timing, violations, incomplete, bestPractices, behavior };
+  const result={id:auditId,projectId,snapshotId,status:'completed',issues,incomplete:incomplete.map(x=>({ruleId:x.id,help:x.help,count:x.nodes.length})),passes,functionChecks,contrastCheck,screenshot:`/api/audits/${auditId}/screenshot`,size,createdAt:created,detection};
   db.prepare('UPDATE audits SET status=?,result=? WHERE id=?').run('completed',JSON.stringify(result),auditId);return result;
   });
  } catch(error){const message=(error as Error).message;db.prepare('UPDATE audits SET status=?,error=? WHERE id=?').run('failed',message,auditId);throw error;}

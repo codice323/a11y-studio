@@ -36,3 +36,19 @@
 `GET /api/projects/:id/audits/:auditId/semantics?selector=...` 按同一项目内的已完成扫描重现对应快照，从 Chromium 无障碍树读取单一元素。选择器应使用扫描或验证记录中的原始选择器并做 URL 编码。
 
 响应字段为 `name`、`role`、`ignored`、`ignoredReasons`、`focusable`、`states`、`bounds` 和 `size`。`states` 为 Chromium 返回的常用状态名和值。若元素没有可用于对齐原截图的位置，`bounds` 为 `null`。无法唯一定位时返回错误。历史前后截图继续使用原扫描 ID 和截图接口，验证结论来自已保存的 axe-core 复测记录。
+
+## V2 检测证据及 AI 辅助复核
+
+V2 扫描在原有结果上增加 `detection` 字段，旧扫描可没有此字段。原有 `issues`、`incomplete` 摘要、问题 ID、补丁及自动复测判定继续使用原有口径。
+
+| 字段 | 用途 |
+| --- | --- |
+| `detection.engine`、`timing` | Chromium 页面中实际运行的 axe 版本、标签和各阶段耗时 |
+| `detection.violations`、`incomplete` | WCAG 规则的完整节点与 checks 证据，分别为确定违规和待复核 |
+| `detection.bestPractices` | 最佳实践的违规与不确定结果，独立于 WCAG 确定违规 |
+| `detection.behavior` | 静态 Tab 轨迹、证据、覆盖边界和语义候选。状态有 `completed`、`partial`、`unavailable`。行为发现有 `observed` 或 `needs-review` |
+| `detection.ai.findings` | 可选疑似结果与人工决定。接受后的条目仍保留 AI 来源，属于人工认可项 |
+
+- `POST /api/projects/:id/audits/:auditId/ai-review`，请求体 `{"consent":true}`。显式确认后才向配置的模型发送最多 20 项可访问名称、角色、类型及附近文字。不会发送图片、完整 HTML 或补丁。成功后，同一扫描的重复请求返回已保存批次。模型不可用时，不影响已有规则、行为或修复记录。
+- `PATCH /api/projects/:id/audits/:auditId/ai-review/:findingId`，请求体 `{"decision":"accepted"}`。可选 `accepted`、`rejected`、`needs-review`。结果保存到对应扫描和 JSON 报告。接受项既不进入自动违规列表，也不修改文件。
+- AI 复核目前通过 API 和导出的 JSON 使用。图片 Alt 检查只看文本和邻近文字，无法辨认图片内容。

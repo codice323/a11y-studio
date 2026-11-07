@@ -1,5 +1,6 @@
 import express from 'express';import multer from 'multer';import fs from 'node:fs';import path from 'node:path';import {zipSync,strToU8} from 'fflate';import 'dotenv/config';
 import {db,id,now,ROOT,DATA,project,proposal,audit,snapshotDir,walk,safePath} from './storage';import {createProject} from './import';import {captureUrlSnapshot} from './url-snapshot';import {runAudit,inspectAuditElement} from './scan';import {createProposal,applyProposal,rejectProposal,rollback,getKnowledge} from './repair';
+import { decideAiFinding, requestAiAudit } from './audit-ai';
 const app=express();app.disable('x-powered-by');app.use((req,res,next)=>{const origin=req.get('origin');if(origin){try{const o=new URL(origin);if(!['127.0.0.1','localhost'].includes(o.hostname)||!['http:'].includes(o.protocol)||![String(process.env.PORT||4173),'5173'].includes(o.port))return res.status(403).json({error:'请求来源无效。'});}catch{return res.status(403).json({error:'请求来源无效。'});}}next()});app.use((req,res,next)=>{
  const host = req.get('host');
  if (!host || !/^(?:localhost|127\.0\.0\.1)(?::\d+)?$/i.test(host)) return res.status(403).json({error:'请求主机无效。'});
@@ -42,6 +43,15 @@ app.get('/api/projects/:id/audits/:auditId/semantics', async (req,res,next) => {
  res.on('close', () => { if (!res.writableEnded) controller.abort(); });
  try { res.json(await inspectAuditElement(req.params.id, req.params.auditId, selector, controller.signal)); }
  catch (error) { if (!controller.signal.aborted) next(error); }
+});
+app.post('/api/projects/:id/audits/:auditId/ai-review', async (req,res,next) => {
+ if (req.body?.consent !== true) return res.status(400).json({error:'请确认将候选元素名称和上下文文本发送给模型服务。'});
+ try { res.json(await requestAiAudit(req.params.id, req.params.auditId)); }
+ catch (error) { next(error); }
+});
+app.patch('/api/projects/:id/audits/:auditId/ai-review/:findingId', (req,res,next) => {
+ try { res.json(decideAiFinding(req.params.id, req.params.auditId, req.params.findingId, req.body?.decision)); }
+ catch (error) { next(error); }
 });
 app.post('/api/projects/:id/issues/:issueId/proposals',async(req,res,next)=>{try{res.status(201).json(await createProposal(req.params.id,req.params.issueId,req.body));}catch(e){next(e)}});
 app.post('/api/proposals/:id/apply',(req,res,next)=>{try{proposal(req.params.id);res.status(202).json(job('verification',signal=>applyProposal(req.params.id,signal)));}catch(e){next(e)}});

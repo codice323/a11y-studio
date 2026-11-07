@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>检测评测样页</title>
+<style>
+body { background: white; color: #222; }
+#low-contrast { color: #aaa; }
+#focusless { appearance: none; color: #222; background: white; border: 1px solid #222; }
+#focusless:focus { outline: none; box-shadow: none; }
+#good-focus:focus-visible { outline: 3px solid #124cab; }
+</style>
+</head>
+<body><main>
+  <h1>课程报名</h1>
+  <h3 id="heading-jump">参加条件</h3>
+  <p id="low-contrast">此行文字颜色很浅。</p>
+  <p id="good-contrast">此行文字清晰可读。</p>
+  <p>操作 <button id="unnamed"></button> <button id="good-focus">确认报名</button></p>
+  <p><button id="skipped" tabindex="-1">返回课程列表</button>
+  <button id="focusless">保存草稿</button> <button id="priority" tabindex="3">打印报名表</button></p>
+  <p><button id="expanded" aria-expanded="false" aria-controls="details">报名说明</button></p>
+  <p id="details">报名后可补充信息。</p>
+  <p><a id="vague" href="#details">点击这里</a>，查看课程报名说明。</p>
+  <figure>
+    <img id="bad-alt" alt="IMG_2031.png" width="20" height="20" src="data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7">
+    <figcaption>图片占位测试样例。</figcaption>
+  </figure>
+  <form><input id="email" type="email">
+    <label for="mismatch">联系电话</label><input id="mismatch" type="email">
+    <label for="name">姓名</label><input id="name" type="text">
+  </form>
+</main></body></html>

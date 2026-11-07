@@ -1,0 +1,19 @@
+[
+  {"selector":"#unnamed","ruleIds":["button-name","empty-computed-control-name"],"expected":true},
+  {"selector":"#good-focus","ruleIds":["button-name","empty-computed-control-name"],"expected":false},
+  {"selector":"#email","ruleIds":["label","empty-computed-control-name"],"expected":true},
+  {"selector":"#name","ruleIds":["label","empty-computed-control-name"],"expected":false},
+  {"selector":"#low-contrast","ruleIds":["color-contrast"],"expected":true},
+  {"selector":"#good-contrast","ruleIds":["color-contrast"],"expected":false},
+  {"selector":"#heading-jump","ruleIds":["heading-order"],"expected":true},
+  {"selector":"#skipped","ruleIds":["keyboard-unreached"],"expected":true},
+  {"selector":"#good-focus","ruleIds":["keyboard-unreached"],"expected":false},
+  {"selector":"#focusless","ruleIds":["focus-style-unchanged"],"expected":true},
+  {"selector":"#good-focus","ruleIds":["focus-style-unchanged"],"expected":false},
+  {"selector":"#priority","ruleIds":["focus-order-positive-tabindex"],"expected":true},
+  {"selector":"#good-focus","ruleIds":["focus-order-positive-tabindex"],"expected":false},
+  {"selector":"#expanded","ruleIds":["expanded-visibility-mismatch"],"expected":true},
+  {"selector":"#vague","ruleIds":["ai-name-context"],"expected":true},
+  {"selector":"#bad-alt","ruleIds":["ai-name-context"],"expected":true},
+  {"selector":"#mismatch","ruleIds":["ai-name-context"],"expected":true}
+]
