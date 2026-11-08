@@ -20,6 +20,7 @@ const iconSchema = z.object({
 export async function suggestImageAlt(target: Omit<VisualTarget,'mode'>, context: unknown): Promise<ImageAltAnalysis> {
   const result = await analyzeVisualContext({...target,mode:'image-resource'},{
     type:'image-alt',schema:imageSchema,context,
+    example:{description:'一只白色杯子',purpose:'uncertain',reason:'附近文字未说明图片是否承担独立信息。',contentAlt:'白色杯子'},
     instructions:'返回 description（只描述可见像素）、purpose（informative、decorative 或 uncertain）、reason（只用一句话说明用途依据或要确认的事，约20至60字）、contentAlt（选内容性图片时可用的非空候选，即使判断为装饰也可提供）以及可选 detail。图片无法看清时 description 和 contentAlt 可为 null。只有确认没有独立信息或功能才判断为 decorative。功能性图片优先说明已知动作或去向。',
   });
   if (result.status === 'unavailable') return {status:'needs-manual-review',purpose:'uncertain',
@@ -35,6 +36,7 @@ export async function suggestImageAlt(target: Omit<VisualTarget,'mode'>, context
 export async function suggestIconLabel(target: Omit<VisualTarget,'mode'>, context: unknown): Promise<RepairAnalysis> {
   const result = await analyzeVisualContext({...target,mode:'element'},{
     type:'icon-button',schema:iconSchema,context,
+    example:{description:'放大镜图标',value:null,reason:'需要确认按钮是搜索还是放大。'},
     instructions:'分析图标按钮名称。返回 description（只描述按钮截图中看到什么）、value（仅在视觉和邻近语义支持时给出简短动作名称，否则 null）、reason（一句话说明依据或需核对事项，约20至60字）和可选 detail。不要声称已经点击按钮或验证其功能。',
   });
   if (result.status === 'unavailable') return {status:'repair-review',suggestedValue:null,reason:result.reason};
