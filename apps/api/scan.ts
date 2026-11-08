@@ -1,3 +1,4 @@
+import { setTimeout as delay } from 'node:timers/promises';
 import fs from 'node:fs';import path from 'node:path';import {chromium,type Browser,type Page} from 'playwright-core';import * as cheerio from 'cheerio';
 import {db,id,now,hash,DATA,safePath,snapshotDir,snapshot,audit} from './storage';
 import { scanRules } from './scan-rules';
@@ -8,11 +9,14 @@ let activeScans=0;const MAX_SCANS=2;
 const mime:Record<string,string>={'.html':'text/html; charset=utf-8','.htm':'text/html; charset=utf-8','.css':'text/css; charset=utf-8','.png':'image/png','.jpg':'image/jpeg','.jpeg':'image/jpeg','.gif':'image/gif','.webp':'image/webp'};
 export function sanitizedHtml(source:string){const $=cheerio.load(source);$('script,iframe,object,embed,base,meta[http-equiv]').remove();$('*').each((_,el)=>{for(const attr of Object.keys((el as any).attribs||{}))if(/^on/i.test(attr)||['srcdoc','formaction'].includes(attr.toLowerCase())||(/^(href|src|action)$/i.test(attr)&&/^\s*javascript:/i.test($(el).attr(attr)||'')))$(el).removeAttr(attr)});return $.html();}
 function executable(){ const candidates=[process.env.CHROME_PATH,'/Applications/Google Chrome.app/Contents/MacOS/Google Chrome','/usr/bin/chromium','/usr/bin/chromium-browser','/usr/bin/google-chrome'].filter(Boolean) as string[];return candidates.find(x=>fs.existsSync(x));}
-export async function withSnapshotPage<T>(projectId: string, snapshotId: string, signal: AbortSignal | undefined, inspect: (page: Page) => Promise<T>) {
+export async function withSnapshotPage<T>(projectId: string, snapshotId: string, signal: AbortSignal | undefined, inspect: (page: Page) => Promise<T>, waitForSlotMs = 0) {
  const snap = snapshot(projectId, snapshotId);
  const dir = snapshotDir(projectId, snapshotId);
  let browser: Browser | undefined;
  const closeBrowser = () => { void browser?.close().catch(() => {}); };
+ const deadline = Date.now() + waitForSlotMs;
+ // Preview and evidence requests can briefly occupy both browsers during patch review.
+ while (activeScans >= MAX_SCANS && Date.now() < deadline) await delay(100, undefined, {signal});
  if (activeScans >= MAX_SCANS) throw new Error('扫描任务过多，请稍后再试。');
  try {
   activeScans++;
@@ -123,6 +127,6 @@ export async function runAudit(projectId:string,snapshotId:string,signal?:AbortS
   const detection: DetectionEvidence = { schemaVersion: 2, engine, timing, violations, incomplete, bestPractices, behavior };
   const result={id:auditId,projectId,snapshotId,status:'completed',issues,incomplete:incomplete.map(x=>({ruleId:x.id,help:x.help,count:x.nodes.length})),passes,functionChecks,contrastCheck,screenshot:`/api/audits/${auditId}/screenshot`,size,createdAt:created,detection};
   db.prepare('UPDATE audits SET status=?,result=? WHERE id=?').run('completed',JSON.stringify(result),auditId);return result;
-  });
+  }, 6000);
  } catch(error){const message=(error as Error).message;db.prepare('UPDATE audits SET status=?,error=? WHERE id=?').run('failed',message,auditId);throw error;}
 }
