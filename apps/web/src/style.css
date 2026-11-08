@@ -403,3 +403,19 @@ footer { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 8p
 .patch-pair .diff { margin: 3px 0 0; min-height: 37px; }
 .patch-details { margin: 8px 0; font-size: 13px; }
 @media (max-width: 530px) { .patch-pair { grid-template-columns: minmax(0,1fr); } }
+
+.version-comparison-toolbar {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+  align-items: end;
+  gap: 8px;
+  padding: 8px 13px;
+}
+.version-comparison-toolbar label { display: grid; gap: 4px; min-width: 0; font-size: 12px; }
+.version-comparison-toolbar select { width: 100%; min-width: 0; height: 36px; text-overflow: ellipsis; }
+.version-comparison-toolbar button, .comparison-switch { min-height: 36px; font-size: 12px; }
+.comparison-summary { margin: 0 13px 12px; overflow-wrap: anywhere; }
+.comparison-summary p { margin: 5px 0; }
+.comparison-summary details { margin-block: 6px; }
+.shot figcaption { overflow-wrap: anywhere; }
+.semantic-table th { overflow-wrap: anywhere; }

@@ -1,0 +1,164 @@
+import { useEffect, useMemo, useState } from 'react';
+import type { compareSnapshots } from '../../api/version-compare';
+import type { EvidenceView } from './Evidence';
+import { Screenshot, SemanticTable } from './EvidenceDetails';
+import { diffFile, PatchReview } from './PatchReview';
+import { inspectAudit, type Semantics } from './semantics';
+import { versionName, type Issue, type State } from './types';
+
+export type VersionPair = { left: string; right: string };
+type Comparison = ReturnType<typeof compareSnapshots>;
+type Evidence = { semantics: Semantics | null; status?: string };
+
+const views: [EvidenceView, string][] = [['visual', '页面对照'], ['diff', '代码变更'], ['semantics', '无障碍语义']];
+const sides = ['left', 'right'] as const;
+const layouts = [['both', '并排对比'], ['left', '仅左侧版本'], ['right', '仅右侧版本']] as const;
+
+function ComparisonSummary({ comparison, diffs }: { comparison: Comparison; diffs: ReturnType<typeof diffFile>[] }) {
+  const { files, findings, review } = comparison;
+  const changes = diffs.flatMap(diff => diff.changes);
+  const additions = changes.filter(change => change.kind === 'added').length;
+  const removals = changes.filter(change => change.kind === 'removed').length;
+  return <section className="repair-summary comparison-summary" aria-label="版本差异摘要">
+    <h3>版本差异摘要</h3>
+    <p>{files.length} 个文件有变更 · 已显示 {additions} 处新增、{changes.length - additions - removals} 处修改、{removals} 处删除
+      {files.length > diffs.length && ` · ${files.length - diffs.length} 个二进制或超出展示上限的文件未展开`}</p>
+    {findings ? <p>右侧不再报告 {findings.resolved.length} 个问题 · 右侧新增 {findings.added.length} 个问题</p>
+      : <p>至少一侧缺少扫描结果，无法统计问题增减。</p>}
+    {findings && Boolean(findings.resolved.length || findings.added.length) && <details>
+      <summary>查看问题增减</summary>
+      <ul>{(['resolved', 'added'] as const).flatMap(kind => findings[kind].map(item =>
+        <li key={item.id}>{kind === 'resolved' ? '右侧不再报告' : '右侧新增'} · {item.help} · <code>{item.selector || '页面级'}</code></li>))}</ul>
+    </details>}
+    <p>待人工复核记录 · 左侧 {comparison.left.auditId ? `${review.left.length} 组` : '未扫描'} · 右侧 {comparison.right.auditId ? `${review.right.length} 组` : '未扫描'}</p>
+    {Boolean(review.left.length || review.right.length) && <details><summary>查看待复核依据</summary>
+      {sides.map(side => review[side].length > 0 && <div key={side}>
+        <strong>{side === 'left' ? '左侧' : '右侧'}</strong>
+        <ul>{review[side].map((item, index) => <li key={index}>{item.label} · {item.detail}</li>)}</ul>
+      </div>)}
+    </details>}
+  </section>;
+}
+
+export function VersionComparison({ state, target, pair, onPair, view, onView, onHistory }: {
+  state: State; target?: Issue; pair: VersionPair; onPair: (pair: VersionPair) => void;
+  view: EvidenceView; onView: (view: EvidenceView) => void; onHistory?: () => void;
+}) {
+  const { left, right } = pair;
+  const { id: projectId, currentSnapshot } = state.project;
+  const { id: issueId, selector } = target ?? {};
+  const [layout, setLayout] = useState<(typeof layouts)[number][0]>('both');
+  const [retry, setRetry] = useState(0);
+  const key = JSON.stringify([projectId, left, right, issueId, selector, state.current?.id, state.baseline?.id, retry]);
+  const [result, setResult] = useState<{ key: string; data?: Comparison; error?: string }>();
+  const request = result?.key === key ? result : undefined;
+  const data = request?.data;
+  const [inspected, setInspected] = useState<{ key: string; values: Record<'left' | 'right', Evidence> }>();
+  const evidence = inspected?.key === key ? inspected.values : undefined;
+
+  useEffect(() => {
+    if (!left || !right) return;
+    const controller = new AbortController();
+    const params = new URLSearchParams({ left, right });
+    if (issueId) params.set('issueId', issueId);
+    if (selector) params.set('selector', selector);
+    void fetch(`/api/projects/${projectId}/compare?${params}`, { signal: controller.signal }).then(async response => {
+      const body = await response.json();
+      if (!response.ok) throw new Error(body.error ?? '无法读取版本差异。');
+      if (body.left.id !== left || body.right.id !== right) throw new Error('返回的版本与所选版本不一致。');
+      if (!controller.signal.aborted) setResult({ key, data: body });
+    }).catch((error: Error) => {
+      if (!controller.signal.aborted) setResult({ key, error: error.message });
+    });
+    return () => controller.abort();
+  }, [key, projectId, left, right, issueId, selector]);
+
+  const needsEvidence = view !== 'diff';
+  useEffect(() => {
+    if (!data || !selector || !needsEvidence || evidence) return;
+    const controller = new AbortController();
+    async function inspect(side: Comparison['left']): Promise<Evidence> {
+      if (!side.auditId) return { semantics: null, status: '此版本暂无可用扫描证据。' };
+      if (!side.selector) return { semantics: null, status: '此版本没有可靠的对应元素定位。' };
+      try {
+        return { semantics: await inspectAudit(projectId, side.auditId, side.selector, controller.signal) };
+      } catch (error) {
+        return { semantics: null, status: (error as Error).message };
+      }
+    }
+    void (async () => {
+      const before = await inspect(data.left);
+      if (controller.signal.aborted) return;
+      const after = left === right ? before : await inspect(data.right);
+      if (!controller.signal.aborted) setInspected({ key, values: { left: before, right: after } });
+    })();
+    return () => controller.abort();
+  }, [data, key, projectId, selector, needsEvidence, left, right, evidence]);
+
+  const diffs = useMemo(() => (data?.files ?? []).flatMap(({ file, kind, source }) =>
+    source ? [diffFile({ file, kind, selector: '', ...source })] : []), [data]);
+  const missingFiles = data?.files.filter(file => !file.source) ?? [];
+  const name = (id: string) => versionName(state, id);
+  const same = data && !data.files.length && data.findings &&
+    !data.findings.resolved.length && !data.findings.added.length &&
+    JSON.stringify(data.review.left) === JSON.stringify(data.review.right);
+
+  return <section className="preview panel" aria-labelledby="evidence-title">
+    <div className="panel-head"><h2 id="evidence-title">修复效果对比</h2>
+      {onHistory && <button type="button" className="secondary comparison-switch" onClick={onHistory}>返回本次修复证据</button>}
+    </div>
+    <div className="evidence-tabs" role="group" aria-label="修复效果视图">
+      {views.map(([id, label]) => <button key={id} type="button" aria-pressed={view === id} onClick={() => onView(id)}>{label}</button>)}
+    </div>
+    <div className="version-comparison-toolbar" role="group" aria-label="只读版本对比">
+      <label>左侧版本<select value={left} title={name(left)} onChange={event => onPair({ ...pair, left: event.target.value })}>
+        {!left && <option value="">原始版本缺失</option>}
+        {state.snapshots.map(snapshot => <option key={snapshot.id} value={snapshot.id}>{name(snapshot.id)}</option>)}
+      </select></label>
+      <button type="button" className="secondary" disabled={!left || left === right} onClick={() => onPair({ left: right, right: left })}>交换版本</button>
+      <label>右侧版本<select value={right} title={name(right)} onChange={event => onPair({ ...pair, right: event.target.value })}>
+        {state.snapshots.map(snapshot => <option key={snapshot.id} value={snapshot.id}>{name(snapshot.id)}</option>)}
+      </select></label>
+    </div>
+    {target && <div className="evidence-target"><span>{target.ruleId}</span><code>{selector || '页面级问题'}</code></div>}
+    {!left ? <p className="comparison-status" role="status">找不到原始快照。请选择要对比的左侧版本。</p>
+      : !request ? <p className="comparison-status" role="status">正在加载所选版本的对比证据…</p>
+      : request.error ? <p className="comparison-status" role="status">{request.error} <button type="button" className="secondary" onClick={() => setRetry(retry + 1)}>重试对比</button></p>
+      : left === right || same ? <p className="comparison-status" role="status">这两个版本暂无可检测差异。{left === right && '左右选择了同一版本。'}</p>
+      : null}
+    {view === 'visual' && <>
+      <div className="shot-options" role="group" aria-label="截图排列">
+        {layouts.map(([id, label]) => <button key={id} type="button" aria-pressed={layout === id} onClick={() => setLayout(id)}>{label}</button>)}
+      </div>
+      <div className={layout === 'both' ? 'shots' : 'shots single-shot'}>
+        {sides.filter(side => layout === 'both' || layout === side).map(side => {
+          const id = pair[side];
+          const scan = [state.baseline, state.current].find(scan => scan?.snapshotId === id);
+          const src = data ? data[side].screenshot : scan?.screenshot;
+          const found = evidence?.[side];
+          const location = found?.semantics;
+          return <Screenshot key={`${side}:${id}:${src}`} title={`${side === 'left' ? '左侧' : '右侧'} · ${id ? name(id) : '未选择版本'}`}
+            src={src} bounds={location?.bounds} size={location?.size} location={data?.[side].selector}
+            locationStatus={!selector ? '请选择可定位的问题' : found ? found.status ?? '无法在截图上标记该元素。' : request?.error ? '元素位置不可用。' : '正在定位元素…'}
+            emptyText={!data && !request && id ? '正在加载此版本截图…' : '此版本暂无截图。'} />;
+        })}
+      </div>
+    </>}
+    {view === 'diff' && data && <div className="diff-wrap source-diffs">
+      {diffs.length > 0 && <PatchReview proposal={null} problem="" impact="" comparisonDiffs={diffs} />}
+      {missingFiles.length > 0 && <ul>{missingFiles.map(file => <li key={file.file}><code>{file.file}</code> · {file.kind === 'added' ? '新增' : file.kind === 'removed' ? '删除' : '修改'} · 二进制或超出展示上限</li>)}</ul>}
+      {data.files.length === 0 && <p className="blank">所选快照的文件内容相同。</p>}
+    </div>}
+    {view === 'semantics' && <div className="semantic-content">
+      <p className="muted">使用 Chromium 无障碍树读取所选快照的名称、角色和状态。</p>
+      {!selector ? <p className="blank">请先选择可定位的问题元素。</p> : data && !evidence ? <p role="status">正在还原快照并读取浏览器语义…</p> : evidence &&
+        <><SemanticTable result={{ before: evidence.left.semantics, after: evidence.right.semantics }}
+          beforeLabel={name(left)} afterLabel={name(right)} compare />
+          {sides.map(side => evidence[side].status && <p key={side} role="status">{name(pair[side])} · {evidence[side].status}</p>)}
+          {sides.some(side => evidence[side].status) && <button type="button" className="secondary" onClick={() => setRetry(retry + 1)}>重试语义读取</button>}
+        </>}
+    </div>}
+    {data && <ComparisonSummary comparison={data} diffs={diffs} />}
+    <p className="comparison-status muted">只读对比 · 项目当前版本为 {name(currentSnapshot)}。</p>
+  </section>;
+}

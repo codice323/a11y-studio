@@ -1,7 +1,7 @@
 import type { BehaviorFinding, Issue } from './types';
 
 export const sourceRepairKinds: Record<string, string> = {
-  label: 'label', 'button-name': 'button', 'link-name': 'link', 'color-contrast': 'contrast',
+  label: 'label', 'select-name': 'label', 'button-name': 'button', 'link-name': 'link', 'color-contrast': 'contrast',
   'focus-style-unchanged': 'focus', 'aria-valid-attr-value': 'aria', 'aria-broken-idref': 'aria',
 };
 

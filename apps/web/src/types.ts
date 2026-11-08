@@ -68,6 +68,7 @@ export type Verification = {
 export type State = {
   project: { id: string; name: string; entry: string; currentSnapshot: string };
   snapshots: Snapshot[];
+  originalSnapshotId: string | null;
   baseline: Scan | null;
   current: Scan | null;
   summary: { initial: number | null; resolved: number; remaining: number; added: number };

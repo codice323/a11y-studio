@@ -10,6 +10,7 @@
 | POST /api/projects | multipart 文件 `file` 或字段 `fixture`，创建 V0 |
 | POST /api/projects/import-url | 采集公开网页的本地快照，创建 V0 |
 | GET /api/projects/:id | 项目、版本、当前与初始扫描及报告摘要 |
+| GET /api/projects/:id/compare?left=…&right=… | 只读对比两个有效快照。可用 `issueId` 和 `selector` 定位元素。返回扫描和截图引用、文件差异、问题增减及待复核记录 |
 | POST /api/projects/:id/audits | 扫描当前版本 |
 | GET /api/audits/:id/screenshot | 扫描截图 |
 | GET /api/projects/:id/audits/:auditId/semantics | 重现扫描版本并读取目标元素的 Chromium 无障碍语义 |
@@ -61,8 +62,15 @@ V2 扫描在原有结果上增加 `detection` 字段，旧扫描可没有此字�
 - `PATCH /api/projects/:id/audits/:auditId/ai-review/:findingId`，请求体 `{"decision":"accepted"}`。可选 `accepted`、`rejected`、`needs-review`。结果保存到对应扫描和 JSON 报告。接受项既不进入自动违规列表，也不修改文件。
 - 工作台与结果报告显示 V2 行为证据、最佳实践及已保存的 AI 复核结果。AI 复核的请求和决定通过 API 提交。导出 ZIP 内的 JSON 保留完整证据。图片 Alt 检查只看文本和邻近文字，无法辨认图片内容。
 
-项目详情和报告包含有效快照的 `name` 和 `parent_id`。旧快照自动按原始版本或补丁规则显示默认名称。`resolved` 是当前快照继承的、已通过验证且未在当前检测中再次出现的问题，每项关联 `verificationId`。`summary.resolved` 是该列表的数量。`verifications` 仍包含全部分支的成功和失败记录。
+项目详情和报告包含有效快照的 `name`、`parent_id` 以及根快照的 `originalSnapshotId`。旧快照自动按原始版本或补丁规则显示默认名称。`resolved` 是当前快照继承的、已通过验证且未在当前检测中再次出现的问题，每项关联 `verificationId`。`summary.resolved` 是该列表的数量。`verifications` 仍包含全部分支的成功和失败记录。
 
-表单标签源码修复会优先使用浏览器中的明确类型、自动填充语义或紧邻的可见字段文案。结果用 `analysis.labelDecision` 区分 `confirm`（建议人工确认）与 `needs-input`（需要补充字段用途）。编辑后可用 `source:"manual",sourceRepair:true,snapshotId,intent` 创建新的原生标签预览，预览不需要调用模型。原生标签仍须通过隔离复测并经用户确认才能应用。
+表单标签源码修复会采集浏览器中的 id、name、输入类型、自动填充、占位提示、表单及分组标题、关联名称和说明、紧邻文案。优先使用明确的表单语义或直接文案。字段标识符需有相互印证的命名或匹配的业务上下文，线索冲突时提示补充用途。此分支由浏览器证据和规则完成推荐。结果用 `analysis.labelDecision` 区分 `confirm`（建议人工确认）与 `needs-input`（需要补充字段用途）。编辑后可用 `source:"manual",sourceRepair:true,snapshotId,intent` 创建新的原生标签预览，预览不需要调用模型。原生标签仍须通过隔离复测并经用户确认才能应用。
 
 待应用补丁可用 `GET /api/proposals/:id/preview` 读取隔离候选的浏览器语义、截图与可测对比度。接口重建补丁副本，不写入当前快照。链接名称优先引用实际同页标题或明确的 `title`；缺少证据时返回 `linkDecision:"needs-input"`，填写用途后可继续生成受控源码补丁。
+
+## 样式修复和跨页验证
+
+- `select-name` 保留为 axe 确定违规，并复用原生表单标签源码策略。缺少可信文案时可以手动填写用途。焦点和悬空 ARIA 引用的行为发现仍是复核线索。`target-size` 保留在检测结果中，目前需人工核对可点击面积和间距。
+- 对比度与焦点方案可使用当前 HTML 文档或其直接链接的本地 CSS。Agent 读取 Chromium 的双视口计算样式、匹配规则、继承、页内和外链来源、媒体条件、伪元素与焦点状态。这些是有限的规则证据，复杂层叠仍由实际渲染验证。
+- PostCSS 可改写能单独匹配目标的现有声明，或生成目标限定的声明。多页项目的 CSS 方案限制在当前文档，保留共享样式文件。现有内联 `!important` 可保留其优先级，源码策略不会新增该标记。
+- CSS 方案在预览和提交阶段都复测入口目标及所有附页，附页最多八个。附页比较 axe 违规、Tab 轨迹、焦点证据和静态控件属性，并核对 900px、390px 下的无障碍语义与计算样式及布局指纹。截图摘要用于追查差异。检测到附页变化或证据不足时停止，提交失败沿用原版本和失败记录。静态快照校验不覆盖真实站点脚本、任意视口、触摸操作、Shadow DOM 或未导入资源。

@@ -5,34 +5,90 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import net from 'node:net';
+import http from 'node:http';
 import { setTimeout as delay } from 'node:timers/promises';
 import { chromium } from 'playwright-core';
 import { zipSync, unzipSync } from 'fflate';
 import { sites } from '../tests/fixtures/cross-site/sites.mjs';
+import { generalizationSites } from '../tests/fixtures/cross-site/generalization.mjs';
+import { createHash } from 'node:crypto';
 
 const envPath = process.argv[2];
+const split = process.env.A11Y_BENCH_SET ?? 'legacy';
+if (!['legacy', 'all', 'development', 'holdout'].includes(split)) throw new Error('Unknown benchmark set');
+const selectedSites = split === 'legacy' ? sites : generalizationSites.filter(site =>
+  split === 'all' || site.id.startsWith(split === 'development' ? 'd' : 'h'));
+const limit = Number(process.env.A11Y_BENCH_LIMIT ?? Infinity);
+if (!(limit > 0 && (Number.isInteger(limit) || limit === Infinity))) throw new Error('Invalid case limit');
+const commit = process.env.A11Y_BENCH_REVISION ?? execFileSync('git',['rev-parse','HEAD'],{encoding:'utf8'}).trim();
+assert.match(commit,/^[a-f0-9]{40}$/i);
+const transportOverrides = split === 'development' ? {'d1-harbor':'rendered-url','d4-lab':'static-url'} : {};
+const fingerprint = createHash('sha256').update(JSON.stringify({selectedSites,transportOverrides})).digest('hex');
+const sourceFingerprint = createHash('sha256').update(JSON.stringify(
+  ['apps/api','packages/shared','knowledge'].flatMap(dir => fs.readdirSync(dir,{recursive:true,withFileTypes:true})
+    .filter(entry => entry.isFile()).map(entry=>path.join(entry.parentPath,entry.name))).sort()
+    .map(file=>[file,createHash('sha256').update(fs.readFileSync(file)).digest('hex')])
+)).digest('hex');
 const output = path.resolve(process.argv[3] ?? 'data/cross-site-repair');
 if (!envPath || !fs.existsSync(envPath)) throw new Error('Usage: node scripts/cross-site-repair.mjs /path/to/.env [output-directory]');
 fs.mkdirSync(output, { recursive: true });
 const temporary = fs.mkdtempSync(path.join(os.tmpdir(), 'a11y-cross-site-'));
-const usageFile = path.join(temporary, 'usage.ndjson');
-fs.writeFileSync(usageFile, '');
+const usageFile = path.join(output, 'usage.ndjson');
+fs.appendFileSync(usageFile, '');
+const resultFile = path.join(output,'results.json');
+const pendingFile = path.join(output,'pending.json');
+const prior = fs.existsSync(resultFile) ? JSON.parse(fs.readFileSync(resultFile,'utf8')) : null;
+if (prior) for (const [key, value] of Object.entries({split,fingerprint,sourceFingerprint,commit})) {
+  assert.equal(prior.metadata[key],value,'Refusing to resume a different baseline: '+key);
+}
+const artifacts = path.join(output,'cases');
+fs.mkdirSync(artifacts,{recursive:true});
+function writeJson(file, data) {
+  fs.writeFileSync(file+'.tmp',JSON.stringify(data,null,2));
+  fs.renameSync(file+'.tmp',file);
+}
+function archiveSite(id, name, files) {
+  const dir = path.join(artifacts,id);
+  fs.mkdirSync(dir,{recursive:true});
+  fs.writeFileSync(path.join(dir,name),zipSync(files));
+}
 const socket = net.createServer();
 socket.listen(0, '127.0.0.1');
 await once(socket, 'listening');
 const port = socket.address().port;
 await new Promise(resolve => socket.close(resolve));
 const base = `http://127.0.0.1:${port}`;
-const server = spawn(process.execPath, ['--env-file=' + envPath, '--import', './tests/helpers/cross-site-usage.mjs', '--import', 'tsx', 'apps/api/server.ts'], {
-  env: {...process.env, PORT: String(port), A11Y_DATA_DIR: temporary, A11Y_BENCH_USAGE_FILE: usageFile, A11Y_VISION_TRACE: '0'},
+const bySite = new Map(selectedSites.map(site=>[site.id,site]));
+const upstream = http.createServer((req,res) => {
+  const [, id, file] = new URL(req.url,'http://fixture.test').pathname.split('/');
+  const site = bySite.get(id);
+  const mode = transportOverrides[id];
+  if (!site || !mode) return res.writeHead(404).end();
+  if (file === 'hydrate.js' && mode === 'rendered-url') {
+    const body = site.html.match(/<body>([\s\S]*)<\/body>/i)[1];
+    return res.writeHead(200,{'Content-Type':'text/javascript'}).end('document.querySelector("#root").outerHTML='+JSON.stringify(body)+';');
+  }
+  if (file !== 'index.html') return res.writeHead(404).end();
+  const html = mode === 'rendered-url' ? site.html.replace(/<body>[\s\S]*<\/body>/i,
+    '<body><div id="root"></div><script src="hydrate.js"></script></body>') : site.html;
+  res.writeHead(200,{'Content-Type':'text/html; charset=utf-8'}).end(html);
+});
+upstream.listen(0,'127.0.0.1');
+await once(upstream,'listening');
+const server = spawn(process.execPath, ['--env-file=' + envPath, '--require','./tests/helpers/url-upstream.cjs','--import', './tests/helpers/cross-site-usage.mjs', '--import', 'tsx', 'apps/api/server.ts'], {
+  env: {...process.env, PORT: String(port), A11Y_TEST_UPSTREAM_PORT:String(upstream.address().port), A11Y_DATA_DIR: temporary, A11Y_BENCH_USAGE_FILE: usageFile, A11Y_VISION_TRACE: '0'},
   stdio: ['ignore', 'ignore', 'ignore'],
 });
 const chromePath = process.env.CHROME_PATH || '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
 let browser;
-const records = [];
-const rules = {alt:'image-alt',label:'label',button:'button-name',contrast:'color-contrast',aria:'aria-valid-attr-value',focus:'focus-style-unchanged'};
-let metadata = {};
-let rulesSeen = new Set();
+const records = prior?.records ?? [];
+const imports = prior?.imports ?? [];
+const caseKey = item => [item.site,item.kind,item.target].join('|');
+const complete = new Set(records.map(caseKey));
+let addedThisRun = 0;
+const rules = {alt:'image-alt',label:'label',button:'button-name',link:'link-name',contrast:'color-contrast',aria:'aria-valid-attr-value',focus:'focus-style-unchanged'};
+let metadata = prior?.metadata ?? {};
+const rulesSeen = new Set(metadata.rulesSeen);
 
 async function api(route, body, { form = false, binary = false } = {}) {
   const response = await fetch(base + route, body === undefined ? {} : form ? {method:'POST', body} :
@@ -59,7 +115,9 @@ const svg = {
   train:'<path d="M22 160h282m-252 20h238" stroke="#554e51" stroke-width="5"/><rect x="27" y="69" width="266" height="80" rx="22" fill="#c33639"/><path d="M48 88h39v30H48zm54 0h39v30h-39zm54 0h39v30h-39zm54 0h60v30h-60z" fill="#dfefff"/><circle cx="82" cy="149" r="13" fill="#252c36"/><circle cx="239" cy="149" r="13" fill="#252c36"/>',
 };
 async function build(site, drawing) {
-  const files = {[site.entry]:enc(site.html), [site.css]:enc(site.style)};
+  const files = {[site.entry]:enc(site.html)};
+  if (site.css) files[site.css] = enc(site.style);
+  for (const [file, content] of Object.entries(site.extraFiles ?? {})) files[file] = enc(content);
   for (const [file, subject] of site.images) {
     const ext = path.extname(file).slice(1);
     const uri = await drawing.evaluate(async ({markup, ext}) => {
@@ -150,38 +208,81 @@ function pass(item, actual) {
   const matches=new RegExp(item.expected ?? '', 'iu');
   if(item.kind==='alt')return Boolean(actual.alt&&matches.test(actual.alt)&&matches.test(actual.name)&&!actual.ignored);
   if(item.kind==='label')return matches.test(actual.name)&&actual.label.some(label=>label.valid&&matches.test(label.text));
-  if(item.kind==='button')return actual.role==='button'&&matches.test(actual.name);
+  if(item.kind==='button'||item.kind==='link')return actual.role===item.kind&&matches.test(actual.name);
   if(item.kind==='aria')return actual.refs?.split(/\s+/).includes(item.ref)&&matches.test(actual.name);
   if(item.kind==='focus')return Boolean(actual.focus?.visible&&actual.focus?.painted);
   return actual.contrast>=actual.required;
 }
 function usage() { return fs.readFileSync(usageFile,'utf8').trim().split('\n').filter(Boolean).map(line=>JSON.parse(line)); }
 
+function persist() {
+  writeJson(resultFile,{metadata:{...metadata,rulesSeen:[...rulesSeen]},imports,records});
+}
+
 try {
   for (let i=0;i<80;i++) { if(await fetch(base+'/api/status').then(r=>r.ok,()=>false))break;await delay(150); }
   const config = await api('/api/status');
   assert.ok(config.configured && config.visionConfigured, 'Real model and vision must be configured for this benchmark.');
   browser=await chromium.launch({executablePath:chromePath,headless:true});
-  metadata={time:new Date().toISOString(),browser:browser.version(),node:process.version,commit:execFileSync('git',['rev-parse','HEAD'],{encoding:'utf8'}).trim(),fixtureSet:'original synthetic pages, no public site access',transport:'ZIP',config};
+  metadata={...metadata,split,fingerprint,sourceFingerprint,time:metadata.time??new Date().toISOString(),browser:browser.version(),node:process.version,commit,fixtureSet:'original authored fixtures, local HTTP route for URL tests',transports:['HTML','ZIP','static-url','rendered-url'],config};
+  if (fs.existsSync(pendingFile)) {
+    const pending = JSON.parse(fs.readFileSync(pendingFile,'utf8'));
+    if (!complete.has(caseKey(pending.row))) {
+      records.push({...pending.row,class:'E',status:'interrupted',reason:'Prior run interrupted; not retried to prevent a duplicate model charge',model:usage().slice(pending.usageIndex)});
+      complete.add(caseKey(pending.row));
+      persist();
+    }
+    fs.unlinkSync(pendingFile);
+  }
+  persist();
   const page=await browser.newPage({viewport:{width:900,height:700}});
   const drawing=await browser.newPage();
-  for (const site of sites) {
-    const files=await build(site,drawing);
+  siteLoop: for (const site of selectedSites) {
+    if (addedThisRun >= limit) break;
+    const remaining = site.pairs.filter(item=>!complete.has(caseKey({...item,site:site.id})));
+    if (!remaining.length) continue;
+    let files=await build(site,drawing);
+    archiveSite(site.id,'authored.zip',files);
+    writeJson(path.join(artifacts,site.id,'annotations.json'),site.pairs);
+    let entry = site.entry;
     const form=new FormData();
-    form.set('file',new Blob([zipSync(files)],{type:'application/zip'}),site.id+'.zip');
-    const project=await api('/api/projects',form,{form:true});
+    const isHtml = site.transport === 'html';
+    const transport = transportOverrides[site.id] ?? (isHtml ? 'HTML' : 'ZIP');
+    form.set('file',new Blob([isHtml ? site.html : zipSync(files)],{type:isHtml?'text/html':'application/zip'}),site.id+(isHtml?'.html':'.zip'));
+    let project, baseline;
+    try {
+      if (transport.endsWith('-url')) {
+        project=await api('/api/projects/import-url',{url:'http://93.184.216.34/'+site.id+'/index.html',mode:transport==='rendered-url'?'rendered':'static'});
+        entry=project.entry;
+        const exported=unzipSync(await api('/api/projects/'+project.id+'/export',undefined,{binary:true}));
+        files=Object.fromEntries(Object.entries(exported).filter(([name])=>name.startsWith('website/')).map(([name,data])=>[name.slice(8),data]));
+      } else project=await api('/api/projects',form,{form:true});
+      archiveSite(site.id,'imported.zip',files);
+      baseline=await job(await api('/api/projects/'+project.id+'/audits',{}));
+      imports.push({site:site.id,transport,ok:true});
+    } catch(error) {
+      imports.push({site:site.id,transport,ok:false,reason:error.message});
+      for(const item of remaining) {
+        if (addedThisRun >= limit) break;
+        records.push({site:site.id,category:site.category,transport,...item,status:'failed',stage:project?'scan':'import',class:'E',reason:error.message});
+        addedThisRun++;
+      }
+      persist();
+      continue;
+    }
     const route='/api/projects/'+project.id;
-    const baseline=await job(await api(route+'/audits',{}));
     metadata.engine=baseline.detection.engine;
     baseline.issues.forEach(issue=>rulesSeen.add(issue.ruleId));
-    for (const item of site.pairs) {
+    for (const item of remaining) {
+      if (addedThisRun >= limit) break siteLoop;
       const started=performance.now(), usageIndex=usage().length;
-      const row={site:site.id,category:site.category,...item,status:'failed',humanSteps:[],added:null};
+      const row={site:site.id,category:site.category,transport,...item,status:'failed',stage:'detection',humanSteps:[],added:null};
+      writeJson(pendingFile,{row,usageIndex});
       try {
         await api(route+'/rollback',{snapshotId:project.currentSnapshot});
-        await view(page,site.entry,files);
+        await view(page,entry,files);
         const reviewRule=item.kind==='focus'?rules.focus:item.kind==='aria'?'aria-broken-idref':null;
-        const typed=[...baseline.issues.filter(issue=>issue.ruleId===rules[item.kind]),
+        const typed=[...baseline.issues.filter(issue=>issue.ruleId===rules[item.kind] || (item.kind==='label' && issue.ruleId==='select-name')),
           ...baseline.detection.behavior.findings.filter(issue=>issue.ruleId===reviewRule)];
         const detected=(await matching(page,item.target,typed))[0];
         row.negativeFlagged=(await matching(page,item.control,typed)).length>0;
@@ -189,6 +290,10 @@ try {
         row.negativeBefore=await evidence(page,item.control,item.kind);
         row.detected=Boolean(detected);
         row.detectionCategory=detected?.status==='needs-review'?'manual-review':detected?'confirmed':null;
+        if(item.negativeOnly){
+          row.status=detected?'false-positive':'correct-control';
+          continue;
+        }
         if(!detected){
           const candidates=[...baseline.detection.incomplete,...baseline.detection.bestPractices.violations,...baseline.detection.bestPractices.incomplete]
             .flatMap(rule=>rule.nodes.map(node=>({rule:rule.id,selector:node.target[0]}))).filter(node=>typeof node.selector==='string');
@@ -199,15 +304,18 @@ try {
         }
         const issueId=detected.id ?? (item.kind==='focus'?'focus:':'aria-ref:')+detected.selector;
         const endpoint=route+'/issues/'+encodeURIComponent(issueId)+'/proposals';
+        row.stage='proposal';
         let proposed=await api(endpoint,{source:'agent',sourceRepair:item.kind!=='alt',snapshotId:project.currentSnapshot});
         if(proposed.kind==='job')proposed=await job(proposed);
         row.analysis=proposed.analysis ?? {reason:proposed.reason,purpose:proposed.purpose,contentAlt:proposed.contentAlt,labelDecision:proposed.labelDecision,media:proposed.media};
         row.attempts=proposed.sourceReview?.attempts??proposed.agentRun?.attempts??null;
         row.agentTrace=proposed.agentTrace??proposed.analysis?.agentTrace??[];
         row.aiAbstained=!proposed.patch && !proposed.contentAlt;
+        if (item.expectRefusal) { row.status=row.aiAbstained?'safe-refusal':'unsafe-proposal'; continue; }
+        if (item.expectAbstain && !row.aiAbstained) { row.status='unsafe-proposal'; continue; }
         if(item.kind==='alt'){
           if(!proposed.contentAlt || !new RegExp(item.expected,'iu').test(proposed.contentAlt)){
-            row.status='needs-human';row.reason='Image wording missing or mismatches authored subject';continue;
+            row.status=proposed.contentAlt?'unsafe-proposal':'needs-human';row.reason='Image wording missing or mismatches authored subject';continue;
           }
           row.humanSteps.push('confirm-informative-purpose');
           proposed=await api(endpoint,{source:'manual',value:proposed.contentAlt,imagePurpose:'informative'});
@@ -217,33 +325,54 @@ try {
           if(proposed.kind==='job')proposed=await job(proposed);
         }
         if(!proposed.patch){row.status='needs-human';row.reason=proposed.reason??'No verified patch';continue;}
+        row.proposalPatch=proposed.sourceReview?.changes??proposed.patch;
         row.diffFiles=proposed.sourceReview?.changes.map(change=>change.file)??[proposed.patch.targetFile];
         row.humanSteps.push('approve-patch');
+        row.stage='apply';
         const applied=await job(await api('/api/proposals/'+proposed.id+'/apply',{semanticReviewed:item.kind==='alt',sourceReviewed:Boolean(proposed.sourceReview)}));
         row.added=applied.added.length;row.addedRules=applied.added.map(issue=>issue.ruleId);
-        row.validation=applied.status;row.diff=applied.diff;
+        row.validation=applied.status;row.verification={checks:applied.sourceChecks??null,reason:applied.reason,targetFixed:applied.targetFixed};row.diff=applied.diff;
         if(applied.status!=='passed'){row.status='validation-failed';row.reason=applied.reason;continue;}
+        row.stage='independent-validation';
         const exported=unzipSync(await api(route+'/export',undefined,{binary:true}));
         const repaired=Object.fromEntries(Object.entries(exported).filter(([name])=>name.startsWith('website/')).map(([name,data])=>[name.slice(8),data]));
-        await view(page,site.entry,repaired);
+        await view(page,entry,repaired);
         row.after=await evidence(page,item.target,item.kind);
         row.negativeAfter=await evidence(page,item.control,item.kind);
         const comparable = item.kind==='focus' ? ['name','role','ignored','focus'] : item.kind==='contrast' ? ['contrast','foreground','background'] :
           item.kind==='alt'?['name','alt','ignored']:['name','role','ignored','refs','label'];
         row.negativeUnchanged=comparable.every(key=>JSON.stringify(row.negativeBefore[key])===JSON.stringify(row.negativeAfter[key]));
-        row.status=pass(item,row.after)&&row.negativeUnchanged&&row.added===0?'success':'semantic-mismatch';
+        row.otherPages = [];
+        if (item.kind === 'contrast' || item.kind === 'focus') {
+          for (const other of Object.keys(site.extraFiles ?? {}).filter(name => /\.html?$/i.test(name))) {
+            const inspect = async files => {
+              await view(page,other,files);
+              return page.locator('main *').evaluateAll(nodes => nodes.map(node => {
+                const s = getComputedStyle(node);
+                return [node.id, s.color];
+              }));
+            };
+            row.otherPages.push({file:other,unchanged:JSON.stringify(await inspect(files))===JSON.stringify(await inspect(repaired))});
+          }
+        }
+        row.status=pass(item,row.after)&&row.negativeUnchanged&&row.added===0&&row.otherPages.every(other=>other.unchanged)?'success':'semantic-mismatch';
         if(row.status!=='success')row.reason='Independent browser semantic check or negative control changed';
       } catch(error){row.reason=error.message;}
       finally {
         row.elapsedMs=Math.round(performance.now()-started);row.model=usage().slice(usageIndex);
+        row.class = ({success:'B','needs-human':'C','safe-refusal':'C','unsafe-proposal':'D','semantic-mismatch':'D','false-positive':'D','correct-control':'control'})[row.status] ?? 'E';
         records.push(row);
+        addedThisRun++;
         console.log(JSON.stringify({site:row.site,kind:row.kind,target:row.target,status:row.status,reason:row.reason,elapsedMs:row.elapsedMs}));
-        fs.writeFileSync(path.join(output,'results.json'),JSON.stringify({metadata:{...metadata,rulesSeen:[...rulesSeen]},records},null,2));
+        persist();
+        fs.unlinkSync(pendingFile);
       }
     }
   }
 } finally {
   await browser?.close();
+  upstream.closeAllConnections();
+  upstream.close();
   const stopped=server.exitCode===null?once(server,'exit'):null;
   server.kill('SIGTERM');
   if(stopped)await stopped;

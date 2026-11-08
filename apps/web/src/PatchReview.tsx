@@ -3,11 +3,18 @@ import { patchDiff, type PatchFile } from './patch-diff';
 import type { Proposal, Verification } from './types';
 import type { ContrastEvidence } from './semantics';
 
+type FileChange = PatchFile & { kind?: 'added' | 'removed' | 'modified' };
+
+export function diffFile(file: FileChange) {
+  return { file, ...patchDiff(file) };
+}
+
 type Mode = 'changes' | 'context' | 'full';
 const modes: [Mode, string][] = [['changes', '只看改动'], ['context', '查看上下文'], ['full', '查看完整文件']];
 
-export function PatchReview({ proposal, verification, problem, impact, rule, contrast }: {
+export function PatchReview({ proposal, verification, problem, impact, rule, contrast, comparisonDiffs }: {
   proposal: Proposal | null; verification?: Verification; problem: string; impact: string; rule?: string;
+  comparisonDiffs?: ReturnType<typeof diffFile>[];
   contrast?: { before: ContrastEvidence | null; after: ContrastEvidence | null };
 }) {
   const [mode, setMode] = useState<Mode>('changes');
@@ -15,7 +22,7 @@ export function PatchReview({ proposal, verification, problem, impact, rule, con
   const files = useMemo<PatchFile[]>(() => proposal
     ? proposal.sourceReview?.changes ?? [{ file: proposal.patch.targetFile, selector: proposal.patch.selector, before: proposal.before, after: proposal.after }]
     : verification?.sourceReview?.changes ?? verification?.reviewFiles ?? [], [proposal, verification]);
-  const diffs = useMemo(() => files.map(file => ({ file, ...patchDiff(file) })), [files]);
+  const diffs = useMemo(() => comparisonDiffs ?? files.map(diffFile), [files, comparisonDiffs]);
   const first = diffs[0];
   const headline = diffs.flatMap(item => item.changes.map(change => change.label));
   const measure = (value?: ContrastEvidence | null) => value && !value.uncertain ? value.ratio.toFixed(2) + ':1' : '暂无可靠测量';
@@ -27,7 +34,7 @@ export function PatchReview({ proposal, verification, problem, impact, rule, con
     'color-contrast': '实测对比度', 'focus-style-unchanged': 'Tab 可达性与焦点提示', 'button-name': '按钮可访问名称',
   };
   return <>
-    <section className="repair-summary" aria-label="修复摘要">
+    {!comparisonDiffs && <section className="repair-summary" aria-label="修复摘要">
       <h3>修复摘要</h3>
       <dl>
         <dt>问题</dt><dd>{problem}</dd>
@@ -41,20 +48,20 @@ export function PatchReview({ proposal, verification, problem, impact, rule, con
         {beforeContrast?.foreground && check.foreground && <>实测文字颜色 <code>{beforeContrast.foreground}</code> → <code>{check.foreground}</code><br /></>}
         对比度 {measure(beforeContrast)} → <strong>{measure(check)}</strong> · 要求 {check.required}:1 · {check.uncertain ? '需人工复核' : check.valid ? '对比度达标' : '对比度未达标'}
       </p>}
-    </section>
+    </section>}
     {diffs.length > 0 ? <>
       <div className="shot-options patch-modes" role="group" aria-label="代码显示范围">
         {modes.map(([id, label]) => <button key={id} type="button" aria-pressed={mode === id} onClick={() => setMode(id)}>{label}</button>)}
       </div>
       {mode === 'full' && <div className="shot-options patch-modes" role="group" aria-label="完整文件版本">
-        <button type="button" aria-pressed={fullSide === 'before'} onClick={() => setFullSide('before')}>修复前源码</button>
-        <button type="button" aria-pressed={fullSide === 'after'} onClick={() => setFullSide('after')}>修复后源码</button>
+        <button type="button" aria-pressed={fullSide === 'before'} onClick={() => setFullSide('before')}>{comparisonDiffs ? '左侧源码' : '修复前源码'}</button>
+        <button type="button" aria-pressed={fullSide === 'after'} onClick={() => setFullSide('after')}>{comparisonDiffs ? '右侧源码' : '修复后源码'}</button>
       </div>}
       <div className="diff-legend"><span>− 删除</span><span>+ 新增</span></div>
       {diffs.map(({file, parts, changes, fallback}) => <section key={file.file} className="patch-file">
-        <h4>{file.file}<small>{changes.length} 处变更{fallback && ' · 行级差异'}</small></h4>
-        <p className="muted">目标 <code>{file.selector}</code> · 影响范围以此文件下的实际修改为准</p>
-        <div role="region" aria-label={verification ? '已保存的源码差异' : proposal?.sourceReview ? file.file + ' 源码差异' : '待审核的源码差异'}>
+        <h4>{file.file}<small>{file.kind && ({ added: '新增文件 · ', removed: '删除文件 · ', modified: '' })[file.kind]}{changes.length} 处变更{fallback && ' · 行级差异'}</small></h4>
+        {file.selector && <p className="muted">目标 <code>{file.selector}</code> · 影响范围以此文件下的实际修改为准</p>}
+        <div role="region" aria-label={comparisonDiffs ? file.file + ' 版本差异' : verification ? '已保存的源码差异' : proposal?.sourceReview ? file.file + ' 源码差异' : '待审核的源码差异'}>
           {mode === 'full' ? <pre className="diff" tabIndex={0}>{parts.filter(part => fullSide === 'after' ? !part.removed : !part.added).map((part, i) =>
             part.added ? <ins key={i}>{part.value}</ins> : part.removed ? <del key={i}>{part.value}</del> : <span key={i}>{part.value}</span>)}</pre>
           : changes.map((change, i) => <article key={i} className="patch-change">

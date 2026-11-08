@@ -17,6 +17,7 @@ import './style.css';
 const issueNames: Record<string, [string, string]> = {
   'image-alt': ['图片缺少替代文本', '屏幕阅读器用户无法了解这张图片的内容。'],
   label: ['表单控件缺少标签', '用户可能无法判断输入框的用途。'],
+  'select-name': ['下拉框缺少名称', '用户可能无法判断下拉框的用途。'],
   'button-name': ['按钮缺少名称', '屏幕阅读器无法读出按钮的用途。'],
   'link-name': ['链接缺少名称', '用户无法了解链接的目标。'],
   'focus-style-unchanged': ['焦点样式待复核', '键盘焦点可能缺少清晰的视觉提示。'],
@@ -337,7 +338,7 @@ function App() {
   function propose(source: 'agent' | 'manual') {
     if (!issue) return;
     if (source === 'manual' && proposal?.sourceReview && patchReady) { showPatch(); return; }
-    const sourceRepair = source === 'manual' ? ['label','link-name'].includes(issue.ruleId) : Object.hasOwn(sourceRepairKinds, issue.ruleId);
+    const sourceRepair = source === 'manual' ? ['label','select-name','link-name'].includes(issue.ruleId) : Object.hasOwn(sourceRepairKinds, issue.ruleId);
     run(sourceRepair ? `Agent 正在分析「${issueTitle(issue)}」并验证隔离副本…` :
       source === 'agent' ? 'AI 正在分析问题…' : '正在生成补丁预览…', async () => {
       const endpoint = route + '/issues/' + encodeURIComponent(issue.id) + '/proposals';
@@ -751,23 +752,25 @@ function Assistant({ issue, history, knowledge, ai, visionReady, busy, proposal,
           </fieldset>
         </>}
         {!agentOnly && <><label className="input-label" htmlFor="repair-value">{target.ruleId === 'color-contrast' ? '修复颜色' : '建议的文本内容'}</label>
-        <input id="repair-value" value={input} maxLength={['label','link-name'].includes(target.ruleId) ? 120 : 160} disabled={busy} readOnly={isImageAlt && purpose === 'decorative'} onChange={event => onInput(event.target.value)}
+        <input id="repair-value" value={input} maxLength={['label','select-name','link-name'].includes(target.ruleId) ? 120 : 160} disabled={busy} readOnly={isImageAlt && purpose === 'decorative'} onChange={event => onInput(event.target.value)}
           placeholder={target.ruleId === 'image-alt' ? (purpose === 'decorative' ? '使用空 alt' : '填写图片在页面中传达的信息') : target.ruleId === 'color-contrast' ? '#1c2731' : '填写符合实际用途的名称'} /></>}
         <p className="muted note">{isImageAlt
           ? (ai ? 'AI 按需读取目标图片和邻近文字。确认纯装饰时可留空。' : '当前模型未配置为支持图像输入，可手动填写。')
           : target.ruleId === 'link-name' ? '例如：查看课程目录。填写链接真实用途后即可生成补丁。'
-          : target.ruleId === 'label' ? '可编辑标签文案，再生成原生标签补丁。'
+          : sourceRepairKinds[target.ruleId] === 'label' ? '可编辑标签文案，再生成原生标签补丁。'
           : (ai ? (Object.hasOwn(sourceRepairKinds, target.ruleId) ? 'Agent 会检查局部源码并验证隔离副本。若需指定文案，填写后重新分析。' : 'AI 按需使用局部代码和视觉证据。') : '可手动填写内容并生成补丁。配置模型服务后可使用 AI 建议。')}</p>
         <p id="repair-preview-hint" className="note" role="status">{previewHint || (isImageAlt && purpose === 'decorative' ? '预览将添加空 alt（alt=""），请确认该图片只用于装饰。' : null)}</p>
         <div className="repair-actions">
-          <button className="button dark" disabled={busy || Boolean(previewHint) || (['label','link-name'].includes(target.ruleId) && !input.trim()) || (agentOnly && !proposal?.sourceReview)} aria-describedby={isImageAlt ? 'repair-preview-hint' : undefined} onClick={() => onPropose('manual')}><Code2 size={15} />生成补丁预览</button>
+          <button className="button dark" disabled={busy || Boolean(previewHint) || (['label','select-name','link-name'].includes(target.ruleId) && !input.trim()) || (agentOnly && !proposal?.sourceReview)} aria-describedby={isImageAlt ? 'repair-preview-hint' : undefined} onClick={() => onPropose('manual')}><Code2 size={15} />生成补丁预览</button>
           <button className="secondary" disabled={busy || !ai} onClick={() => onPropose('agent')}><Sparkles size={15} />AI 分析与修复</button>
         </div>
         {proposal && <div className="proposal">
           <div className="proposal-head"><b>{proposal.source === 'manual' ? '人工修复建议' : 'AI 修复建议'}</b><span>{proposal.imagePurpose ? '待人工确认' : '待审核'}</span></div>
           <button type="button" className="secondary" onClick={onShowPatch}>前往右侧审核补丁</button>
         </div>}
-      </> : <p className="manual-only">此规则需要人工处理。可查看规范和报告中的复核项。</p>}
+      </> : <p className="manual-only">{target.ruleId === 'target-size'
+        ? '当前需要人工处理。检查可点击区域是否达到 24 × 24 CSS 像素，或是否满足目标间距等例外。调整内边距或相邻控件布局后，重新扫描桌面和窄屏。'
+        : '此规则需要人工处理。可查看规范和报告中的复核项。'}</p>}
     </div> : <Blank icon={<Sparkles />} title="选择一个问题">查看使用影响、修复依据和可审核的补丁。</Blank>}
   </>;
 }

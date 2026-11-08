@@ -1,6 +1,7 @@
 import express from 'express';import multer from 'multer';import fs from 'node:fs';import path from 'node:path';import {zipSync,strToU8} from 'fflate';import 'dotenv/config';
 import {db,id,now,ROOT,DATA,project,proposal,audit,snapshotDir,walk,safePath} from './storage';import {createProject} from './import';import {captureUrlSnapshot} from './url-snapshot';import {runAudit,inspectAuditElement} from './scan';import {createProposal,createSourceProposal,previewProposal,previewIssueImage,applyProposal,rejectProposal,rollback,getKnowledge} from './repair';
 import { projectState as state, renameSnapshot } from './version-state';
+import { compareSnapshots } from './version-compare';
 import { imageVisionConfigured } from './ai/vision';
 import { decideAiFinding, requestAiAudit } from './audit-ai';
 const app=express();app.disable('x-powered-by');app.use((req,res,next)=>{const origin=req.get('origin');if(origin){try{const o=new URL(origin);if(!['127.0.0.1','localhost'].includes(o.hostname)||!['http:'].includes(o.protocol)||![String(process.env.PORT||4173),'5173'].includes(o.port))return res.status(403).json({error:'请求来源无效。'});}catch{return res.status(403).json({error:'请求来源无效。'});}}next()});app.use((req,res,next)=>{
@@ -34,6 +35,16 @@ app.post('/api/projects/import-url', async (req,res,next) => {
  finally { activeUrlImports--; }
 });
 app.get('/api/projects/:id',(req,res,next)=>{try{res.json(state(req.params.id));}catch(e){next(e)}});
+app.get('/api/projects/:id/compare', (req, res, next) => {
+ const { left, right, issueId, selector } = req.query;
+ if (typeof left !== 'string' || typeof right !== 'string' ||
+     (issueId !== undefined && (typeof issueId !== 'string' || issueId.length > 128)) ||
+     (selector !== undefined && (typeof selector !== 'string' || selector.length > 2048))) {
+   return res.status(400).json({ error: '版本对比参数无效。' });
+ }
+ try { res.set('Cache-Control', 'no-store').json(compareSnapshots(req.params.id, left, right, issueId, selector)); }
+ catch (error) { next(error); }
+});
 app.post('/api/projects/:id/audits',(req,res,next)=>{try{const p=project(req.params.id);res.status(202).json(job('audit',signal=>runAudit(p.id,p.current_snapshot,signal)));}catch(e){next(e)}});
 app.get('/api/jobs/:id',(req,res)=>{res.set('Cache-Control','no-store');const row:any=db.prepare('SELECT * FROM jobs WHERE id=?').get(req.params.id);if(!row)return res.status(404).json({code:'JOB_NOT_FOUND',error:'任务不存在。'});res.json({id:row.id,type:row.type,status:row.status,result:row.result?JSON.parse(row.result):null,error:row.error,
  ...(row.status==='failed'&&row.error==='服务重启，任务已中断。'?{code:'JOB_INTERRUPTED'}:{})})});

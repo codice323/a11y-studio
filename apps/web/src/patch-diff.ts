@@ -2,7 +2,7 @@ import { diffArrays, diffLines } from 'diff';
 
 export type PatchFile = { file: string; selector: string; before: string; after: string };
 type Part = { value: string; added?: boolean; removed?: boolean };
-export type Change = { old: string; next: string; before: string; after: string; line: number; label: string };
+export type Change = { kind: 'added' | 'removed' | 'modified'; old: string; next: string; before: string; after: string; line: number; label: string };
 
 function tokens(source: string, file: string) {
   if (/\.html?$/i.test(file)) {
@@ -41,6 +41,7 @@ export function patchDiff(file: PatchFile) {
       if (edit.removed) old += edit.value;
       else next += edit.value;
     }
+    const kind = !old ? 'added' : !next ? 'removed' : 'modified';
     const trailing = parts[i]?.value ?? '';
     const startLine = line;
     line += old.split('\n').length - 1;
@@ -62,7 +63,7 @@ export function patchDiff(file: PatchFile) {
       old = oldAttr[2];
       next = newAttr[2];
     }
-    changes.push({ old, next, before, after, line: startLine, label });
+    changes.push({ kind, old, next, before, after, line: startLine, label });
   }
   return { parts, changes, fallback };
 }

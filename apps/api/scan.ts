@@ -9,7 +9,7 @@ let activeScans=0;const MAX_SCANS=2;
 const mime:Record<string,string>={'.html':'text/html; charset=utf-8','.htm':'text/html; charset=utf-8','.css':'text/css; charset=utf-8','.png':'image/png','.jpg':'image/jpeg','.jpeg':'image/jpeg','.gif':'image/gif','.webp':'image/webp'};
 export function sanitizedHtml(source:string){const $=cheerio.load(source);$('script,iframe,object,embed,base,meta[http-equiv]').remove();$('*').each((_,el)=>{for(const attr of Object.keys((el as any).attribs||{}))if(/^on/i.test(attr)||['srcdoc','formaction'].includes(attr.toLowerCase())||(/^(href|src|action)$/i.test(attr)&&/^\s*javascript:/i.test($(el).attr(attr)||'')))$(el).removeAttr(attr)});return $.html();}
 function executable(){ const candidates=[process.env.CHROME_PATH,'/Applications/Google Chrome.app/Contents/MacOS/Google Chrome','/usr/bin/chromium','/usr/bin/chromium-browser','/usr/bin/google-chrome'].filter(Boolean) as string[];return candidates.find(x=>fs.existsSync(x));}
-export function withSnapshotPage<T>(projectId: string, snapshotId: string, signal: AbortSignal | undefined, inspect: (page: Page) => Promise<T>, waitForSlotMs = 0) {
+export function withSnapshotPage<T>(projectId: string, snapshotId: string, signal: AbortSignal | undefined, inspect: (page: Page) => Promise<T>, waitForSlotMs = 6000) {
  const snap = snapshot(projectId, snapshotId);
  return withRepairPage(snapshotDir(projectId, snapshotId), snap.entry, signal, inspect, waitForSlotMs);
 }
@@ -78,15 +78,16 @@ export function runAudit(projectId:string,snapshotId:string,signal?:AbortSignal,
  return scanDirectory(projectId, snapshotId, snapshotDir(projectId, snapshotId), entry, true, signal, contrastSelector);
 }
 
-export function auditCandidate(projectId: string, snapshotId: string, dir: string, entry: string, signal?: AbortSignal, contrastSelector?: string) {
- return scanDirectory(projectId, snapshotId, dir, entry, false, signal, contrastSelector);
+export function auditCandidate(projectId: string, snapshotId: string, dir: string, entry: string, signal?: AbortSignal, contrastSelector?: string, captureRegression = false) {
+ return scanDirectory(projectId, snapshotId, dir, entry, false, signal, contrastSelector, captureRegression);
 }
 
-async function scanDirectory(projectId: string, snapshotId: string, dir: string, entry: string, persist: boolean, signal?: AbortSignal, contrastSelector?: string) {
+async function scanDirectory(projectId: string, snapshotId: string, dir: string, entry: string, persist: boolean, signal?: AbortSignal, contrastSelector?: string, captureRegression = false) {
  const auditId=id(),created=now();
  if(persist) db.prepare('INSERT INTO audits VALUES(?,?,?,?,?,?,?)').run(auditId,projectId,snapshotId,'running',null,null,created);
  try {
   return await withRepairPage(dir, entry, signal, async page => {
+  const regression = captureRegression ? await capturePageRegression(page, signal) : null;
   const rulesStarted = performance.now();
   let timeout: ReturnType<typeof setTimeout> | undefined;
   const results = await Promise.race([
@@ -130,10 +131,42 @@ async function scanDirectory(projectId: string, snapshotId: string, dir: string,
   const { engine, violations, incomplete, bestPractices, passes } = results;
   const timing = { rulesMs, behaviorMs: performance.now() - behaviorStarted };
   const detection: DetectionEvidence = { schemaVersion: 2, engine, timing, violations, incomplete, bestPractices, behavior };
-  const result={id:auditId,projectId,snapshotId,status:'completed',issues,incomplete:incomplete.map(x=>({ruleId:x.id,help:x.help,count:x.nodes.length})),passes,functionChecks,contrastCheck,screenshot:`/api/audits/${auditId}/screenshot`,size,createdAt:created,detection};
+  const result={id:auditId,projectId,snapshotId,status:'completed',issues,incomplete:incomplete.map(x=>({ruleId:x.id,help:x.help,count:x.nodes.length})),passes,functionChecks,contrastCheck,regression,screenshot:`/api/audits/${auditId}/screenshot`,size,createdAt:created,detection};
   if(persist) db.prepare('UPDATE audits SET status=?,result=? WHERE id=?').run('completed',JSON.stringify(result),auditId);return result;
   }, 6000);
  } catch(error){const message=(error as Error).message;if(persist) db.prepare('UPDATE audits SET status=?,error=? WHERE id=?').run('failed',message,auditId);throw error;}
+}
+
+async function capturePageRegression(page: Page, signal?: AbortSignal) {
+ const captures = [];
+ for (const width of [900, 390]) {
+  signal?.throwIfAborted();
+  await page.setViewportSize({width,height:700});
+  const size = await page.evaluate(() => [document.documentElement.scrollWidth, document.documentElement.scrollHeight]);
+  if (size[0] > 2500 || size[1] > 5000) throw new Error('关联页面截图超出安全复测范围，请手动检查。');
+  const style = await page.evaluate(() => {
+   const elements = Array.from(document.querySelectorAll('*'));
+   if (elements.length > 5000) throw new Error('关联页面元素过多，请人工检查。');
+   const properties = ['color','background-color','background-image','opacity','visibility','display',
+    'font-size','font-family','font-weight','outline','outline-offset','box-shadow','content','transform'];
+   return elements.map(el => {
+    const bounds = el.getBoundingClientRect();
+    return [el.localName, ...[bounds.x,bounds.y,bounds.width,bounds.height].map(n=>Math.round(n*100)/100),
+      ...[null,'::before','::after'].flatMap(pseudo => {
+        const computed = getComputedStyle(el,pseudo);
+        return properties.map(prop=>computed.getPropertyValue(prop));
+      })];
+   });
+  });
+  captures.push({
+   width,
+   style: hash(JSON.stringify([size,style])),
+   semantics: await page.locator('body').ariaSnapshot({timeout:3000}),
+   visual: hash(await page.screenshot({fullPage:true,animations:'disabled',caret:'hide',timeout:8000})),
+  });
+ }
+ await page.setViewportSize({width:900,height:700});
+ return captures;
 }
 
 export async function measurePageContrast(page: Page, selector: string) {
@@ -157,6 +190,6 @@ export async function measurePageContrast(page: Page, selector: string) {
     for(let i=layers.length-1;i>=0;i--)background=colors.blend(layers[i],background);
     const foreground=fg?colors.blend(fg,background):background;
     const a=colors.luminance(foreground),b=colors.luminance(background),ratio=(Math.max(a,b)+0.05)/(Math.min(a,b)+0.05);const size=parseFloat(styles.fontSize),weight=parseInt(styles.fontWeight,10);const required=(size>=24||(size>=18.66&&weight>=700))?3:4.5;
-    return {ratio,required,uncertain,foreground:styles.color,valid:!uncertain&&ratio>=required&&styles.display!=='none'&&styles.visibility!=='hidden'};
+    return {ratio,required,uncertain,foreground:styles.color,effectiveBackground:background.map(Math.round),valid:!uncertain&&ratio>=required&&styles.display!=='none'&&styles.visibility!=='hidden'};
    },{timeout:1500});}catch{return {ratio:0,required:4.5,valid:false,uncertain:true};}
 }

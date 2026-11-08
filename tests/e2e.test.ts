@@ -238,7 +238,8 @@ test('静态项目的真实检测、审核修复、失败回滚、导出与异�
   const runningJob=await api(jobPath);
   assert.equal(runningJob.data.status,'running');
   const exited=once(server,'exit');
-  server.kill('SIGTERM');
+  // This fixture simulates an abrupt worker loss while the model request is deliberately held.
+  assert.ok(server.kill('SIGKILL'));
   await exited;
   holdModel=false;
   server=startServer();
@@ -251,5 +252,5 @@ test('静态项目的真实检测、审核修复、失败回滚、导出与异�
   assert.equal(notFound.res.status,404);
   assert.equal(notFound.data.code,'JOB_NOT_FOUND');
   assert.equal((await api('/api/projects/'+p.id)).data.project.currentSnapshot,selected.project.currentSnapshot);
- } finally {server?.kill('SIGTERM');await new Promise<void>(r=>mock?.close(()=>r()));fs.rmSync(tmp,{recursive:true,force:true});}
+ } finally {server?.kill('SIGTERM');await new Promise<void>(r=>{mock?.close(()=>r());mock?.closeAllConnections();});fs.rmSync(tmp,{recursive:true,force:true});}
 });

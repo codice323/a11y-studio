@@ -1,90 +1,45 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Info, ListChecks, LoaderCircle } from 'lucide-react';
-import { inspectAudit, inspectProposal, type ProposalPreview, type Semantics } from './semantics';
-import { versionName, type Bounds, type HistoryItem, type Issue, type Proposal, type State } from './types';
+import { inspectAudit, inspectProposal, type ProposalPreview } from './semantics';
+import { versionName, type HistoryItem, type Issue, type Proposal, type State } from './types';
 
+import { Screenshot, SemanticTable, type SemanticResult } from './EvidenceDetails';
+import { VersionComparison, type VersionPair } from './VersionComparison';
 import { PatchReview } from './PatchReview';
 
 export type EvidenceView = 'visual' | 'diff' | 'semantics';
-type SemanticResult = { before: Semantics; after: Semantics | null };
-
-function Screenshot({ title, src, bounds, size, location, emptyText = '此版本暂无截图。' }: {
-  title: string; src?: string; bounds?: Bounds | null;
-  size?: { width: number; height: number }; location?: string; emptyText?: string;
-}) {
-  const [failed, setFailed] = useState(false);
-  const [zoomed, setZoomed] = useState(false);
-  const viewport = useRef<HTMLDivElement>(null);
-  const marker = useRef<HTMLDivElement>(null);
-  function center() {
-    const pane = viewport.current;
-    const target = marker.current;
-    if (!pane || !target) return;
-    const frame = pane.getBoundingClientRect();
-    const point = target.getBoundingClientRect();
-    pane.scrollTo({
-      top: pane.scrollTop + point.top - frame.top - (pane.clientHeight - point.height) / 2,
-      left: pane.scrollLeft + point.left - frame.left - (pane.clientWidth - point.width) / 2,
-    });
-  }
-  useEffect(center, [bounds, size, zoomed]);
-  const locate = bounds && size && size.width > 0 && size.height > 0;
-  return <figure className="shot">
-    <figcaption>{title}</figcaption>
-    {src && !failed ? <div className="screen-wrap" ref={viewport} tabIndex={0} role="region" aria-label={title + '截图'}>
-      <div className={`screen-image${zoomed ? ' zoomed' : ''}`}>
-        <img src={src} alt={title + '的页面截图'} onLoad={center} onError={() => setFailed(true)} />
-        {locate && <div ref={marker} className="highlight" aria-hidden="true" style={{
-          left: `${bounds.x / size.width * 100}%`, top: `${bounds.y / size.height * 100}%`,
-          width: `${bounds.width / size.width * 100}%`, height: `${bounds.height / size.height * 100}%`,
-        }} />}
-      </div>
-    </div> : <p className="shot-empty">{failed ? '截图加载失败。' : emptyText}</p>}
-    {src && !failed && <div className="shot-foot">
-      {locate ? <button type="button" title={location} onClick={center}>定位元素</button> : <span>暂无元素定位</span>}
-      <button type="button" aria-label={`放大${title}`} aria-pressed={zoomed} onClick={() => setZoomed(value => !value)}>放大 150%</button>
-      <a href={src} download={src.startsWith('data:') ? '候选页面.jpg' : undefined}
-        target={src.startsWith('data:') ? undefined : '_blank'} rel="noreferrer"
-        aria-label={src.startsWith('data:') ? '下载完整截图（' + title + '）' : `打开完整截图（${title}，新标签页）`}>完整截图</a>
-    </div>}
-  </figure>;
-}
-
-function SemanticTable({ result, repaired, afterLabel }: { result: SemanticResult; repaired: boolean; afterLabel: string }) {
-  const stateText = (item: Semantics) => item.states.map(([key, value]) => `${key}=${value}`).join(' · ') || '无记录的控件状态';
-  const rows: [string, (item: Semantics) => string][] = [
-    ['可访问名称', item => item.ignored ? '未暴露' : item.name || '（空）'],
-    ['说明', item => item.ignored ? '未暴露' : item.description || '（空）'],
-    ['角色', item => item.ignored ? '未暴露' : item.role || '无具名角色'],
-    ['无障碍树', item => item.ignored ? '忽略' + (item.ignoredReasons.length ? `（${item.ignoredReasons.join('、')}）` : '') : '已暴露'],
-    ['可聚焦性', item => item.focusable ? '可聚焦' : '不可聚焦'],
-    ['控件状态', stateText],
-  ];
-  return <table className="semantic-table">
-    <thead><tr><th scope="col">语义字段</th><th scope="col">{result.after ? repaired ? '修复前' : '原始版本' : '当前扫描版本'}</th>{result.after && <th scope="col">{afterLabel}</th>}</tr></thead>
-    <tbody>{rows.map(([label, value]) => <tr key={label}>
-      <th scope="row">{label}</th><td>{value(result.before)}</td>
-      {result.after && <td className={value(result.before) !== value(result.after) ? 'changed' : undefined}>{value(result.after)}{value(result.before) !== value(result.after) && <small>已变化</small>}</td>}
-    </tr>)}</tbody>
-  </table>;
-}
-
-export function Evidence({ state, issue, history, proposal, view, onView, busy, applying, archivedEvidence, patchReady, onConfirm, onReject, problem, impact }: {
+type EvidenceProps = {
   state: State; issue?: Issue; history?: HistoryItem; proposal: Proposal | null;
   view: EvidenceView; onView: (view: EvidenceView) => void;
   problem: string; impact: string;
   busy: boolean; applying: boolean; archivedEvidence: boolean; patchReady: boolean; onConfirm: () => void; onReject: () => void;
-}) {
+};
+
+export function Evidence(props: EvidenceProps) {
+  return <ProjectEvidence key={`${props.state.project.id}:${props.state.project.currentSnapshot}`} {...props} />;
+}
+
+function ProjectEvidence(props: EvidenceProps) {
+  const { state, history, proposal, issue, view, onView } = props;
+  const [pair, setPair] = useState<VersionPair>(() => ({
+    left: state.originalSnapshotId ?? '', right: state.project.currentSnapshot,
+  }));
+  const [freeFor, setFreeFor] = useState<string>();
+  const historyKey = history && `${history.verification.id}:${history.issue.id}`;
+  if (proposal || (historyKey && freeFor !== historyKey)) {
+    return <RepairEvidence {...props} onCompare={proposal ? undefined : () => setFreeFor(historyKey)} />;
+  }
+  return <VersionComparison state={state} target={history?.issue ?? issue} pair={pair} onPair={setPair}
+    view={view} onView={onView} onHistory={historyKey ? () => setFreeFor(undefined) : undefined} />;
+}
+
+function RepairEvidence({ state, issue, history, proposal, view, onView, busy, applying, archivedEvidence, patchReady, onConfirm, onReject, problem, impact, onCompare }: EvidenceProps & { onCompare?: () => void }) {
   const verification = history?.verification;
   const target = history?.issue ?? issue;
   const selector = target?.selector;
   const activeScan = state.current;
-  const originalVersion = state.snapshots[0]?.id ?? state.baseline?.snapshotId;
-  const onlyOriginal = !verification && state.project.currentSnapshot === originalVersion;
-  const originalIssue = state.baseline?.issues.find(item => item.id === issue?.id);
-  const compareOriginal = !proposal && !onlyOriginal && Boolean(originalIssue && activeScan);
-  const beforeId = verification ? verification.baselineAudit : compareOriginal ? state.baseline?.id : activeScan?.id;
-  const afterId = verification ? verification.audit : compareOriginal ? activeScan?.id : undefined;
+  const beforeId = verification ? verification.baselineAudit : activeScan?.id;
+  const afterId = verification?.audit;
   const afterSelector = verification?.sourceTarget ?? selector;
   const afterVersion = verification ? verification.toSnapshot : state.project.currentSnapshot;
   const afterLabel = verification && afterVersion === verification.toSnapshot ? '修复后' : '当前版本';
@@ -134,10 +89,10 @@ export function Evidence({ state, issue, history, proposal, view, onView, busy, 
   const matchingScan = (id?: string | null) => id ? [state.baseline, activeScan].find(scan => scan?.id === id) : undefined;
   const beforeScan = matchingScan(beforeId);
   const afterScan = verification ? matchingScan(afterId) : activeScan;
-  const oldIssue = history?.issue ?? (compareOriginal ? originalIssue : issue);
+  const oldIssue = target;
   const beforeSrc = previewData?.before.screenshot ?? (verification?.baselineAudit ? `/api/audits/${verification.baselineAudit}/screenshot` : beforeScan?.screenshot);
   const afterSrc = proposal ? previewData?.after.screenshot ?? undefined : verification ? (afterId ? `/api/audits/${afterId}/screenshot` : undefined) : afterScan?.screenshot;
-  const beforeBounds = previewData?.before.semantics.bounds ?? oldIssue?.bounds ?? (verification || compareOriginal ? computed?.result?.before.bounds : null);
+  const beforeBounds = previewData?.before.semantics.bounds ?? oldIssue?.bounds ?? computed?.result?.before.bounds;
   const afterBounds = proposal ? previewData?.after.semantics.bounds : verification ? computed?.result?.after?.bounds : issue?.bounds;
   const tabs = [
     { id: 'visual', name: '页面对照' },
@@ -147,7 +102,7 @@ export function Evidence({ state, issue, history, proposal, view, onView, busy, 
 
   const reviewing = view === 'diff' && Boolean(proposal);
   return <section className={'preview panel' + (reviewing ? ' preview-reviewing' : '')} aria-labelledby="evidence-title">
-    <div className="panel-head"><h2 id="evidence-title">修复效果对比</h2></div>
+    <div className="panel-head"><h2 id="evidence-title">修复效果对比</h2>{onCompare && <button type="button" className="secondary comparison-switch" onClick={onCompare}>自由版本对比</button>}</div>
     <div className="evidence-tabs" role="group" aria-label="修复效果视图">
       {tabs.map(({ id, name }) => <button key={id} aria-pressed={view === id} onClick={() => onView(id)}>{name}</button>)}
     </div>
@@ -162,17 +117,15 @@ export function Evidence({ state, issue, history, proposal, view, onView, busy, 
     {view === 'visual' && <>
       <div className="shot-options" role="group" aria-label="截图排列">
         <button aria-pressed={layout === 'both'} onClick={() => setLayoutChoice({ key: layoutKey, mode: 'both' })}>并排对比</button>
-        <button aria-pressed={layout === 'before'} onClick={() => setLayoutChoice({ key: layoutKey, mode: 'before' })}>{verification || proposal ? '仅修复前' : compareOriginal || onlyOriginal ? '仅原始版本' : '仅修复前'}</button>
+        <button aria-pressed={layout === 'before'} onClick={() => setLayoutChoice({ key: layoutKey, mode: 'before' })}>仅修复前</button>
         <button aria-pressed={layout === 'after'} onClick={() => setLayoutChoice({ key: layoutKey, mode: 'after' })}>{verification ? '仅修复后' : proposal ? '仅候选页面' : '仅当前版本'}</button>
       </div>
-      {onlyOriginal && !proposal && <p className="comparison-status">当前为原始版本 V0，尚无修复后版本。</p>}
       {nonVisual && (proposal || verification) && <p className="comparison-status">此修改主要影响辅助技术读取。<button type="button" className="secondary" onClick={() => onView('semantics')}>查看语义变化</button></p>}
       <div className={layout === 'both' ? 'shots' : 'shots single-shot'}>
-        {layout !== 'after' && <Screenshot key={`before:${beforeSrc}`} title={proposal ? '修复前 · ' + versionName(state, state.project.currentSnapshot) : verification ? `修复前 · ${versionName(state, verification.fromSnapshot)}` : `${compareOriginal ? '原始版本' : '当前版本'} · ${versionName(state, beforeScan?.snapshotId ?? state.project.currentSnapshot)}`}
+        {layout !== 'after' && <Screenshot key={`before:${beforeSrc}`} title={proposal ? '修复前 · ' + versionName(state, state.project.currentSnapshot) : verification ? `修复前 · ${versionName(state, verification.fromSnapshot)}` : versionName(state, state.project.currentSnapshot)}
           src={beforeSrc} bounds={beforeBounds} size={previewData?.before.semantics.size ?? beforeScan?.size ?? computed?.result?.before.size} location={oldIssue?.bounds ? '扫描定位' : '按扫描版本定位'} />}
-        {layout !== 'before' && <Screenshot key={`after:${afterSrc}`} title={proposal ? '隔离候选 · 尚未应用' : verification ? `${afterLabel} · ${versionName(state, afterVersion)}` : onlyOriginal && layout === 'both' ? '修复后版本' : `当前版本 · ${versionName(state, state.project.currentSnapshot)}`}
-          src={!proposal && onlyOriginal && layout === 'both' ? undefined : afterSrc} bounds={afterBounds} size={previewData?.after.semantics.size ?? afterScan?.size ?? computed?.result?.after?.size} location={verification ? '按同一选择器复算位置' : '扫描定位'}
-          emptyText={!proposal && onlyOriginal && layout === 'both' ? '应用补丁并完成复测后，此处将显示修复后的截图。' : undefined} />}
+        {layout !== 'before' && <Screenshot key={`after:${afterSrc}`} title={proposal ? '隔离候选 · 尚未应用' : verification ? `${afterLabel} · ${versionName(state, afterVersion)}` : `${afterLabel} · ${versionName(state, afterVersion)}`}
+          src={afterSrc} bounds={afterBounds} size={previewData?.after.semantics.size ?? afterScan?.size ?? computed?.result?.after?.size} location={verification ? '按同一选择器复算位置' : '扫描定位'} />}
       </div>
       {verification && computed?.error && <p className="shot-location-error">无法复算元素位置。可打开完整截图查看扫描证据。</p>}
       <p className="preview-tip"><Info size={15} />{proposal ? '候选截图来自隔离副本。' : '截图来自真实扫描。'} 名称和角色的变化可在「无障碍语义」中查看。</p>

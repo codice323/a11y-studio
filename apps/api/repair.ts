@@ -27,7 +27,7 @@ export async function createSourceProposal(pid:string, issueId:string, expectedS
  const p=project(pid), sid=p.current_snapshot;
  if(sid!==expectedSnapshot)throw new Error('页面版本已变化，请重新选择问题。');
  const issue=findIssue(pid,sid,issueId);
- if(manualLabel&&(!['label','link-name'].includes(issue.ruleId)||typeof intent!=='string'||!intent.trim()))throw new Error('请填写字段或链接名称。');
+ if(manualLabel&&(!['label','select-name','link-name'].includes(issue.ruleId)||typeof intent!=='string'||!intent.trim()))throw new Error('请填写字段或链接名称。');
  if(!Object.hasOwn(sourceRepairKinds,issue.ruleId))throw new Error('此问题没有受支持的 Agent 源码策略。');
  const ctx={projectId:pid,snapshotId:sid,dir:snapshotDir(pid,sid),entry:p.entry,issue,baseline:latestAudit(pid,sid)};
  const result=await proposeSourceRepair(ctx,intent,signal);

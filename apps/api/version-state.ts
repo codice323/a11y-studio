@@ -1,12 +1,12 @@
 import type { Issue, Patch, Scan } from '../../packages/shared/types';
 import { audit, db, project, snapshot } from './storage';
 
-type Snapshot = {
+export type Snapshot = {
   id: string; parent_id: string | null; hash: string; created_at: string; description: string; name: string | null;
 };
 type Verification = {
   id: string; fromSnapshot: string; toSnapshot: string; status: 'passed' | 'failed';
-  baselineAudit: string; audit: string | null; resolved: Issue[]; patch?: Patch;
+  sourceTarget?: string; baselineAudit: string; audit: string | null; resolved: Issue[]; patch?: Patch;
 };
 
 const repairNames: Record<string, string> = {
@@ -17,22 +17,31 @@ const repairNames: Record<string, string> = {
   'color-contrast': '文字对比度修复',
 };
 
-function latest(projectId: string, snapshotId: string): Scan | null {
+export function latestSnapshotAudit(projectId: string, snapshotId: string): Scan | null {
   const row = db.prepare("SELECT id FROM audits WHERE project_id=? AND snapshot_id=? AND status='completed' ORDER BY rowid DESC LIMIT 1")
     .get(projectId, snapshotId) as { id: string } | undefined;
   return row ? audit(row.id).result : null;
 }
 
+export function validSnapshots(projectId: string) {
+  return db.prepare("SELECT id,parent_id,hash,created_at,description,name FROM snapshots WHERE project_id=? AND description NOT IN ('验证失败','待验证修复') ORDER BY (parent_id IS NOT NULL), rowid ASC")
+    .all(projectId) as Snapshot[];
+}
+
+export function projectVerifications(projectId: string) {
+  return db.prepare('SELECT data FROM verifications WHERE project_id=? ORDER BY rowid DESC')
+    .all(projectId).map(row => JSON.parse((row as { data: string }).data) as Verification);
+}
+
 export function projectState(projectId: string) {
   const p = project(projectId);
-  const snapshots = db.prepare("SELECT id,parent_id,hash,created_at,description,name FROM snapshots WHERE project_id=? AND description NOT IN ('验证失败','待验证修复') ORDER BY rowid ASC")
-    .all(projectId) as Snapshot[];
-  const verifications = db.prepare('SELECT data FROM verifications WHERE project_id=? ORDER BY rowid DESC')
-    .all(projectId).map(row => JSON.parse((row as { data: string }).data) as Verification);
+  const snapshots = validSnapshots(projectId);
+  const verifications = projectVerifications(projectId);
   const byId = new Map(snapshots.map(item => [item.id, item]));
   const passedByTarget = new Map(verifications.filter(item => item.status === 'passed').map(item => [item.toSnapshot, item]));
-  const baseline = snapshots[0] ? latest(projectId, snapshots[0].id) : null;
-  const current = latest(projectId, p.current_snapshot);
+  const originalSnapshotId = snapshots.find(item => item.parent_id === null)?.id ?? null;
+  const baseline = originalSnapshotId ? latestSnapshotAudit(projectId, originalSnapshotId) : null;
+  const current = latestSnapshotAudit(projectId, p.current_snapshot);
   const baselineIssues = baseline?.issues ?? [];
   const currentIssues = current?.issues ?? [];
   const baseIds = new Set(baselineIssues.map(issue => issue.id));
@@ -59,7 +68,7 @@ export function projectState(projectId: string) {
       const rule = repair?.patch?.ruleId ?? repair?.resolved[0]?.ruleId;
       return { ...item, name: item.name ?? (item.parent_id ? (rule && repairNames[rule]) || item.description : '原始版本') };
     }),
-    baseline, current,
+    originalSnapshotId, baseline, current,
     summary: {
       initial: baseline?.issues.length ?? null,
       resolved: resolved.size,

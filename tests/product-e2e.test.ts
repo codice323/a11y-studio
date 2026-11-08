@@ -103,8 +103,8 @@ test('URL 快照从首页导入，经真实扫描、修复和三视图复测后�
       assert.equal(controls.height, evidence.height);
       assert.ok(evidence.x > controls.x && evidence.width >= controls.width * 1.9);
       assert.equal(await page.locator('.metrics').count(), 0);
-      await page.getByText('当前为原始版本 V0，尚无修复后版本。').waitFor();
-      assert.equal(await page.locator('.shots img').count(), 1);
+      await page.getByText(/这两个版本暂无可检测差异/).waitFor();
+      assert.equal(await page.locator('.shots img').count(), 2);
       const issuesTab = page.getByRole('tab', { name: '问题与历史' });
       const assistantTab = page.getByRole('tab', { name: 'AI 修复助手' });
       const assistantPanel = page.getByRole('tabpanel', { name: 'AI 修复助手' });
@@ -142,7 +142,7 @@ test('URL 快照从首页导入，经真实扫描、修复和三视图复测后�
       await issueButton.click();
       await assistantPanel.waitFor();
       await page.waitForFunction(() => document.activeElement?.id === 'control-panel-assistant');
-      assert.equal(await page.locator('.shots .highlight').count(), 1);
+      await page.waitForFunction(() => document.querySelectorAll('.shots .highlight').length === 2);
       assert.deepEqual(proposalRequests, []);
       await page.getByLabel('建议的文本内容').fill('打开导航');
       await page.getByRole('button', { name: '生成补丁预览' }).click();
@@ -239,6 +239,170 @@ test('URL 快照从首页导入，经真实扫描、修复和三视图复测后�
   } finally {
     service.kill('SIGTERM');
     await close(upstream);
+    fs.rmSync(dataDir, { recursive: true, force: true });
+  }
+});
+
+test('真实快照可双向对比，分叉及切换项目后仍使用正确的版本', { timeout: 120000 }, async () => {
+  const probe = http.createServer();
+  const port = await listen(probe);
+  await close(probe);
+  const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'a11y-compare-test-'));
+  const service = spawn(process.execPath, ['--import', 'tsx', 'apps/api/server.ts'], {
+    env: { ...process.env, PORT: String(port), A11Y_DATA_DIR: dataDir }, stdio: 'ignore',
+  });
+  const base = `http://127.0.0.1:${port}`;
+  const delay = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+  async function api(route: string, body?: unknown) {
+    const data = body instanceof FormData ? body : body === undefined ? undefined : JSON.stringify(body);
+    const response = await fetch(base + '/api' + route, data === undefined ? undefined : {
+      method: 'POST', body: data, headers: typeof data === 'string' ? { 'Content-Type': 'application/json' } : undefined,
+    });
+    assert.ok(response.ok, `${route} · ${response.status}`);
+    return response.json();
+  }
+  async function complete(job: { id: string }) {
+    for (let i = 0; i < 150; i++) {
+      const state = await api('/jobs/' + job.id);
+      if (state.status === 'completed') return state.result;
+      assert.ok(['queued', 'running'].includes(state.status), state.error);
+      await delay(100);
+    }
+    throw new Error('等待扫描任务超时。');
+  }
+  async function create(fixture: string) {
+    const form = new FormData();
+    form.set('fixture', fixture);
+    const { id } = await api('/projects', form);
+    const route = '/projects/' + id;
+    await complete(await api(route + '/audits', {}));
+    return route;
+  }
+
+  try {
+    for (let i = 0; !(await fetch(base + '/api/status').then(res => res.ok, () => false)); i++) {
+      assert.ok(i < 100, '测试服务启动超时');
+      await delay(100);
+    }
+    const route = await create('demo-mixed');
+    const v0 = (await api(route)).originalSnapshotId;
+    async function fix(ruleId: string, value: string) {
+      const state = await api(route);
+      const issue = state.current.issues.find((issue: { ruleId: string }) => issue.ruleId === ruleId);
+      assert.ok(issue, ruleId);
+      const proposal = await api(route + '/issues/' + issue.id + '/proposals', {
+        source: 'manual', value, imagePurpose: ruleId === 'image-alt' ? 'informative' : undefined,
+      });
+      const proof = await complete(await api('/proposals/' + proposal.id + '/apply', { semanticReviewed: true }));
+      assert.equal(proof.status, 'passed', proof.reason);
+      return proof.toSnapshot;
+    }
+
+    const v1 = await fix('button-name', '打开菜单');
+    const v2 = await fix('image-alt', '盆栽绿植插画');
+    const v3 = await fix('color-contrast', '#1c2731');
+    const browser = await chromium.launch({
+      executablePath: process.env.CHROME_PATH || '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome', headless: true,
+    });
+    try {
+      const page = await browser.newPage({ viewport: { width: 1440, height: 1140 } });
+      page.setDefaultTimeout(12000);
+      const evidence = page.getByRole('region', { name: '修复效果对比' });
+      const left = page.getByLabel('左侧版本');
+      const right = page.getByLabel('右侧版本');
+      const images = page.locator('.shots img');
+      const summary = page.getByRole('region', { name: '版本差异摘要' });
+      const open = (name: string) => page.locator('.recent-list').getByRole('button', { name }).click();
+      const show = (name: string) => evidence.getByRole('button', { name, exact: true }).click();
+      const waitForImages = async () => {
+        await page.waitForFunction(() => {
+          const images = [...document.querySelectorAll<HTMLImageElement>('.shots img')];
+          return images.length === 2 && images.every(image => image.complete && image.naturalWidth > 0);
+        });
+        return images.evaluateAll(nodes => nodes.map(node => node.getAttribute('src')!));
+      };
+      await page.goto(base);
+      await open('慢绿生活');
+      await summary.waitFor();
+      assert.equal(await left.inputValue(), v0);
+      assert.equal(await right.inputValue(), v3);
+      assert.match(await summary.innerText(), /右侧不再报告 3 个问题/);
+      const original = await waitForImages();
+      assert.notEqual(original[0], original[1]);
+      if (process.env.A11Y_COMPARE_SCREENSHOT) await page.screenshot({ path: process.env.A11Y_COMPARE_SCREENSHOT });
+
+      await left.selectOption(v1);
+      assert.equal(await right.inputValue(), v3);
+      await right.selectOption(v2);
+      const second = await waitForImages();
+      assert.notEqual(second[0], original[0]);
+      assert.notEqual(second[1], original[1]);
+      await show('代码变更');
+      const diff = page.getByRole('region', { name: 'index.html 版本差异' });
+      await diff.locator('ins').filter({ hasText: '盆栽绿植插画' }).waitFor();
+      assert.doesNotMatch(await diff.innerText(), /打开菜单|1c2731/);
+      await evidence.getByRole('button', { name: '交换版本' }).press('Enter');
+      assert.equal(await left.inputValue(), v2);
+      assert.equal(await right.inputValue(), v1);
+      await diff.locator('del').filter({ hasText: '盆栽绿植插画' }).waitFor();
+
+      await right.selectOption(v3);
+      await diff.locator('ins').filter({ hasText: '#1c2731' }).waitFor();
+      await show('页面对照');
+      const third = await waitForImages();
+      assert.deepEqual(third, [second[1], original[1]]);
+      const [oldPixels, newPixels] = await Promise.all(third.map(src => fetch(base + src).then(res => res.arrayBuffer())));
+      assert.notDeepEqual(Buffer.from(oldPixels), Buffer.from(newPixels));
+      await page.getByRole('button', { name: /已解决\s*3/ }).click();
+      await page.getByRole('button', { name: /图片缺少替代文本/ }).click();
+      await show('自由版本对比');
+      await left.selectOption(v1);
+      await right.selectOption(v2);
+      await show('无障碍语义');
+      const semantics = evidence.getByRole('table');
+      await semantics.waitFor();
+      assert.match(await semantics.innerText(), /可访问名称\s+（空）\s+盆栽绿植插画/);
+      await show('交换版本');
+      await semantics.waitFor();
+      assert.match(await semantics.innerText(), /可访问名称\s+盆栽绿植插画\s+（空）/);
+      assert.equal((await api(route)).project.currentSnapshot, v3);
+
+      await api(route + '/rollback', { snapshotId: v1 });
+      const branch = await fix('link-name', '查看种植灵感');
+      const branchState = await api(route);
+      assert.equal(branchState.snapshots.find((snapshot: { id: string }) => snapshot.id === branch).parent_id, v1);
+      await page.reload();
+      await open('慢绿生活');
+      assert.equal(await left.inputValue(), v0);
+      assert.equal(await right.inputValue(), branch);
+      assert.equal(await left.locator('option').count(), 5);
+      await left.selectOption(v3);
+      await show('代码变更');
+      await diff.locator('del').filter({ hasText: '盆栽绿植插画' }).waitFor();
+      await diff.locator('ins').filter({ hasText: '查看种植灵感' }).waitFor();
+      assert.equal((await api(route)).project.currentSnapshot, branch);
+      await page.route('**/screenshot', request => request.continue());
+      fs.unlinkSync(path.join(dataDir, 'screenshots', branchState.current.id + '.png'));
+      await show('页面对照');
+      await evidence.getByText('截图缺失或加载失败。').waitFor();
+      assert.equal(await images.count(), 1);
+
+      const other = await create('demo-form');
+      const otherRoot = (await api(other)).originalSnapshotId;
+      assert.equal((await fetch(base + '/api' + other + `/compare?left=${v3}&right=${otherRoot}`)).status, 400);
+      await page.reload();
+      await open('课程报名');
+      assert.equal(await left.inputValue(), otherRoot);
+      assert.equal(await right.inputValue(), otherRoot);
+      await page.getByText(/这两个版本暂无可检测差异/).waitFor();
+      await page.setViewportSize({ width: 375, height: 780 });
+      assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
+    } finally {
+      await browser.close();
+    }
+  } finally {
+    service.kill();
+    await new Promise<void>(resolve => service.once('exit', () => resolve()));
     fs.rmSync(dataDir, { recursive: true, force: true });
   }
 });
