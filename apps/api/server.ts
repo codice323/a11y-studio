@@ -1,5 +1,6 @@
 import express from 'express';import multer from 'multer';import fs from 'node:fs';import path from 'node:path';import {zipSync,strToU8} from 'fflate';import 'dotenv/config';
-import {db,id,now,ROOT,DATA,project,proposal,audit,snapshotDir,walk,safePath} from './storage';import {createProject} from './import';import {captureUrlSnapshot} from './url-snapshot';import {runAudit,inspectAuditElement} from './scan';import {createProposal,applyProposal,rejectProposal,rollback,getKnowledge} from './repair';
+import {db,id,now,ROOT,DATA,project,proposal,audit,snapshotDir,walk,safePath} from './storage';import {createProject} from './import';import {captureUrlSnapshot} from './url-snapshot';import {runAudit,inspectAuditElement} from './scan';import {createProposal,previewIssueImage,applyProposal,rejectProposal,rollback,getKnowledge} from './repair';
+import { imageVisionConfigured } from './ai/vision';
 import { decideAiFinding, requestAiAudit } from './audit-ai';
 const app=express();app.disable('x-powered-by');app.use((req,res,next)=>{const origin=req.get('origin');if(origin){try{const o=new URL(origin);if(!['127.0.0.1','localhost'].includes(o.hostname)||!['http:'].includes(o.protocol)||![String(process.env.PORT||4173),'5173'].includes(o.port))return res.status(403).json({error:'请求来源无效。'});}catch{return res.status(403).json({error:'请求来源无效。'});}}next()});app.use((req,res,next)=>{
  const host = req.get('host');
@@ -11,7 +12,7 @@ const controllers=new Map<string,AbortController>();
 function job(type:string,run:(signal:AbortSignal)=>Promise<any>){const jid=id(),controller=new AbortController();controllers.set(jid,controller);db.prepare('INSERT INTO jobs VALUES(?,?,?,?,?,?)').run(jid,type,'queued',null,null,now());setImmediate(async()=>{if(controller.signal.aborted){controllers.delete(jid);return;}db.prepare('UPDATE jobs SET status=? WHERE id=?').run('running',jid);try{const result=await run(controller.signal);db.prepare('UPDATE jobs SET status=?,result=? WHERE id=?').run(controller.signal.aborted?'cancelled':'completed',JSON.stringify(result),jid)}catch(error){db.prepare('UPDATE jobs SET status=?,error=? WHERE id=?').run(controller.signal.aborted?'cancelled':'failed',(error as Error).message,jid)}finally{controllers.delete(jid)}});return {id:jid,status:'queued'};}
 function latest(pid:string,sid:string){const row:any=db.prepare("SELECT id FROM audits WHERE project_id=? AND snapshot_id=? AND status='completed' ORDER BY rowid DESC LIMIT 1").get(pid,sid);return row?audit(row.id).result:null;}
 function state(pid:string){const p=project(pid);const snaps:any[]=db.prepare("SELECT id,parent_id,hash,created_at,description FROM snapshots WHERE project_id=? AND description NOT IN ('验证失败','待验证修复') ORDER BY rowid ASC").all(pid);const first=snaps[0];const baseline=first?latest(pid,first.id):null,current=latest(pid,p.current_snapshot);const baseIds=new Set((baseline?.issues||[]).map((x:any)=>x.id)),currentIds=new Set((current?.issues||[]).map((x:any)=>x.id));const verifications:any[]=db.prepare('SELECT data FROM verifications WHERE project_id=? ORDER BY rowid DESC').all(pid).map((x:any)=>JSON.parse(x.data));return {project:{id:p.id,name:p.name,entry:p.entry,currentSnapshot:p.current_snapshot,createdAt:p.created_at},snapshots:snaps,baseline,current,summary:{initial:baseline?.issues.length??null,resolved:(baseline?.issues||[]).filter((x:any)=>!currentIds.has(x.id)).length,remaining:(baseline?.issues||[]).filter((x:any)=>currentIds.has(x.id)).length,added:(current?.issues||[]).filter((x:any)=>!baseIds.has(x.id)).length},verifications};}
-app.get('/api/status',(_req,res)=>res.json({configured:!!process.env.AI_API_KEY}));
+app.get('/api/status',(_req,res)=>res.json({configured:!!process.env.AI_API_KEY,visionConfigured:imageVisionConfigured()}));
 app.get('/api/fixtures',(_req,res)=>res.json([{id:'demo-mixed',name:'慢绿生活',description:'图片、按钮、表单与对比度综合示例'},{id:'demo-form',name:'课程报名',description:'表单可访问名称示例'},{id:'demo-contrast',name:'自然笔记',description:'文字对比度示例'}]));
 app.get('/api/projects',(_req,res)=>res.json(db.prepare('SELECT id,name,entry,current_snapshot AS currentSnapshot,created_at AS createdAt FROM projects ORDER BY rowid DESC').all()));
 app.post('/api/projects',upload.single('file'),async(req,res,next)=>{try{res.status(201).json(await createProject({fixture:req.body.fixture,file:req.file}));}catch(e){next(e)}});
@@ -55,8 +56,17 @@ app.patch('/api/projects/:id/audits/:auditId/ai-review/:findingId', (req,res,nex
  try { res.json(decideAiFinding(req.params.id, req.params.auditId, req.params.findingId, req.body?.decision)); }
  catch (error) { next(error); }
 });
-app.post('/api/projects/:id/issues/:issueId/proposals',async(req,res,next)=>{try{res.status(201).json(await createProposal(req.params.id,req.params.issueId,req.body));}catch(e){next(e)}});
-app.post('/api/proposals/:id/apply',(req,res,next)=>{try{proposal(req.params.id);res.status(202).json(job('verification',signal=>applyProposal(req.params.id,signal)));}catch(e){next(e)}});
+app.post('/api/projects/:id/issues/:issueId/proposals',async(req,res,next)=>{try{const result=await createProposal(req.params.id,req.params.issueId,req.body);res.status('patch' in result?201:200).json(result);}catch(e){next(e)}});
+app.get('/api/projects/:id/issues/:issueId/image-preview',async(req,res,next)=>{
+ try {
+  const evidence=await previewIssueImage(req.params.id,req.params.issueId,String(req.query.snapshot??''));
+  if(!evidence)return res.status(404).json({error:'本地快照中没有可读取的目标图片。'});
+  const [header,body]=evidence.pixels.split(',',2);
+  const mime=header.slice(5,header.indexOf(';'));
+  res.set('Cache-Control','no-store').set('X-Content-Type-Options','nosniff').type(mime).send(Buffer.from(body,'base64'));
+ }catch(e){next(e);}
+});
+app.post('/api/proposals/:id/apply',(req,res,next)=>{try{proposal(req.params.id);res.status(202).json(job('verification',signal=>applyProposal(req.params.id,signal,req.body?.semanticReviewed===true)));}catch(e){next(e)}});
 app.post('/api/proposals/:id/reject',(req,res,next)=>{try{res.json(rejectProposal(req.params.id));}catch(e){next(e)}});
 app.post('/api/projects/:id/rollback',(req,res,next)=>{try{res.json(rollback(req.params.id,String(req.body.snapshotId||'')));}catch(e){next(e)}});
 app.get('/api/projects/:id/reports',(req,res,next)=>{try{res.json(state(req.params.id));}catch(e){next(e)}});

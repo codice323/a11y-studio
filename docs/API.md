@@ -21,6 +21,8 @@
 | GET /api/projects/:id/reports | 报告数据 |
 | GET /api/projects/:id/export | 源码、截图与报告 ZIP |
 
+AI 修复统一使用 `source:"agent"`。旧 `source:"ai"` 路由到同一流程。可生成待审核补丁时返回 HTTP 201 和 `patch`，同时提供结构化的 `analysis`。图片分析和无法安全生成补丁的结果以 HTTP 200 返回，包含候选值、理由、视觉观察和可用来源；不会写入文件。图片预览由 `GET /api/projects/:id/issues/:issueId/image-preview?snapshot=…` 提供。手工图片补丁可带 `imagePurpose`，应用时用 `semanticReviewed:true` 记录人工确认。
+
 补丁只允许 `set-alt`、`set-label`、`set-name`、`set-color`；后端重新检查规则、目标、版本与文件哈希。模型只提供值和解释，用户审核确认。URL 导入只允许符合下述限制的公开网页。
 
 ## URL 快照

@@ -48,3 +48,27 @@ export type DetectionEvidence = {
   behavior: BehaviorAudit;
   ai?: { createdAt: string; findings: AiAuditFinding[] };
 };
+
+export type ImagePurpose = 'informative' | 'decorative';
+export type RepairSource = { id: string; title: string; refs: string[]; url: string; text: string };
+export type VisualMedia = { source: string; format: string; bytes: number };
+export type RepairAnalysis = {
+  status: 'repair-review';
+  suggestedValue: string | null;
+  reason: string;
+  description?: string;
+  detail?: string;
+  media?: VisualMedia;
+  sources?: RepairSource[];
+};
+export type ImageAltAnalysis = {
+  status: 'image-analysis' | 'needs-manual-review';
+  purpose: ImagePurpose | 'uncertain';
+  description: string | null;
+  contentAlt: string | null;
+  reason: string;
+  sources?: RepairSource[];
+  detail?: string;
+  media?: VisualMedia;
+};
+export type ImageSemanticReview = { purpose: ImagePurpose; confirmed: true };

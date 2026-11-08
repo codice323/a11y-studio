@@ -7,8 +7,8 @@ async function wait(id:string){for(let i=0;i<150;i++){const {data}=await api('/a
 async function fixture(name:string){const form=new FormData();form.set('fixture',name);const {data,res}=await api('/api/projects',{method:'POST',body:form});assert.equal(res.status,201);const j=await post(`/api/projects/${data.id}/audits`,{});return {project:data,scan:await wait(j.data.id)}}
 async function zip(files:{name:string;value:string}[]){return Buffer.from(zipSync(Object.fromEntries(files.map(f=>[f.name,strToU8(f.value)]))));}
 test('静态项目的真实检测、审核修复、失败回滚、导出与异常处理', {timeout:120000}, async()=>{
- const mockPort=await port();let unexpectedNetwork=0,mockFailure=false;mock=http.createServer(async(req,res)=>{if(req.url==='/hit')unexpectedNetwork++;if(mockFailure){res.writeHead(429);res.end('{}');return;}let raw='';for await(const chunk of req)raw+=chunk;const body=raw?JSON.parse(raw):{};res.setHeader('content-type','application/json');let message:any={content:JSON.stringify({value:'电子邮箱',reason:'为输入框补充名称',needsReview:true})};if(body.tools&&!body.messages.some((x:any)=>x.role==='tool'))message={content:null,tool_calls:[{id:'inspect',type:'function',function:{name:'inspect_issue',arguments:'{}'}},{id:'search',type:'function',function:{name:'search_wcag',arguments:JSON.stringify({query:'电子邮箱表单标签'})}}]};else if(body.messages?.[0]?.content?.includes('只辅助审核'))message={content:JSON.stringify({findings:[{index:0,explanation:'请人工检查名称是否准确。'}]})};res.end(JSON.stringify({choices:[{message}]}))});await new Promise<void>(r=>mock.listen(mockPort,'127.0.0.1',r));
- const appPort=await port();base=`http://127.0.0.1:${appPort}`;server=spawn(process.execPath,['--import','tsx','apps/api/server.ts'],{cwd:process.cwd(),env:{...process.env,PORT:String(appPort),A11Y_DATA_DIR:tmp,AI_API_KEY:'test-key',AI_BASE_URL:`http://127.0.0.1:${mockPort}`,AI_MODEL:'mock'},stdio:'ignore'});
+ const mockPort=await port();let unexpectedNetwork=0,mockFailure=false;mock=http.createServer(async(req,res)=>{if(req.url==='/hit')unexpectedNetwork++;if(mockFailure){res.writeHead(429);res.end('{}');return;}let raw='';for await(const chunk of req)raw+=chunk;const body=raw?JSON.parse(raw):{};res.setHeader('content-type','application/json');if(Array.isArray(body.messages?.[1]?.content)){res.end(JSON.stringify({choices:[{message:{content:JSON.stringify({purpose:'uncertain',description:'红色和蓝色柱形',contentAlt:'蓝柱高于红柱',reason:'请确认图片用途。'})}}]}));return;}let message:any={content:JSON.stringify({value:'电子邮箱',reason:'为输入框补充名称',needsReview:true})};if(body.tools&&!body.messages.some((x:any)=>x.role==='tool'))message={content:null,tool_calls:[{id:'inspect',type:'function',function:{name:'inspect_issue',arguments:'{}'}},{id:'search',type:'function',function:{name:'search_wcag',arguments:JSON.stringify({query:'电子邮箱表单标签'})}}]};else if(body.messages?.[0]?.content?.includes('只辅助审核'))message={content:JSON.stringify({findings:[{index:0,explanation:'请人工检查名称是否准确。'}]})};res.end(JSON.stringify({choices:[{message}]}))});await new Promise<void>(r=>mock.listen(mockPort,'127.0.0.1',r));
+ const appPort=await port();base=`http://127.0.0.1:${appPort}`;server=spawn(process.execPath,['--import','tsx','apps/api/server.ts'],{cwd:process.cwd(),env:{...process.env,PORT:String(appPort),A11Y_DATA_DIR:tmp,AI_API_KEY:'test-key',AI_BASE_URL:`http://127.0.0.1:${mockPort}`,AI_MODEL:'mock',AI_VISION_MODEL:'mock-vision'},stdio:'ignore'});
  try {let ready=false;for(let i=0;i<100;i++){try{await fetch(base+'/api/status');ready=true;break}catch{await new Promise(r=>setTimeout(r,100))}}assert.ok(ready,'服务启动超时');
   const names=['demo-form','demo-contrast','demo-mixed'];for(const name of names){const {scan}=await fixture(name);assert.ok(scan.issues.length>0,`${name} 应有真实问题`);assert.equal(scan.status,'completed');assert.equal(scan.detection.behavior.status,'completed',name);}
   const {project:p,scan}=await fixture('demo-mixed');const initialId=p.currentSnapshot;const original=fs.readFileSync(path.join(tmp,'projects',p.id,initialId,'index.html'),'utf8');assert.equal(scan.issues.length,5);
@@ -44,8 +44,10 @@ test('静态项目的真实检测、审核修复、失败回滚、导出与异�
    await page.getByRole('button',{name:'确认疑点'}).click();
    await page.getByText('人工认可',{exact:true}).waitFor();
    await page.getByRole('button',{name:/表单控件缺少标签/}).click();
-   await page.getByRole('button',{name:'AI 检索并分析'}).click();
-   await page.getByText('AI 检索修复建议',{exact:true}).waitFor();
+   await page.getByRole('button',{name:'AI 分析与修复'}).click();
+   await page.getByText('AI 修复建议',{exact:true}).waitFor();
+   assert.equal(await page.getByText('检索到的规范依据',{exact:true}).isVisible(),false);
+   await page.getByText('查看详细依据',{exact:true}).click();
    await page.getByText('检索到的规范依据',{exact:true}).waitFor();
    await page.getByRole('button',{name:'保留原样'}).click();
    await page.getByLabel('建议的文本内容').fill('电子邮箱');await page.getByRole('button',{name:'生成补丁预览'}).click();await page.getByRole('button',{name:'审核并应用'}).click();const modal=await new AxeBuilder({page}).withTags(['wcag2a','wcag2aa','wcag21a','wcag21aa']).analyze();assert.deepEqual(modal.violations.filter(x=>x.impact==='critical'||x.impact==='serious').map(x=>x.id),[]);await page.keyboard.press('Escape');assert.equal(await page.getByRole('dialog').count(),0);await page.getByRole('button',{name:'结果报告',exact:true}).click();const reportAudit=await new AxeBuilder({page}).withTags(['wcag2a','wcag2aa','wcag21a','wcag21aa']).analyze();const reportSerious=reportAudit.violations.filter(x=>x.impact==='critical'||x.impact==='serious');assert.deepEqual(reportSerious.map(x=>x.id),[],`报告页高严重度问题: ${JSON.stringify(reportSerious.map(x=>({id:x.id,nodes:x.nodes.map(n=>({target:n.target,summary:n.failureSummary}))})))}`);
@@ -54,7 +56,7 @@ test('静态项目的真实检测、审核修复、失败回滚、导出与异�
    await page.locator('input[type=file]').setInputFiles({name:'browser-upload.html',mimeType:'text/html',buffer:Buffer.from(browserFixture)});
    await page.getByText('项目已导入并完成真实检测。').waitFor();
    await page.getByRole('button',{name:/表单控件缺少标签/}).click();
-   await page.getByRole('button',{name:'AI 生成建议'}).click();
+   await page.getByRole('button',{name:'AI 分析与修复'}).click();
    await page.getByText('AI 修复建议',{exact:true}).waitFor();
    await page.getByRole('button',{name:'审核并应用'}).click();
    await page.getByRole('button',{name:'确认并验证'}).click();
@@ -67,6 +69,21 @@ test('静态项目的真实检测、审核修复、失败回滚、导出与异�
    await page.getByText('项目已导入并完成真实检测。').waitFor();
    await page.getByRole('button',{name:/表单控件缺少标签/}).waitFor();
    await page.getByText('V2 检测证据 · 已完成',{exact:true}).waitFor();
+   await page.getByRole('button',{name:'切换项目'}).click();
+   const chart=fs.readFileSync(new URL('./fixtures/vision/bars.png',import.meta.url)).toString('base64');
+   const imageFixture=`<!doctype html><html lang="zh-CN"><title>图片验收</title><main><h1>图片</h1><img src="data:image/png;base64,${chart}"></main></html>`;
+   await page.locator('input[type=file]').setInputFiles({name:'browser-image.html',mimeType:'text/html',buffer:Buffer.from(imageFixture)});
+   await page.getByText('项目已导入并完成真实检测。').waitFor();
+   await page.getByRole('button',{name:/图片缺少替代文本/}).click();
+   await page.getByRole('button',{name:'AI 分析与修复'}).click();
+   await page.getByRole('status').filter({hasText:'待人工确认'}).waitFor();
+   assert.equal(await page.getByRole('alert').count(),0);
+   await page.getByRole('img',{name:'待修复的目标图片'}).waitFor();
+   assert.ok(await page.getByRole('button',{name:'生成补丁预览'}).isDisabled());
+   await page.getByRole('radio',{name:'内容性图片'}).check();
+   assert.equal(await page.getByLabel('建议的文本内容').inputValue(),'蓝柱高于红柱');
+   await page.getByRole('button',{name:'生成补丁预览'}).click();
+   await page.getByRole('button',{name:'审核并应用'}).waitFor();
   }finally{await browser.close()}
  } finally {server?.kill('SIGTERM');await new Promise<void>(r=>mock?.close(()=>r()));fs.rmSync(tmp,{recursive:true,force:true});}
 });

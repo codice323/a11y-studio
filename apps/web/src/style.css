@@ -248,7 +248,7 @@ input, select { min-width: 0; max-width: 100%; background: white; border: 1px so
 .detail-block a svg { vertical-align: middle; }
 .detail-block code { display: block; color: #385071; background: #f3f6fb; border-radius: 6px; padding: 8px; font-size: 12px; overflow-wrap: anywhere; }
 .rule-tags { display: flex; gap: 4px; flex-wrap: wrap; margin-bottom: 4px; font-size: 11px; }
-.assistant-body input { width: 100%; }
+.assistant-body #repair-value { width: 100%; }
 .note, .repair-actions { margin-top: 8px; }
 .proposal, .verification-card { background: #f1f5ff; border: 1px solid #d1ddf7; border-radius: 9px; padding: 10px; margin-top: 14px; font-size: 12px; }
 .proposal-head { display: flex; align-items: center; justify-content: space-between; gap: 5px; }
@@ -348,3 +348,7 @@ footer { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 8p
 .shot-options button[aria-pressed="true"] { color: #214098; border-color: #aabfea; background: var(--blue-light); }
 .single-shot { grid-template-columns: minmax(0, 1fr); }
 .shot-location-error { padding: 0 12px 8px; color: var(--muted); font-size: 12px; }
+
+.image-preview img { display: block; max-width: 100%; max-height: 180px; object-fit: contain; }
+.image-purpose { margin: 0 0 12px; padding: 7px 10px; border: 1px solid var(--line); }
+.image-purpose label { display: inline-flex; align-items: center; margin-right: 10px; }

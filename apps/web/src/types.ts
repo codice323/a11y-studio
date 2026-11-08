@@ -1,4 +1,4 @@
-import type { DetectionEvidence } from '../../../packages/shared/types';
+import type { DetectionEvidence, RepairAnalysis, ImagePurpose, ImageSemanticReview } from '../../../packages/shared/types';
 
 export type Bounds = { x: number; y: number; width: number; height: number };
 
@@ -42,6 +42,7 @@ export type Verification = {
   baselineAudit?: string;
   audit?: string | null;
   targetFixed?: boolean;
+  imageReview?: ImageSemanticReview;
   structurePassed?: boolean;
   functionPassed?: boolean;
   contrastCheck?: { ratio: number; required: number; valid: boolean; uncertain: boolean } | null;
@@ -66,6 +67,8 @@ export type State = {
 export type Proposal = {
   id: string;
   source: string;
+  analysis?: RepairAnalysis;
+  imagePurpose?: ImagePurpose;
   reason: string;
   guidance: string;
   wcag: string[];

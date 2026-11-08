@@ -187,7 +187,7 @@ function asText(resource: Resource) {
   catch { return resource.body.toString('utf8'); }
 }
 
-function isRasterImage(resource: Resource) {
+export function isRasterImage(resource: Pick<Resource, 'type' | 'body'>) {
   const { type, body } = resource;
   if (type === 'image/png') return body.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]));
   if (type === 'image/jpeg') return body.subarray(0, 3).equals(Buffer.from([255, 216, 255]));
