@@ -36,7 +36,7 @@ type Fixture = { id: string; name: string; description: string };
 type Project = { id: string; name: string; assets?: { stylesheets: number; images: number; skipped: number }; rendering?: { mode: string; requests: number; blocked: number; empty: boolean } };
 type UrlImport = { url: string; mode: 'static' | 'rendered' };
 type Knowledge = { title: string; url: string; guidance: string; refs: string[] };
-type Source = 'html' | 'zip' | 'url';
+type Source = 'html' | 'zip' | 'url' | 'source';
 type Selection = { issueId: string } | { history: HistoryItem; archived: boolean } | null;
 const controlTabs = [
   { id: 'issues', label: '问题与历史' },
@@ -93,7 +93,8 @@ function App() {
   const selectedId = selection && 'issueId' in selection ? selection.issueId : undefined;
   const reviewIssue = selectedId && state?.current?.detection?.behavior.findings
     .map(reviewRepairIssue).find(item => item?.id === selectedId);
-  const issue = reviewIssue || state?.current?.issues.find(item => item.id === selectedId);
+  const issue = reviewIssue ? { ...reviewIssue, source: state?.current?.sourceLocations?.[reviewIssue.selector] }
+    : state?.current?.issues.find(item => item.id === selectedId);
   const history = selection && 'history' in selection ? selection.history : undefined;
   const draftKey = issue && state ? `${state.project.currentSnapshot}:${issue.id}` : '';
   const draft = drafts[draftKey];
@@ -338,7 +339,12 @@ function App() {
   function propose(source: 'agent' | 'manual') {
     if (!issue) return;
     if (source === 'manual' && proposal?.sourceReview && patchReady) { showPatch(); return; }
-    const sourceRepair = source === 'manual' ? ['label','select-name','link-name'].includes(issue.ruleId) : Object.hasOwn(sourceRepairKinds, issue.ruleId);
+    const mode = state?.project.mode;
+    const manualRules = ['label','select-name','link-name'];
+    if (mode === 'react-source' || mode === 'static-source') manualRules.push('button-name','color-contrast');
+    if (mode === 'react-source') manualRules.push('image-alt');
+    const sourceRepair = source === 'manual' ? manualRules.includes(issue.ruleId) :
+      Object.hasOwn(sourceRepairKinds, issue.ruleId);
     run(sourceRepair ? `Agent 正在分析「${issueTitle(issue)}」并验证隔离副本…` :
       source === 'agent' ? 'AI 正在分析问题…' : '正在生成补丁预览…', async () => {
       const endpoint = route + '/issues/' + encodeURIComponent(issue.id) + '/proposals';
@@ -477,7 +483,7 @@ function App() {
           <>
             <div className="project-strip">
               <div className="project-symbol"><FileCode2 size={19} /></div>
-              <div className="project-title"><b>{state.project.name}</b><span>本地快照：{state.project.entry} · 当前版本 {versionName(state, state.project.currentSnapshot)}</span></div>
+              <div className="project-title"><b>{state.project.name}</b><span>{state.project.mode==='react-source'?'React 原始组件工程':state.project.mode==='static-source'?'静态源码工程':'网页快照'}：{state.project.entry} · 当前版本 {versionName(state, state.project.currentSnapshot)}</span></div>
               <div className="version-controls">
                 <div className="project-actions">
                   <button className="secondary" onClick={scanAgain} disabled={working}><RefreshCw size={14} />重新检测</button>
@@ -545,7 +551,7 @@ function App() {
                 </div>
                 <div className="control-panel" role="tabpanel" id="control-panel-assistant"
                   aria-labelledby="control-tab-assistant" tabIndex={0} ref={assistantPanel} hidden={controlTab !== 'assistant'}>
-                  <Assistant issue={issue} history={history} knowledge={knowledge} ai={ai.configured} visionReady={ai.visionConfigured} busy={working} proposal={proposal} analysis={draft?.analysis} purpose={draft?.purpose} onPurpose={chooseImagePurpose}
+                  <Assistant issue={issue} history={history} knowledge={knowledge} ai={ai.configured} engineering={state.project.mode === 'react-source' || state.project.mode === 'static-source'} visionReady={ai.visionConfigured} busy={working} proposal={proposal} analysis={draft?.analysis} purpose={draft?.purpose} onPurpose={chooseImagePurpose}
                     previewUrl={issue?.ruleId === 'image-alt' ? route + '/issues/' + encodeURIComponent(issue.id) +
                       '/image-preview?snapshot=' + encodeURIComponent(state.project.currentSnapshot) : undefined}
                     input={input} onInput={value => updateDraft({ value, edited: true })} onPropose={propose} onShowPatch={showPatch} />
@@ -581,10 +587,12 @@ function Home({ fixtures, projects, busy, onCreate, onOpen, onError }: {
   const fileInput = useRef<HTMLInputElement>(null);
   function chooseFile(file: File) {
     if (busy) return;
+    if (source==='source'&&!/\.zip$/i.test(file.name)) return onError('请选择源码工程 ZIP。');
     if (!/\.(?:html?|zip)$/i.test(file.name)) return onError('请选择 HTML 或 ZIP 文件。');
     if (file.size > 8 * 1024 * 1024) return onError('文件不能超过 8 MB。');
     const data = new FormData();
     data.set('file', file);
+    if (source === 'source') data.set('mode','source');
     onCreate(data);
   }
 
@@ -599,6 +607,7 @@ function Home({ fixtures, projects, busy, onCreate, onOpen, onError }: {
       <div className="evidence-tabs import-tabs" role="group" aria-label="网页导入方式">
         <button aria-pressed={source === 'html'} disabled={busy} onClick={() => setSource('html')}><FileCode2 size={16} />HTML</button>
         <button aria-pressed={source === 'zip'} disabled={busy} onClick={() => setSource('zip')}><FileArchive size={16} />ZIP</button>
+        <button aria-pressed={source === 'source'} disabled={busy} onClick={() => setSource('source')}><FileCode2 size={16} />源码工程</button>
         <button aria-pressed={source === 'url'} disabled={busy} onClick={() => setSource('url')}><Link2 size={16} />URL</button>
       </div>
       {source === 'url' ? <form className="url-form" onSubmit={submitUrl}>
@@ -616,8 +625,8 @@ function Home({ fixtures, projects, busy, onCreate, onOpen, onError }: {
         if (file) chooseFile(file);
       }}>
         <div className="upload-icon"><FileUp size={24} /></div>
-        <b>{source === 'html' ? '上传单个 HTML 文件' : '上传静态网页 ZIP'}</b>
-        <span>{source === 'html' ? '支持 .html / .htm' : '可包含 HTML、CSS 与本地图片'} · 可拖放 · 最大 8 MB</span>
+        <b>{source === 'html' ? '上传单个 HTML 文件' : source === 'source' ? '上传静态或 React 源码工程 ZIP' : '上传静态网页 ZIP'}</b>
+        <span>{source === 'html' ? '支持 .html / .htm' : source === 'source' ? '支持静态工程或基础 React + Vite，根目录保留入口与源码' : '可包含 HTML、CSS 与本地图片'} · 可拖放 · 最大 8 MB</span>
         <input ref={fileInput} type="file" accept={source === 'html' ? '.html,.htm' : '.zip'} hidden onChange={event => {
           const file = event.target.files?.[0];
           if (file) chooseFile(file);
@@ -625,7 +634,7 @@ function Home({ fixtures, projects, busy, onCreate, onOpen, onError }: {
         }} />
         <button className="button dark" disabled={busy} onClick={() => fileInput.current?.click()}>选择文件 <ArrowRight size={15} /></button>
       </div>}
-      <div className="import-note"><LockKeyhole size={15} />{source === 'url' && urlMode === 'rendered' ? '采集时运行脚本，检测和修复使用不执行脚本的本地快照。' : '网页自带脚本不会在检测环境中执行。'}</div>
+      <div className="import-note"><LockKeyhole size={15} />{source === 'url' && urlMode === 'rendered' ? '采集时运行脚本，检测和修复使用不执行脚本的本地快照。' : source === 'source' ? 'React 使用应用固定的构建工具和隔离浏览器，不运行项目安装脚本或构建配置。' : '网页自带脚本不会在检测环境中执行。'}</div>
     </section>
     <section className="examples">
       <div className="section-title"><div><span className="section-tag">DEMO PROJECTS</span><h2>从示例开始</h2></div></div>
@@ -665,8 +674,8 @@ function ImagePreview({ url }: { url: string }) {
   </div>;
 }
 
-function Assistant({ issue, history, knowledge, ai, visionReady, busy, proposal, analysis, purpose, onPurpose, previewUrl, input, onInput, onPropose, onShowPatch }: {
-  issue?: Issue; history?: HistoryItem; knowledge: Knowledge | null; ai: boolean; visionReady: boolean; busy: boolean;
+function Assistant({ issue, history, knowledge, ai, engineering, visionReady, busy, proposal, analysis, purpose, onPurpose, previewUrl, input, onInput, onPropose, onShowPatch }: {
+  issue?: Issue; history?: HistoryItem; knowledge: Knowledge | null; ai: boolean; engineering: boolean; visionReady: boolean; busy: boolean;
   proposal: Proposal | null; analysis?: ImageAltAnalysis | RepairAnalysis; purpose?: ImagePurpose;
   onPurpose: (purpose: ImagePurpose) => void; previewUrl?: string; input: string; onInput: (value: string) => void;
   onPropose: (source: 'agent' | 'manual') => void;
@@ -680,6 +689,7 @@ function Assistant({ issue, history, knowledge, ai, visionReady, busy, proposal,
     : purpose === 'informative' && !input.trim()
       ? '请填写非空替代文本，再生成补丁预览。'
       : '');
+  const localAnalysis = engineering && ['label','select-name','link-name','focus-style-unchanged'].includes(target?.ruleId ?? '');
   const agentOnly = target?.ruleId === 'focus-style-unchanged' || target?.ruleId === 'aria-valid-attr-value' || target?.ruleId === 'aria-broken-idref';
   const trace = proposal?.agentTrace ?? (analysis && 'agentTrace' in analysis ? analysis.agentTrace : undefined);
   const refs = verification?.wcag ?? proposal?.wcag ?? knowledge?.refs ?? target?.wcag ?? [];
@@ -697,6 +707,7 @@ function Assistant({ issue, history, knowledge, ai, visionReady, busy, proposal,
     </div>}
     {target ? <div className="assistant-body">
       <div className="issue-heading"><span className={'issue-dot' + (history ? ' fixed' : '')} aria-hidden="true">{history ? <Check size={16} /> : '!'}</span><div><h3>{issueTitle(target)}</h3><span>{target.ruleId} · {impactName[target.impact] ?? target.impact}</span></div></div>
+      {target.source && <p className="muted note">组件源码 <code>{target.source.file}:{target.source.line}</code></p>}
       {!analysis && <p className="muted note">{problem}</p>}
       {analysis && <div className="proposal" role="status">
         <p><b>问题</b> · {problem}</p>
@@ -762,7 +773,7 @@ function Assistant({ issue, history, knowledge, ai, visionReady, busy, proposal,
         <p id="repair-preview-hint" className="note" role="status">{previewHint || (isImageAlt && purpose === 'decorative' ? '预览将添加空 alt（alt=""），请确认该图片只用于装饰。' : null)}</p>
         <div className="repair-actions">
           <button className="button dark" disabled={busy || Boolean(previewHint) || (['label','select-name','link-name'].includes(target.ruleId) && !input.trim()) || (agentOnly && !proposal?.sourceReview)} aria-describedby={isImageAlt ? 'repair-preview-hint' : undefined} onClick={() => onPropose('manual')}><Code2 size={15} />生成补丁预览</button>
-          <button className="secondary" disabled={busy || !ai} onClick={() => onPropose('agent')}><Sparkles size={15} />AI 分析与修复</button>
+          <button className="secondary" disabled={busy || (!ai && !localAnalysis)} onClick={() => onPropose('agent')}><Sparkles size={15} />AI 分析与修复</button>
         </div>
         {proposal && <div className="proposal">
           <div className="proposal-head"><b>{proposal.source === 'manual' ? '人工修复建议' : 'AI 修复建议'}</b><span>{proposal.imagePurpose ? '待人工确认' : '待审核'}</span></div>
@@ -795,7 +806,7 @@ function Report({ state, onRollback, onOpen, onWorkspace, busy }: {
   return <div className="report">
     <p className="muted">当前报告 · {versionName(state, state.project.currentSnapshot)}</p>
     <Metrics state={state} />
-    <div className="export-banner"><span className="section-icon"><Download size={19} /></span><div><h2>导出源码与报告</h2><p>ZIP 包含当前本地快照、扫描截图、HTML / JSON 报告和验证日志。</p></div><ExportButton route={'/api/projects/' + state.project.id} disabled={busy} /></div>
+    <div className="export-banner"><span className="section-icon"><Download size={19} /></span><div><h2>导出源码与报告</h2><p>{state.project.mode?.endsWith('-source') ? 'ZIP 包含当前版本的原始工程文件、扫描证据和验证日志。' : 'ZIP 包含当前本地快照、扫描截图、HTML / JSON 报告和验证日志。'}</p></div><ExportButton route={'/api/projects/' + state.project.id} disabled={busy} /></div>
     <div className="report-grid">
       <section className="panel report-section"><div className="panel-head"><div><span className="kicker">VALIDATION</span><h2>跨版本修复与验证记录</h2></div></div>
         {state.verifications.length ? state.verifications.map(item => <div className="log-row" key={item.id}>
@@ -851,10 +862,9 @@ function ConfirmDialog({ imagePurpose, sourceReview, onClose, onConfirm }: {
     <span className="section-icon"><ShieldCheck size={20} /></span>
     <h2 id="confirm-title">确认应用修复？</h2>
     <p id="confirm-description">系统会修改当前版本的副本，并重新扫描、检查页面结构与控件聚焦。复测失败时继续使用上一个有效版本。</p>
-    {imagePurpose && <p><label><input type="checkbox" checked={semanticReviewed}
-      onChange={event => setSemanticReviewed(event.target.checked)} /> 我已确认图片用途和替代文本符合页面语境（{imagePurposeLabel[imagePurpose]}）</label></p>}
-    {sourceReview && <p><label><input type="checkbox" checked={semanticReviewed}
-      onChange={event => setSemanticReviewed(event.target.checked)} /> 我已审核源码差异并确认符合页面用途</label></p>}
+    {(imagePurpose || sourceReview) && <p><label><input type="checkbox" checked={semanticReviewed}
+      onChange={event => setSemanticReviewed(event.target.checked)} /> {sourceReview ? '我已审核源码差异并确认符合页面用途' : '我已确认图片用途和替代文本符合页面语境'}
+      {imagePurpose && <>（{imagePurposeLabel[imagePurpose]}，已核对替代文本）</>}</label></p>}
     <div className="confirm-actions">
       <button ref={cancel} className="secondary" onClick={onClose}>取消</button>
       <button className="button dark" disabled={Boolean((imagePurpose || sourceReview) && !semanticReviewed)} onClick={() => onConfirm(semanticReviewed)}>确认应用并复测 <ArrowRight size={15} /></button>

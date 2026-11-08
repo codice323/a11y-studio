@@ -19,17 +19,24 @@ function findIssue(pid:string,sid:string,issueId:string): Issue {
  const issue=result.issues.find((item:Issue)=>item.id===issueId);
  if(issue)return issue;
  const reviewIssue=result.detection?.behavior.findings.map(reviewRepairIssue).find((item:Issue|undefined)=>item?.id===issueId);
- if(reviewIssue)return reviewIssue;
+ if(reviewIssue)return {...reviewIssue,source:result.sourceLocations?.[reviewIssue.selector]};
  throw new Error('该问题不存在或已变化，请重新扫描。');
 }
 
-export async function createSourceProposal(pid:string, issueId:string, expectedSnapshot:unknown, intent:unknown, signal?:AbortSignal, manualLabel=false) {
+export async function createSourceProposal(pid:string, issueId:string, expectedSnapshot:unknown, intent:unknown, signal?:AbortSignal, manualLabel=false, imagePurpose?:unknown) {
  const p=project(pid), sid=p.current_snapshot;
  if(sid!==expectedSnapshot)throw new Error('页面版本已变化，请重新选择问题。');
  const issue=findIssue(pid,sid,issueId);
- if(manualLabel&&(!['label','select-name','link-name'].includes(issue.ruleId)||typeof intent!=='string'||!intent.trim()))throw new Error('请填写字段或链接名称。');
- if(!Object.hasOwn(sourceRepairKinds,issue.ruleId))throw new Error('此问题没有受支持的 Agent 源码策略。');
- const ctx={projectId:pid,snapshotId:sid,dir:snapshotDir(pid,sid),entry:p.entry,issue,baseline:latestAudit(pid,sid)};
+ const react=p.mode==='react-source';
+ const reactImage=react&&issue.ruleId==='image-alt';
+ if(reactImage && (!manualLabel || typeof intent!=='string' || (imagePurpose!=='informative'&&imagePurpose!=='decorative') ||
+    (imagePurpose==='informative'?!intent.trim():intent!=='')))throw new Error('请明确图片用途并填写合适的替代文本。');
+ const manualRules=['label','select-name','link-name'];
+ if(p.mode!=='snapshot')manualRules.push('color-contrast','button-name');
+ if(manualLabel&&!reactImage&&(!manualRules.includes(issue.ruleId)||
+    typeof intent!=='string'||!intent.trim()))throw new Error('请填写受支持的修复值。');
+ if(!reactImage&&!Object.hasOwn(sourceRepairKinds,issue.ruleId))throw new Error('此问题没有受支持的 Agent 源码策略。');
+ const ctx={projectId:pid,snapshotId:sid,dir:snapshotDir(pid,sid),entry:p.entry,issue,engineering:p.mode!=='snapshot',baseline:latestAudit(pid,sid)};
  const result=await proposeSourceRepair(ctx,intent,signal);
  signal?.throwIfAborted();
  if(project(pid).current_snapshot!==sid||treeHash(ctx.dir)!==result.baseHash)throw new Error('页面版本已变化，请重新分析。');
@@ -47,6 +54,7 @@ export async function createSourceProposal(pid:string, issueId:string, expectedS
   reason:result.reason,impact:issue.description,wcag:guide.refs||issue.wcag,wcagUrl:guide.url||issue.helpUrl,
   wcagTitle:guide.title||'',guidance:guide.guidance||'',risk:'请确认文案、引用和视觉改动符合实际业务。复测运行隔离快照。',
   analysis:{...analysis,suggestedValue:value||null},agentTrace:result.trace,sources:result.sources,
+  ...(reactImage?{imagePurpose}:{}),
   before:candidate.changes[0].before,after:candidate.changes[0].after,
   sourcePatch:{plan:candidate.plan,baseHash:result.baseHash},sourceReview:review};
  db.prepare('INSERT INTO proposals VALUES(?,?,?,?,?,?,?)').run(data.id,pid,sid,issueId,'pending',JSON.stringify(data),now());
@@ -72,6 +80,8 @@ export async function previewIssueImage(pid: string, issueId: string, snapshotId
  return collectVisualContext({projectId:pid,snapshotId:current,selector:issue.selector,mode:'image-resource'});
 }
 export async function createProposal(pid:string,issueId:string,input:{source?:string;value?:string;imagePurpose?:unknown}){const p=project(pid),sid=p.current_snapshot,issue=findIssue(pid,sid,issueId),operation=rules[issue.ruleId];if(!operation)throw new Error('此问题需要人工处理，当前没有受支持的补丁策略。');const guide=knowledge[issue.ruleId]||{};let value=input.value, reason='由用户填写并审核的修复建议。',source='manual';let analysis:RepairAnalysis|undefined;let agentTrace:AgentTrace[]|undefined;let sources:Awaited<ReturnType<typeof runRepairAgent>>['sources']|undefined;
+ if(p.mode==='react-source'&&(!(input.source==='agent'||input.source==='ai')||issue.ruleId!=='image-alt'))
+  throw new Error('React 工程修复必须定位和验证原始组件，不能使用快照补丁。');
  const snap=snapshot(pid,sid),dir=snapshotDir(pid,sid),file=safePath(dir,snap.entry),before=fs.readFileSync(file,'utf8');
  if(input.source==='ai'||input.source==='agent'){
   const target={projectId:pid,snapshotId:sid,selector:issue.selector};
@@ -117,7 +127,7 @@ export async function previewProposal(proposalId: string, signal?: AbortSignal) 
   fs.cpSync(dir,copy,{recursive:true});
   if(source){
    if(treeHash(dir)!==source.baseHash)throw new Error('源文件已变化。');
-   const candidate=compileSourcePlan({dir,entry:p.entry,issue},source.plan,pr.data.reason);
+   const candidate=compileSourcePlan({dir,entry:p.entry,issue,engineering:p.mode!=='snapshot'},source.plan,pr.data.reason);
    if(JSON.stringify(candidate.changes)!==JSON.stringify(pr.data.sourceReview.changes))throw new Error('补丁与预览不一致。');
    writeSourceCandidate(copy,candidate);
    target=candidate.target;
@@ -166,7 +176,7 @@ export async function applyProposal(proposalId:string,signal?:AbortSignal,semant
  if(issue.ruleId!==patch.ruleId||issue.selector!==patch.selector||patch.targetFile!==p.entry)throw new Error('补丁目标与问题不匹配。');
  const sourceDir=snapshotDir(pid,p.current_snapshot),file=safePath(sourceDir,patch.targetFile),before=fs.readFileSync(file,'utf8');
  const baseline=latestAudit(pid,p.current_snapshot);
- const ctx={projectId:pid,snapshotId:p.current_snapshot,dir:sourceDir,entry:p.entry,issue,baseline};
+ const ctx={projectId:pid,snapshotId:p.current_snapshot,dir:sourceDir,entry:p.entry,issue,engineering:p.mode!=='snapshot',baseline};
  let candidate:ReturnType<typeof compileSourcePlan>|undefined;
  let after=before;
  if(sourcePatch){

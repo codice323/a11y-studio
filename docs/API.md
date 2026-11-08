@@ -72,5 +72,13 @@ V2 扫描在原有结果上增加 `detection` 字段，旧扫描可没有此字�
 
 - `select-name` 保留为 axe 确定违规，并复用原生表单标签源码策略。缺少可信文案时可以手动填写用途。焦点和悬空 ARIA 引用的行为发现仍是复核线索。`target-size` 保留在检测结果中，目前需人工核对可点击面积和间距。
 - 对比度与焦点方案可使用当前 HTML 文档或其直接链接的本地 CSS。Agent 读取 Chromium 的双视口计算样式、匹配规则、继承、页内和外链来源、媒体条件、伪元素与焦点状态。这些是有限的规则证据，复杂层叠仍由实际渲染验证。
-- PostCSS 可改写能单独匹配目标的现有声明，或生成目标限定的声明。多页项目的 CSS 方案限制在当前文档，保留共享样式文件。现有内联 `!important` 可保留其优先级，源码策略不会新增该标记。
+- PostCSS 可改写能单独匹配目标的现有声明，或生成目标限定的声明。多页快照的 CSS 方案限制在当前文档。多页静态源码工程仅在目标 ID 在入口唯一且其他页面均不使用该 ID 时，允许改写同一 ID 限定的外部 CSS，并复验所有附页。现有内联 `!important` 可保留其优先级，源码策略不会新增该标记。
 - CSS 方案在预览和提交阶段都复测入口目标及所有附页，附页最多八个。附页比较 axe 违规、Tab 轨迹、焦点证据和静态控件属性，并核对 900px、390px 下的无障碍语义与计算样式及布局指纹。截图摘要用于追查差异。检测到附页变化或证据不足时停止，提交失败沿用原版本和失败记录。静态快照校验不覆盖真实站点脚本、任意视口、触摸操作、Shadow DOM 或未导入资源。
+
+## 源码工程 V1
+
+- `POST /api/projects` 使用 multipart 字段 `file` 上传 ZIP，同时传 `mode=source`。项目状态和列表返回 `mode`，可为 `snapshot`、`static-source` 或 `react-source`。已有项目保持快照模式。
+- 静态工程包含 HTML、CSS 和本地资源，可有多个 HTML 页面。React 工程要求 ZIP 根目录有 `index.html` 和 `package.json`，入口 HTML 使用单个本地 JSX/TSX 模块，运行依赖限于 React 和 React DOM。构建使用 A11y Studio 安装的工具链，不运行上传工程的 npm 命令、Vite 配置或插件。
+- React 扫描结果的 `issues[].source` 在唯一映射时包含 `file`、`line`、`tag` 和定位键。标记只注入扫描用 bundle。动态展开属性、重复渲染导致的非唯一映射和无法验证的样式变更会安全停止。
+- 工程补丁继续走现有 proposal、preview 和 verification API。React 补丁使用 `sourceRepair:true`。应用时需传 `sourceReviewed:true`。React 图片补丁还要求明确 `imagePurpose`，应用时传 `semanticReviewed:true`。扫描报告的 `build` 记录隔离编译结果及耗时。
+- ZIP 导出保留原始目录结构，源码工程在 `source/`，网页快照在 `website/`，报告均在 `report/`。导出的 React 文件不包含扫描标记或生成 bundle。

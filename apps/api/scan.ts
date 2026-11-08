@@ -1,6 +1,7 @@
 import { setTimeout as delay } from 'node:timers/promises';
 import fs from 'node:fs';import path from 'node:path';import {chromium,type Browser,type Page} from 'playwright-core';import * as cheerio from 'cheerio';
 import {db,id,now,hash,DATA,safePath,snapshotDir,snapshot,audit} from './storage';
+import { buildReactProject, isReactProject, originAttribute, sourceSelector, type SourceLocation } from './project-build';
 import { scanRules } from './scan-rules';
 import { scanBehavior, unavailableBehavior } from './scan-behavior';
 import type { BehaviorAudit, DetectionEvidence } from '../../packages/shared/types';
@@ -14,25 +15,56 @@ export function withSnapshotPage<T>(projectId: string, snapshotId: string, signa
  return withRepairPage(snapshotDir(projectId, snapshotId), snap.entry, signal, inspect, waitForSlotMs);
 }
 
-export async function withRepairPage<T>(dir: string, entry: string, signal: AbortSignal | undefined, inspect: (page: Page) => Promise<T>, waitForSlotMs = 6000) {
+export async function withRepairPage<T>(dir: string, entry: string, signal: AbortSignal | undefined, inspect: (page: Page, product?: Awaited<ReturnType<typeof buildReactProject>>) => Promise<T>, waitForSlotMs = 6000) {
  let browser: Browser | undefined;
  const closeBrowser = () => { void browser?.close().catch(() => {}); };
+ const engineering = isReactProject(dir);
  const deadline = Date.now() + waitForSlotMs;
+ const localSignal = engineering ? AbortSignal.any([...(signal?[signal]:[]),AbortSignal.timeout(35000)]) : signal;
  // Preview and evidence requests can briefly occupy both browsers during patch review.
  while (activeScans >= MAX_SCANS && Date.now() < deadline) await delay(100, undefined, {signal});
  if (activeScans >= MAX_SCANS) throw new Error('扫描任务过多，请稍后再试。');
  try {
   activeScans++;
   if(signal?.aborted)throw new Error('任务已取消。');
+  const product=engineering ? await buildReactProject(dir,entry) : undefined;
+  localSignal?.throwIfAborted();
   const exe=executable();if(!exe)throw new Error('未找到 Chromium 或 Chrome，请设置 CHROME_PATH。');
-  browser=await chromium.launch({executablePath:exe,headless:true});if(signal?.aborted)throw new Error('任务已取消。');signal?.addEventListener('abort', closeBrowser, { once:true });const context=await browser.newContext({viewport:{width:900,height:700},deviceScaleFactor:1,serviceWorkers:'block',acceptDownloads:false});
-  await context.route('**/*',async(route)=>{const req=route.request();const u=new URL(req.url());if(u.hostname!=='a11y.local'||!['http:'].includes(u.protocol)||req.resourceType()==='script'||req.method()!=='GET')return route.abort();
-    try {const relative=decodeURIComponent(u.pathname).replace(/^\/+/, '');const file=safePath(dir,relative);const ext=path.extname(file).toLowerCase();if(!mime[ext]||!fs.realpathSync(file).startsWith(fs.realpathSync(dir)+path.sep)||!fs.statSync(file).isFile())return route.abort();let body:Buffer|string=fs.readFileSync(file);if(ext==='.html'||ext==='.htm')body=sanitizedHtml(body.toString('utf8'));await route.fulfill({status:200,contentType:mime[ext],body,headers:{'Cache-Control':'no-store','X-DNS-Prefetch-Control':'off','Content-Security-Policy':"default-src 'none'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'none'; script-src 'none'; frame-src 'none'; connect-src 'none'; form-action 'none'; base-uri 'none'"}});
-    } catch {await route.abort();}});
-  const page=await context.newPage();await page.goto('http://a11y.local/'+entry.split('/').map(encodeURIComponent).join('/'),{waitUntil:'load',timeout:15000});
-  return await inspect(page);
+  browser=await chromium.launch({executablePath:exe,headless:true,
+    ...(engineering?{chromiumSandbox:true,args:['--disable-quic','--no-proxy-server','--force-webrtc-ip-handling-policy=disable_non_proxied_udp','--host-resolver-rules=MAP * ~NOTFOUND']}:{}),
+  });localSignal?.throwIfAborted();localSignal?.addEventListener('abort', closeBrowser, { once:true });const context=await browser.newContext({viewport:{width:900,height:700},deviceScaleFactor:1,serviceWorkers:'block',acceptDownloads:false});
+  if(product){
+    await context.routeWebSocket('**/*',socket=>socket.close());
+    await context.addInitScript(()=>{
+      for(const name of ['RTCPeerConnection','webkitRTCPeerConnection'])Object.defineProperty(window,name,{value:undefined});
+    });
+    context.on('page',page=>page.on('popup',popup=>{void popup.close();}));
+  }
+  await context.route('**/*',async(route)=>{
+    const req=route.request(),u=new URL(req.url());
+    if(u.origin!=='http://a11y.local'||req.method()!=='GET')return route.abort();
+    try {
+      const relative=decodeURIComponent(u.pathname).replace(/^\/+/, '');
+      const output=product?.files.get(relative);
+      const headers={'Cache-Control':'no-store','X-DNS-Prefetch-Control':'off','X-Content-Type-Options':'nosniff',
+        'Content-Security-Policy':`default-src 'none'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'none'; script-src ${product?"'self'":"'none'"}; frame-src 'none'; worker-src 'none'; connect-src 'none'; form-action 'none'; base-uri 'none'`};
+      if(output)return route.fulfill({status:200,contentType:output.type,body:output.body,headers});
+      if(req.resourceType()==='script'||(product&&!/\.(?:png|jpe?g|webp|gif|css)$/i.test(relative)))return route.abort();
+      let file=safePath(dir,relative);
+      if(product&&!fs.existsSync(file))file=safePath(dir,'public/'+relative);
+      const ext=path.extname(file).toLowerCase();
+      if(!mime[ext]||!fs.realpathSync(file).startsWith(fs.realpathSync(dir)+path.sep)||!fs.statSync(file).isFile())return route.abort();
+      let body:Buffer|string=fs.readFileSync(file);
+      if(ext==='.html'||ext==='.htm')body=sanitizedHtml(body.toString('utf8'));
+      return route.fulfill({status:200,contentType:mime[ext],body,headers});
+    }catch{return route.abort();}
+  });
+  const page=await context.newPage();
+  await page.goto('http://a11y.local/'+entry.split('/').map(encodeURIComponent).join('/'),{waitUntil:'load',timeout:15000});
+  if(product)await page.locator(`[${originAttribute}]`).first().waitFor({state:'attached',timeout:5000});
+  return await inspect(page,product);
  } finally {
-  signal?.removeEventListener('abort', closeBrowser);
+  localSignal?.removeEventListener('abort', closeBrowser);
   try { await browser?.close(); } finally { activeScans--; }
  }
 }
@@ -86,7 +118,19 @@ async function scanDirectory(projectId: string, snapshotId: string, dir: string,
  const auditId=id(),created=now();
  if(persist) db.prepare('INSERT INTO audits VALUES(?,?,?,?,?,?,?)').run(auditId,projectId,snapshotId,'running',null,null,created);
  try {
-  return await withRepairPage(dir, entry, signal, async page => {
+  return await withRepairPage(dir, entry, signal, async (page,product) => {
+  const location = async (selector:string) => {
+    if(!product||!selector)return undefined;
+    try {
+      const target=page.locator(selector);
+      if(await target.count()!==1)return undefined;
+      const key=await target.getAttribute(originAttribute,{timeout:1000});
+      if(key&&/^[a-f0-9]{20}$/.test(key)&&await page.locator(sourceSelector(key)).count()===1){
+        const source=product.sources.get(key);
+        if(source&&await target.evaluate(node=>node.localName)===source.tag)return source;
+      }
+    } catch { /* Unsupported selectors remain visible without a source link. */ }
+  };
   const regression = captureRegression ? await capturePageRegression(page, signal) : null;
   const rulesStarted = performance.now();
   let timeout: ReturnType<typeof setTimeout> | undefined;
@@ -98,7 +142,7 @@ async function scanDirectory(projectId: string, snapshotId: string, dir: string,
    }),
   ]).finally(() => clearTimeout(timeout));
   const rulesMs = performance.now() - rulesStarted;
-  const issues=[];for(const violation of results.violations)for(const node of violation.nodes){const selector=typeof node.target[0]==='string'?node.target[0]:'';let bounds=null;try {const box=selector?await page.locator(selector).first().boundingBox({timeout:1500}):null;if(box)bounds=box;}catch{} issues.push({id:hash(violation.id+'|'+selector).slice(0,20),ruleId:violation.id,selector,impact:violation.impact||'unknown',help:violation.help,description:violation.description,helpUrl:violation.helpUrl,html:node.html,wcag:violation.tags.filter((t:string)=>/^wcag\d/.test(t)),bounds});}
+  const issues=[];for(const violation of results.violations)for(const node of violation.nodes){const selector=typeof node.target[0]==='string'?node.target[0]:'';let bounds=null;try {const box=selector?await page.locator(selector).first().boundingBox({timeout:1500}):null;if(box)bounds=box;}catch{} issues.push({id:hash(violation.id+'|'+selector).slice(0,20),ruleId:violation.id,selector,impact:violation.impact||'unknown',help:violation.help,description:violation.description,helpUrl:violation.helpUrl,html:node.html,wcag:violation.tags.filter((t:string)=>/^wcag\d/.test(t)),bounds,source:await location(selector)});}
   const functionChecks=await page.evaluate(()=>{const controls=Array.from(document.querySelectorAll<HTMLElement>('a[href],button,input,select,textarea,[tabindex]'));if(controls.length>2000)throw new Error('交互控件超过检测上限。');return controls.map((el,index)=>{
     const style=getComputedStyle(el),visible=style.display!=='none'&&style.visibility!=='hidden'&&el.getClientRects().length>0,disabled=el.hasAttribute('disabled');let focusable=false;
     if(visible&&!disabled&&el.tabIndex>=0){el.focus({preventScroll:true});focusable=document.activeElement===el;el.blur();}
@@ -113,6 +157,7 @@ async function scanDirectory(projectId: string, snapshotId: string, dir: string,
   try {
    const inspect = async () => {
     await page.reload({ waitUntil: 'load', timeout: 5000 });
+    if(product)await page.locator(`[${originAttribute}]`).first().waitFor({state:'attached',timeout:5000});
     return scanBehavior(page, signal);
    };
    behavior = await Promise.race([
@@ -131,7 +176,11 @@ async function scanDirectory(projectId: string, snapshotId: string, dir: string,
   const { engine, violations, incomplete, bestPractices, passes } = results;
   const timing = { rulesMs, behaviorMs: performance.now() - behaviorStarted };
   const detection: DetectionEvidence = { schemaVersion: 2, engine, timing, violations, incomplete, bestPractices, behavior };
-  const result={id:auditId,projectId,snapshotId,status:'completed',issues,incomplete:incomplete.map(x=>({ruleId:x.id,help:x.help,count:x.nodes.length})),passes,functionChecks,contrastCheck,regression,screenshot:`/api/audits/${auditId}/screenshot`,size,createdAt:created,detection};
+  const sourceLocations:Record<string,SourceLocation>={};
+  if(product)for(const finding of behavior.findings.filter(item=>item.ruleId==='focus-style-unchanged')){
+    const source=await location(finding.selector);if(source)sourceLocations[finding.selector]=source;
+  }
+  const result={...(product?{build:{tool:'esbuild',milliseconds:product.milliseconds},sourceLocations}:{}),id:auditId,projectId,snapshotId,status:'completed',issues,incomplete:incomplete.map(x=>({ruleId:x.id,help:x.help,count:x.nodes.length})),passes,functionChecks,contrastCheck,regression,screenshot:`/api/audits/${auditId}/screenshot`,size,createdAt:created,detection};
   if(persist) db.prepare('UPDATE audits SET status=?,result=? WHERE id=?').run('completed',JSON.stringify(result),auditId);return result;
   }, 6000);
  } catch(error){const message=(error as Error).message;if(persist) db.prepare('UPDATE audits SET status=?,error=? WHERE id=?').run('failed',message,auditId);throw error;}

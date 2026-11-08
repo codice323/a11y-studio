@@ -62,7 +62,7 @@ export function projectState(projectId: string) {
   }
 
   return {
-    project: { id: p.id, name: p.name, entry: p.entry, currentSnapshot: p.current_snapshot, createdAt: p.created_at },
+    project: { id: p.id, name: p.name, entry: p.entry, mode: p.mode, currentSnapshot: p.current_snapshot, createdAt: p.created_at },
     snapshots: snapshots.map(item => {
       const repair = passedByTarget.get(item.id);
       const rule = repair?.patch?.ruleId ?? repair?.resolved[0]?.ruleId;

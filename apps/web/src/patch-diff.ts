@@ -5,7 +5,7 @@ type Part = { value: string; added?: boolean; removed?: boolean };
 export type Change = { kind: 'added' | 'removed' | 'modified'; old: string; next: string; before: string; after: string; line: number; label: string };
 
 function tokens(source: string, file: string) {
-  if (/\.html?$/i.test(file)) {
+  if (/\.(?:html?|[jt]sx)$/i.test(file)) {
     // Keep quoted attribute values intact, even when a tag contains ">".
     return (source.match(/<!--[\s\S]*?-->|<(?:[^<>"']|"[^"]*"|'[^']*')*>|[^<]+|</g) ?? []).flatMap(value =>
       value.startsWith('<') && !value.startsWith('<!--')
@@ -52,7 +52,7 @@ export function patchDiff(file: PatchFile) {
       : /\.css$/i.test(file.file) ? property ? `修改 CSS 声明 ${property}` : next.includes('{') ? '新增 CSS 规则' : '修改 CSS 声明'
       : node ? `${!old.trim() ? '新增' : !next.trim() ? '删除' : '修改'} <${node}> 节点` : '修改源码文字';
     // Trim a compact display window only. Full-file mode retains every byte.
-    const format = (fragment: string) => /\.html?$/i.test(file.file) ? fragment.replace(/>(?=<)/g, '>\n') : fragment;
+    const format = (fragment: string) => /\.(?:html?|[jt]sx)$/i.test(file.file) ? fragment.replace(/>(?=<)/g, '>\n') : fragment;
     let before = format(leading).split('\n').slice(-3).join('\n').slice(-180);
     let after = format(trailing).split('\n').slice(0, 3).join('\n').slice(0, 180);
     const quoted = /^(\s*[\w:-]+\s*=\s*["'])([\s\S]*)(["'])$/;

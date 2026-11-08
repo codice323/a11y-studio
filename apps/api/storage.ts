@@ -16,6 +16,9 @@ CREATE TABLE IF NOT EXISTS verifications(id TEXT PRIMARY KEY,project_id TEXT,pro
 if (!db.prepare("PRAGMA table_info(snapshots)").all().some(column => (column as { name: string }).name === 'name')) {
   db.exec('ALTER TABLE snapshots ADD COLUMN name TEXT');
 }
+if (!db.prepare("PRAGMA table_info(projects)").all().some(column => (column as { name: string }).name === 'mode')) {
+  db.exec("ALTER TABLE projects ADD COLUMN mode TEXT NOT NULL DEFAULT 'snapshot'");
+}
 export const id = () => crypto.randomUUID();
 export const now = () => new Date().toISOString();
 export const hash = (data:Buffer|string) => crypto.createHash('sha256').update(data).digest('hex');

@@ -7,6 +7,7 @@ import type { SourceReview } from '../../../packages/shared/source-repair';
 export type Bounds = { x: number; y: number; width: number; height: number };
 
 export type Issue = {
+  source?: {file:string;line:number;tag:string};
   id: string;
   ruleId: string;
   selector: string;
@@ -25,6 +26,7 @@ export type Scan = {
   issues: Issue[];
   incomplete: { ruleId: string; help: string; count: number }[];
   detection?: DetectionEvidence;
+  sourceLocations?: Record<string, NonNullable<Issue['source']>>;
   screenshot: string;
   size: { width: number; height: number };
 };
@@ -66,7 +68,7 @@ export type Verification = {
 };
 
 export type State = {
-  project: { id: string; name: string; entry: string; currentSnapshot: string };
+  project: { id: string; name: string; entry: string; mode?: 'snapshot' | 'static-source' | 'react-source'; currentSnapshot: string };
   snapshots: Snapshot[];
   originalSnapshotId: string | null;
   baseline: Scan | null;
