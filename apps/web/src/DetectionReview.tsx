@@ -1,4 +1,6 @@
 import { useState } from 'react';
+import { reviewRepairIssue } from '../../../packages/shared/source-repair';
+import type { Issue } from './types';
 import type { AiAuditFinding, DetectionEvidence } from '../../../packages/shared/types';
 
 const behaviorStatus = {
@@ -9,8 +11,9 @@ const behaviorStatus = {
 
 const aiDecision = { accepted: '人工认可', rejected: '人工排除', 'needs-review': '待复核' };
 
-export function DetectionReview({ detection, report = false, aiConfigured = false, busy = false, onReview, onDecision }: {
+export function DetectionReview({ detection, report = false, aiConfigured = false, busy = false, onReview, onDecision, onRepair }: {
   detection?: DetectionEvidence; report?: boolean; aiConfigured?: boolean; busy?: boolean;
+  onRepair?: (issue: Issue) => void;
   onReview?: () => void; onDecision?: (id: string, decision: AiAuditFinding['decision']) => void;
 }) {
   const [consent, setConsent] = useState(false);
@@ -23,10 +26,12 @@ export function DetectionReview({ detection, report = false, aiConfigured = fals
     <p>此处证据供人工判断，与待处理的确定违规分开统计。</p>
     <p><strong>浏览器行为 · {behaviorStatus[behavior.status]}</strong> · 待复核 {reviewCount} · 浏览器观测 {observationCount}</p>
     {behavior.findings.length > 0 && <ul>
-      {behavior.findings.map(item => <li key={JSON.stringify([item.ruleId, item.selector, item.evidence])}>
+      {behavior.findings.map(item => { const issue = reviewRepairIssue(item); return <li key={JSON.stringify([item.ruleId, item.selector, item.evidence])}>
         <strong>{item.status === 'needs-review' ? '待复核' : '浏览器观测'}</strong> · {item.explanation}
         <br /><code>{item.selector}</code>
-      </li>)}
+        {onRepair && issue && <button type="button" className="record-link" disabled={busy}
+          onClick={() => onRepair(issue)}>查看{item.ruleId === 'focus-style-unchanged' ? '焦点' : 'ARIA 引用'}修复 · {item.selector}</button>}
+      </li>; })}
     </ul>}
     {behavior.tabSequence.length > 0 && <details>
       <summary>实际 Tab 顺序（{behavior.tabSequence.length} 个停靠点）</summary>

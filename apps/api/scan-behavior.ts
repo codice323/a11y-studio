@@ -162,8 +162,20 @@ export async function scanBehavior(page: Page, signal?: AbortSignal): Promise<Be
         context: context?.innerText?.replace(/\s+/g, ' ').trim().slice(0, 260) ?? '',
       };
     });
+    const brokenRefs: BehaviorFinding[] = [];
+    for (const element of sampled) {
+      const attributes = ['aria-labelledby', 'aria-describedby'].filter(attribute => {
+        const refs = element.getAttribute(attribute)?.trim().split(/\s+/).filter(Boolean) ?? [];
+        return refs.some(ref => !document.getElementById(ref));
+      });
+      if (attributes.length) brokenRefs.push({
+        ruleId: 'aria-broken-idref', selector: probe.selectorFor(element), status: 'needs-review',
+        explanation: '浏览器快照中找不到关联的名称或说明元素，请核对引用用途。',
+        evidence: { attributes: attributes.join(', '), basis: 'missing-idref' },
+      });
+    }
     return {
-      controls, truncated,
+      controls, truncated, brokenRefs,
       readFocus() {
         const element = document.activeElement;
         if (!element || element === document.body || element === document.documentElement) return null;
@@ -172,11 +184,11 @@ export async function scanBehavior(page: Page, signal?: AbortSignal): Promise<Be
     };
   }, MAX_CONTROLS);
   try {
-    const { controls, truncated } = await handles.evaluate(value => ({ controls: value.controls, truncated: value.truncated }));
+    const { controls, truncated, brokenRefs } = await handles.evaluate(value => ({ controls: value.controls, truncated: value.truncated, brokenRefs: value.brokenRefs }));
     const bySelector = new Map(controls.map(control => [control.selector, control]));
     const tabSequence: string[] = [];
     const seen = new Set<string>();
-    const findings: BehaviorFinding[] = [];
+    const findings: BehaviorFinding[] = [...brokenRefs];
     let complete = false;
     let rootVisits = (await handles.evaluate(value => value.readFocus())) ? 0 : 1;
     for (let step = 0; step < MAX_TAB_STEPS && withinBudget(); step++) {

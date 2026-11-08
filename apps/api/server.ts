@@ -1,5 +1,5 @@
 import express from 'express';import multer from 'multer';import fs from 'node:fs';import path from 'node:path';import {zipSync,strToU8} from 'fflate';import 'dotenv/config';
-import {db,id,now,ROOT,DATA,project,proposal,audit,snapshotDir,walk,safePath} from './storage';import {createProject} from './import';import {captureUrlSnapshot} from './url-snapshot';import {runAudit,inspectAuditElement} from './scan';import {createProposal,previewIssueImage,applyProposal,rejectProposal,rollback,getKnowledge} from './repair';
+import {db,id,now,ROOT,DATA,project,proposal,audit,snapshotDir,walk,safePath} from './storage';import {createProject} from './import';import {captureUrlSnapshot} from './url-snapshot';import {runAudit,inspectAuditElement} from './scan';import {createProposal,createSourceProposal,previewProposal,previewIssueImage,applyProposal,rejectProposal,rollback,getKnowledge} from './repair';
 import { projectState as state, renameSnapshot } from './version-state';
 import { imageVisionConfigured } from './ai/vision';
 import { decideAiFinding, requestAiAudit } from './audit-ai';
@@ -10,7 +10,7 @@ const app=express();app.disable('x-powered-by');app.use((req,res,next)=>{const o
 });app.use(express.json({limit:'64kb'}));const upload=multer({storage:multer.memoryStorage(),limits:{fileSize:8*1024*1024,files:1}});const port=Number(process.env.PORT||4173);
 db.exec("CREATE TABLE IF NOT EXISTS jobs(id TEXT PRIMARY KEY,type TEXT,status TEXT,result TEXT,error TEXT,created_at TEXT); UPDATE jobs SET status='failed',error='服务重启，任务已中断。' WHERE status IN ('queued','running'); UPDATE audits SET status='failed',error='服务重启，扫描已中断。' WHERE status='running';");
 const controllers=new Map<string,AbortController>();
-function job(type:string,run:(signal:AbortSignal)=>Promise<any>){const jid=id(),controller=new AbortController();controllers.set(jid,controller);db.prepare('INSERT INTO jobs VALUES(?,?,?,?,?,?)').run(jid,type,'queued',null,null,now());setImmediate(async()=>{if(controller.signal.aborted){controllers.delete(jid);return;}db.prepare('UPDATE jobs SET status=? WHERE id=?').run('running',jid);try{const result=await run(controller.signal);db.prepare('UPDATE jobs SET status=?,result=? WHERE id=?').run(controller.signal.aborted?'cancelled':'completed',JSON.stringify(result),jid)}catch(error){db.prepare('UPDATE jobs SET status=?,error=? WHERE id=?').run(controller.signal.aborted?'cancelled':'failed',(error as Error).message,jid)}finally{controllers.delete(jid)}});return {id:jid,status:'queued'};}
+function job(type:string,run:(signal:AbortSignal)=>Promise<any>){const jid=id(),controller=new AbortController();controllers.set(jid,controller);db.prepare('INSERT INTO jobs VALUES(?,?,?,?,?,?)').run(jid,type,'queued',null,null,now());setImmediate(async()=>{if(controller.signal.aborted){controllers.delete(jid);return;}db.prepare('UPDATE jobs SET status=? WHERE id=?').run('running',jid);try{const result=await run(controller.signal);db.prepare('UPDATE jobs SET status=?,result=? WHERE id=?').run(controller.signal.aborted?'cancelled':'completed',JSON.stringify(result),jid)}catch(error){db.prepare('UPDATE jobs SET status=?,error=? WHERE id=?').run(controller.signal.aborted?'cancelled':'failed',(error as Error).message,jid)}finally{controllers.delete(jid)}});return {id:jid,kind:'job',type,status:'queued'};}
 app.get('/api/status',(_req,res)=>res.json({configured:!!process.env.AI_API_KEY,visionConfigured:imageVisionConfigured()}));
 app.get('/api/fixtures',(_req,res)=>res.json([{id:'demo-mixed',name:'慢绿生活',description:'图片、按钮、表单与对比度综合示例'},{id:'demo-form',name:'课程报名',description:'表单可访问名称示例'},{id:'demo-contrast',name:'自然笔记',description:'文字对比度示例'}]));
 app.get('/api/projects',(_req,res)=>res.json(db.prepare('SELECT id,name,entry,current_snapshot AS currentSnapshot,created_at AS createdAt FROM projects ORDER BY rowid DESC').all()));
@@ -35,7 +35,8 @@ app.post('/api/projects/import-url', async (req,res,next) => {
 });
 app.get('/api/projects/:id',(req,res,next)=>{try{res.json(state(req.params.id));}catch(e){next(e)}});
 app.post('/api/projects/:id/audits',(req,res,next)=>{try{const p=project(req.params.id);res.status(202).json(job('audit',signal=>runAudit(p.id,p.current_snapshot,signal)));}catch(e){next(e)}});
-app.get('/api/jobs/:id',(req,res)=>{const row:any=db.prepare('SELECT * FROM jobs WHERE id=?').get(req.params.id);if(!row)return res.status(404).json({error:'任务不存在。'});res.json({id:row.id,type:row.type,status:row.status,result:row.result?JSON.parse(row.result):null,error:row.error})});
+app.get('/api/jobs/:id',(req,res)=>{res.set('Cache-Control','no-store');const row:any=db.prepare('SELECT * FROM jobs WHERE id=?').get(req.params.id);if(!row)return res.status(404).json({code:'JOB_NOT_FOUND',error:'任务不存在。'});res.json({id:row.id,type:row.type,status:row.status,result:row.result?JSON.parse(row.result):null,error:row.error,
+ ...(row.status==='failed'&&row.error==='服务重启，任务已中断。'?{code:'JOB_INTERRUPTED'}:{})})});
 app.post('/api/jobs/:id/cancel',(req,res)=>{const controller=controllers.get(req.params.id);if(!controller)return res.status(409).json({error:'任务已结束，无法取消。'});controller.abort();db.prepare("UPDATE jobs SET status='cancelled',error='任务已取消。' WHERE id=? AND status='queued'").run(req.params.id);res.json({status:'cancelling'});});
 app.get('/api/audits/:id/screenshot',(req,res,next)=>{try{audit(req.params.id);const f=path.join(DATA,'screenshots',req.params.id+'.png');res.sendFile(f);}catch(e){next(e)}});
 app.get('/api/projects/:id/audits/:auditId/semantics', async (req,res,next) => {
@@ -55,7 +56,10 @@ app.patch('/api/projects/:id/audits/:auditId/ai-review/:findingId', (req,res,nex
  try { res.json(decideAiFinding(req.params.id, req.params.auditId, req.params.findingId, req.body?.decision)); }
  catch (error) { next(error); }
 });
-app.post('/api/projects/:id/issues/:issueId/proposals',async(req,res,next)=>{try{const result=await createProposal(req.params.id,req.params.issueId,req.body);res.status('patch' in result?201:200).json(result);}catch(e){next(e)}});
+app.post('/api/projects/:id/issues/:issueId/proposals',async(req,res,next)=>{try{if(req.body?.sourceRepair===true&&['agent','manual'].includes(req.body.source)){
+  const {id,issueId}=req.params;
+  return res.status(202).json(job('source-repair',signal=>createSourceProposal(id,issueId,req.body.snapshotId,req.body.intent,signal,req.body.source==='manual')));
+ }const result=await createProposal(req.params.id,req.params.issueId,req.body);res.status('patch' in result?201:200).json(result);}catch(e){next(e)}});
 app.get('/api/projects/:id/issues/:issueId/image-preview',async(req,res,next)=>{
  try {
   const evidence=await previewIssueImage(req.params.id,req.params.issueId,String(req.query.snapshot??''));
@@ -65,7 +69,13 @@ app.get('/api/projects/:id/issues/:issueId/image-preview',async(req,res,next)=>{
   res.set('Cache-Control','no-store').set('X-Content-Type-Options','nosniff').type(mime).send(Buffer.from(body,'base64'));
  }catch(e){next(e);}
 });
-app.post('/api/proposals/:id/apply',(req,res,next)=>{try{proposal(req.params.id);res.status(202).json(job('verification',signal=>applyProposal(req.params.id,signal,req.body?.semanticReviewed===true)));}catch(e){next(e)}});
+app.get('/api/proposals/:id/preview',async(req,res,next)=>{
+ const controller=new AbortController();
+ res.on('close',()=>{if(!res.writableEnded)controller.abort();});
+ try{res.set('Cache-Control','no-store').json(await previewProposal(req.params.id,controller.signal));}
+ catch(error){if(!controller.signal.aborted)next(error);}
+});
+app.post('/api/proposals/:id/apply',(req,res,next)=>{try{proposal(req.params.id);res.status(202).json(job('verification',signal=>applyProposal(req.params.id,signal,req.body?.semanticReviewed===true,req.body?.sourceReviewed===true)));}catch(e){next(e)}});
 app.post('/api/proposals/:id/reject',(req,res,next)=>{try{res.json(rejectProposal(req.params.id));}catch(e){next(e)}});
 app.patch('/api/projects/:id/snapshots/:snapshotId',(req,res,next)=>{
  try{res.json(renameSnapshot(req.params.id,req.params.snapshotId,req.body?.name));}catch(e){next(e);}

@@ -1,6 +1,6 @@
 # API
 
-所有接口均为本机 HTTP，响应 JSON；失败为 `{ "error": "原因" }`。扫描与验证返回 `{id,status:"queued"}`，使用 `GET /api/jobs/:id` 查询状态，`POST /api/jobs/:id/cancel` 可取消正在运行的任务。
+所有接口均为本机 HTTP，响应 JSON；失败为 `{ "error": "原因" }`。扫描、异步源码 Agent 和验证以 HTTP 202 返回 `{id,kind:"job",type,status:"queued"}`。使用其中的任务 ID 调用 `GET /api/jobs/:id`，禁止用补丁、审计或验证记录 ID 代替。任务不存在时返回 HTTP 404 和 `JOB_NOT_FOUND`。服务重启后，原有未完成任务保留记录并标记为 `JOB_INTERRUPTED`。可通过 `POST /api/jobs/:id/cancel` 取消活动任务。
 
 | 方法与地址 | 作用 |
 | --- | --- |
@@ -62,3 +62,7 @@ V2 扫描在原有结果上增加 `detection` 字段，旧扫描可没有此字�
 - 工作台与结果报告显示 V2 行为证据、最佳实践及已保存的 AI 复核结果。AI 复核的请求和决定通过 API 提交。导出 ZIP 内的 JSON 保留完整证据。图片 Alt 检查只看文本和邻近文字，无法辨认图片内容。
 
 项目详情和报告包含有效快照的 `name` 和 `parent_id`。旧快照自动按原始版本或补丁规则显示默认名称。`resolved` 是当前快照继承的、已通过验证且未在当前检测中再次出现的问题，每项关联 `verificationId`。`summary.resolved` 是该列表的数量。`verifications` 仍包含全部分支的成功和失败记录。
+
+表单标签源码修复会优先使用浏览器中的明确类型、自动填充语义或紧邻的可见字段文案。结果用 `analysis.labelDecision` 区分 `confirm`（建议人工确认）与 `needs-input`（需要补充字段用途）。编辑后可用 `source:"manual",sourceRepair:true,snapshotId,intent` 创建新的原生标签预览，预览不需要调用模型。原生标签仍须通过隔离复测并经用户确认才能应用。
+
+待应用补丁可用 `GET /api/proposals/:id/preview` 读取隔离候选的浏览器语义、截图与可测对比度。接口重建补丁副本，不写入当前快照。链接名称优先引用实际同页标题或明确的 `title`；缺少证据时返回 `linkDecision:"needs-input"`，填写用途后可继续生成受控源码补丁。

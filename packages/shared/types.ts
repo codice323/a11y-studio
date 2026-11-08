@@ -55,11 +55,15 @@ export type VisualMedia = { source: string; format: string; bytes: number };
 export type RepairAnalysis = {
   status: 'repair-review';
   suggestedValue: string | null;
+  labelDecision?: 'confirm' | 'needs-input';
+  linkDecision?: 'confirm' | 'needs-input';
   reason: string;
   description?: string;
   detail?: string;
   media?: VisualMedia;
   sources?: RepairSource[];
+  agentTrace?: { tool: string; summary: string }[];
+  agentRun?: Pick<import('./source-repair').SourceReview, 'attempts' | 'elapsedMs' | 'usage'>;
 };
 export type ImageAltAnalysis = {
   status: 'image-analysis' | 'needs-manual-review';

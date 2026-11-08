@@ -7,6 +7,7 @@ const passages = JSON.parse(fs.readFileSync(path.join(ROOT, 'knowledge/wcag/pass
 const hints: Record<string, string> = {
   'image-alt': '图片 图像 image alt 替代文本', label: '表单 控件 label 名称 输入',
   'button-name': '按钮 button 名称 可见 标签', 'link-name': '链接 link 目的 名称',
+  'aria-broken-idref': 'aria 名称 角色 值 关联', 'aria-valid-attr-value': 'aria 名称 角色 值 关联',
   'color-contrast': '颜色 对比度 contrast 文字 背景',
 };
 

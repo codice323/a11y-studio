@@ -1,5 +1,9 @@
 import type { DetectionEvidence, RepairAnalysis, ImagePurpose, ImageSemanticReview } from '../../../packages/shared/types';
 
+import type { PatchFile } from './patch-diff';
+import type { ContrastEvidence } from './semantics';
+import type { SourceReview } from '../../../packages/shared/source-repair';
+
 export type Bounds = { x: number; y: number; width: number; height: number };
 
 export type Issue = {
@@ -42,10 +46,16 @@ export type Verification = {
   baselineAudit?: string;
   audit?: string | null;
   targetFixed?: boolean;
+  reviewedTarget?: Issue;
+  sourceTarget?: string;
+  sourceReview?: SourceReview;
+  reviewFiles?: PatchFile[];
+  sourceChecks?: SourceReview['checks'] | null;
   imageReview?: ImageSemanticReview;
   structurePassed?: boolean;
   functionPassed?: boolean;
-  contrastCheck?: { ratio: number; required: number; valid: boolean; uncertain: boolean } | null;
+  contrastBefore?: ContrastEvidence | null;
+  contrastCheck?: ContrastEvidence | null;
   diff?: string;
   patch?: { issueId: string; selector: string; targetFile: string };
   proposalReason?: string;
@@ -70,6 +80,7 @@ export type Proposal = {
   source: string;
   analysis?: RepairAnalysis;
   imagePurpose?: ImagePurpose;
+  sourceReview?: SourceReview;
   reason: string;
   guidance: string;
   wcag: string[];

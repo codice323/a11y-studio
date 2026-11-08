@@ -1,3 +1,4 @@
+import { JobRecoveryError, startJob, waitJob, type JobType } from './jobs';
 import type { ImageAltAnalysis, ImagePurpose, RepairAnalysis } from '../../../packages/shared/types';
 import { useEffect, useRef, useState, type FormEvent, type KeyboardEvent, type ReactNode } from 'react';
 import { createRoot } from 'react-dom/client';
@@ -6,6 +7,7 @@ import {
   FileArchive, FileCode2, FileUp, History, Info, Layers, Link2, LoaderCircle, LockKeyhole,
   RefreshCw, RotateCcw, ScanSearch, ShieldCheck, Sparkles, X,
 } from 'lucide-react';
+import { reviewRepairIssue, sourceRepairKinds } from '../../../packages/shared/source-repair';
 import { DetectionReview } from './DetectionReview';
 import type { AiAuditFinding } from '../../../packages/shared/types';
 import { Evidence, type EvidenceView } from './Evidence';
@@ -17,6 +19,9 @@ const issueNames: Record<string, [string, string]> = {
   label: ['表单控件缺少标签', '用户可能无法判断输入框的用途。'],
   'button-name': ['按钮缺少名称', '屏幕阅读器无法读出按钮的用途。'],
   'link-name': ['链接缺少名称', '用户无法了解链接的目标。'],
+  'focus-style-unchanged': ['焦点样式待复核', '键盘焦点可能缺少清晰的视觉提示。'],
+  'aria-broken-idref': ['ARIA 引用待复核', '名称或说明引用指向不存在的元素。'],
+  'aria-valid-attr-value': ['ARIA 属性值无效', '辅助技术可能无法找到关联的名称或说明。'],
   'color-contrast': ['文字对比度不足', '低视力用户可能难以看清文字。'],
 };
 const impactName: Record<string, string> = {
@@ -54,17 +59,6 @@ function post<T>(url: string, data: unknown = {}) {
   return request<T>(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data) });
 }
 
-async function waitJob<T>(id: string): Promise<T> {
-  for (let i = 0; i < 120; i++) {
-    const job = await request<{ status: string; result: T; error?: string }>('/api/jobs/' + id);
-    if (job.status === 'completed') return job.result;
-    if (job.status === 'failed') throw new Error(job.error ?? '任务失败。');
-    if (job.status === 'cancelled') throw new Error('任务已取消。');
-    await new Promise(resolve => setTimeout(resolve, 500));
-  }
-  throw new Error('任务仍在运行，请稍后重新打开项目查看结果。');
-}
-
 function App() {
   const [state, setState] = useState<State | null>(null);
   const [projects, setProjects] = useState<Project[]>([]);
@@ -75,6 +69,7 @@ function App() {
   const [jobId, setJobId] = useState('');
   const [cancelRequested, setCancelRequested] = useState(false);
   const [error, setError] = useState('');
+  const [recovery, setRecovery] = useState<{ label: string; run: () => void }>();
   const [notice, setNotice] = useState('');
   const [filter, setFilter] = useState('all');
   const [view, setView] = useState<EvidenceView>('visual');
@@ -88,12 +83,16 @@ function App() {
   const [confirmApply, setConfirmApply] = useState(false);
   const [knowledge, setKnowledge] = useState<Knowledge | null>(null);
   const running = useRef(false);
+  const activePoll = useRef<AbortController>(null);
   const heading = useRef<HTMLHeadingElement>(null);
   const feedback = useRef<HTMLDivElement>(null);
   const evidenceFocus = useRef<HTMLDivElement>(null);
   const assistantPanel = useRef<HTMLDivElement>(null);
   const tabButtons = useRef<Partial<Record<ControlTab, HTMLButtonElement | null>>>({});
-  const issue = state?.current?.issues.find(item => selection && 'issueId' in selection && item.id === selection.issueId);
+  const selectedId = selection && 'issueId' in selection ? selection.issueId : undefined;
+  const reviewIssue = selectedId && state?.current?.detection?.behavior.findings
+    .map(reviewRepairIssue).find(item => item?.id === selectedId);
+  const issue = reviewIssue || state?.current?.issues.find(item => item.id === selectedId);
   const history = selection && 'history' in selection ? selection.history : undefined;
   const draftKey = issue && state ? `${state.project.currentSnapshot}:${issue.id}` : '';
   const draft = drafts[draftKey];
@@ -120,6 +119,11 @@ function App() {
 
   useEffect(() => { void loadHome(); }, []);
   useEffect(() => {
+    const stopPolling = () => activePoll.current?.abort();
+    window.addEventListener('pagehide', stopPolling);
+    return () => { window.removeEventListener('pagehide', stopPolling); stopPolling(); };
+  }, []);
+  useEffect(() => {
     setKnowledge(null);
     if (!selectedRule) return;
     const controller = new AbortController();
@@ -129,13 +133,19 @@ function App() {
     return () => controller.abort();
   }, [selectedRule]);
 
-  function run(label: string, action: () => Promise<void>) {
+  function run(label: string, action: () => Promise<void>, retry?: { label: string; run: () => void }) {
     if (running.current) return;
     running.current = true;
     setBusy(label);
     setError('');
+    setRecovery(undefined);
     setNotice('');
     void action().catch(problem => {
+      if (problem instanceof DOMException && problem.name === 'AbortError') return;
+      if (problem instanceof JobRecoveryError) {
+        const pid = state?.project.id;
+        setRecovery(retry ?? { label: '重新同步项目', run: () => pid ? openProject(pid) : void loadHome() });
+      }
       setError(problem instanceof Error ? problem.message : '操作失败，请重试。');
       requestAnimationFrame(() => feedback.current?.focus());
     }).finally(() => {
@@ -146,17 +156,26 @@ function App() {
     });
   }
 
-  async function runJob<T>(url: string, data: unknown = {}) {
-    const job = await post<{ id: string }>(url, data);
-    setJobId(job.id);
-    try { return await waitJob<T>(job.id); }
-    finally { setJobId(''); setCancelRequested(false); }
+  async function runJob<T>(type: JobType, url: string, data: unknown = {}) {
+    const controller = new AbortController();
+    activePoll.current = controller;
+    try {
+      const id = await startJob(url, type, data, controller.signal);
+      setJobId(id);
+      return await waitJob<T>(id, type, controller.signal);
+    } finally {
+      activePoll.current = null;
+      setJobId('');
+      setCancelRequested(false);
+    }
   }
 
   async function cancelJob() {
+    const poll = activePoll.current;
     setCancelRequested(true);
-    try { await post('/api/jobs/' + jobId + '/cancel'); }
+    try { await post('/api/jobs/' + encodeURIComponent(jobId) + '/cancel'); }
     catch (problem) {
+      if (activePoll.current !== poll) return;
       setCancelRequested(false);
       setError(problem instanceof Error ? problem.message : '取消请求失败。');
     }
@@ -174,6 +193,7 @@ function App() {
   }
 
   function resetSelection() {
+    setRecovery(undefined);
     setSelection(null);
     setControlTab('issues');
     setDrafts({});
@@ -191,7 +211,7 @@ function App() {
       const next = await refresh(pid);
       if (!next.current) {
         setBusy('正在扫描项目快照…');
-        await runJob('/api/projects/' + pid + '/audits');
+        await runJob('audit', '/api/projects/' + pid + '/audits');
         await refresh(pid);
       }
     });
@@ -207,7 +227,7 @@ function App() {
       await refresh(project.id);
       openPage('workspace');
       setBusy('正在运行真实无障碍检测…');
-      await runJob('/api/projects/' + project.id + '/audits');
+      await runJob('audit', '/api/projects/' + project.id + '/audits');
       await refresh(project.id);
       const assets = project.assets;
       setNotice(assets
@@ -221,7 +241,7 @@ function App() {
   function scanAgain() {
     if (!state) return;
     run('正在运行无障碍检测…', async () => {
-      await runJob(route + '/audits');
+      await runJob('audit', route + '/audits');
       await refresh(state.project.id);
       if (!history) resetSelection();
       setNotice('检测完成。');
@@ -251,7 +271,9 @@ function App() {
   }
 
   function chooseIssue(item: Issue) {
+    setRecovery(undefined);
     setSelection({ issueId: item.id });
+    if (selectedId !== item.id) setView('visual');
     openAssistant();
   }
 
@@ -314,39 +336,48 @@ function App() {
 
   function propose(source: 'agent' | 'manual') {
     if (!issue) return;
-    run(source === 'agent' ? 'AI 正在分析问题…' : '正在生成补丁预览…', async () => {
-      const next = await post<Proposal | ImageAltAnalysis | RepairAnalysis>(
-        route + '/issues/' + issue.id + '/proposals', { source, value: input, imagePurpose: draft?.purpose },
-      );
+    if (source === 'manual' && proposal?.sourceReview && patchReady) { showPatch(); return; }
+    const sourceRepair = source === 'manual' ? ['label','link-name'].includes(issue.ruleId) : Object.hasOwn(sourceRepairKinds, issue.ruleId);
+    run(sourceRepair ? `Agent 正在分析「${issueTitle(issue)}」并验证隔离副本…` :
+      source === 'agent' ? 'AI 正在分析问题…' : '正在生成补丁预览…', async () => {
+      const endpoint = route + '/issues/' + encodeURIComponent(issue.id) + '/proposals';
+      const data = { source, value: input, imagePurpose: draft?.purpose };
+      const next = sourceRepair
+        ? await runJob<Proposal | RepairAnalysis>('source-repair', endpoint, { ...data, sourceRepair: true, snapshotId: state?.project.currentSnapshot, intent: source === 'manual' || draft?.edited ? input : undefined })
+        : await post<Proposal | ImageAltAnalysis | RepairAnalysis>(endpoint, data);
       if (!('patch' in next)) {
         const suggested = 'contentAlt' in next ? next.contentAlt : next.suggestedValue;
-        updateDraft({ analysis: next, ...(!draft?.edited && !proposal && suggested != null ? { value: suggested } : {}) });
+        updateDraft({ analysis: next, ...(sourceRepair ? { proposal: null } : {}), ...(!draft?.edited && !proposal && suggested != null ? { value: suggested } : {}) });
         return;
       }
       updateDraft({
         proposal: next,
         ...(next.imagePurpose !== 'decorative' ? { value: next.patch.value } : {}),
-        ...(source === 'agent' ? { analysis: next.analysis, edited: false } : {}),
+        ...(source === 'agent' || sourceRepair ? { analysis: next.analysis, edited: false } : {}),
       });
       showPatch();
-      setNotice('补丁预览已生成，请在右侧审核源码差异并确认应用。');
-    });
+      setNotice(next.sourceReview ? 'Agent 已在隔离副本完成复测，请审核实际源码差异。' : '补丁预览已生成，请在右侧审核源码差异并确认应用。');
+    }, sourceRepair ? { label: source === 'agent' ? '重试 AI 分析' : '重试生成预览', run: () => propose(source) } : undefined);
   }
 
   function apply(semanticReviewed: boolean) {
     if (!proposal || !state || !patchReady || working) return;
     setConfirmApply(false);
     run(applyingLabel, async () => {
-      const result = await runJob<Verification>('/api/proposals/' + proposal.id + '/apply', {semanticReviewed});
+      const result = await runJob<Verification>('verification', '/api/proposals/' + proposal.id + '/apply', {semanticReviewed, ...(proposal.sourceReview ? {sourceReviewed: semanticReviewed} : {})});
       await refresh(state.project.id);
       updateDraft({proposal: null});
-      const target = result.resolved.find(item => item.id === result.patch?.issueId) ?? result.resolved[0];
+      const target = result.resolved.find(item => item.id === result.patch?.issueId) ?? result.reviewedTarget ?? result.resolved[0];
       if (result.status === 'passed' && target) {
         chooseHistory({ verification: result, issue: target }, 'semantics', true);
         setNotice(result.reason);
       } else {
         setView('visual');
         setError(result.reason);
+        setRecovery({label:'返回修复操作',run:() => {
+          setError(''); setRecovery(undefined); openAssistant(false);
+          requestAnimationFrame(() => (document.getElementById('repair-value') ?? assistantPanel.current)?.focus());
+        }});
         requestAnimationFrame(() => feedback.current?.focus());
       }
     });
@@ -435,7 +466,8 @@ function App() {
             <ExportButton route={route} disabled={working} />
           </div>}
         </div>
-        {error && <div className="alert error" role="alert" tabIndex={-1} ref={feedback}><Info size={17} /><span>{error}</span><button onClick={() => setError('')} aria-label="关闭错误提示"><X size={16} /></button></div>}
+        {error && <div className="alert error" role="alert" tabIndex={-1} ref={feedback}><Info size={17} /><span>{error}</span>{recovery && <button className="secondary" onClick={recovery.run} disabled={working}>{recovery.label}</button>}
+          <button onClick={() => { setError(''); setRecovery(undefined); }} aria-label="关闭错误提示"><X size={16} /></button></div>}
         {notice && <div className="alert success" role="status"><CheckCircle2 size={17} /><span>{notice}</span><button onClick={() => setNotice('')} aria-label="关闭操作提示"><X size={16} /></button></div>}
         {busy && <div className="busy"><span role="status"><LoaderCircle className="spin" size={16} />{busy}</span>{jobId && <button className="cancel-job" disabled={cancelRequested} onClick={() => void cancelJob()}>{cancelRequested ? '正在取消…' : '取消任务'}</button>}</div>}
 
@@ -507,7 +539,7 @@ function App() {
                         onClick={() => chooseHistory(item)} />,
                     ) : <Blank icon={<History />} title="当前版本暂无已解决问题">此处显示当前版本包含且通过复测的修复。</Blank>}
                   </div>
-                  <DetectionReview key={state.current?.id} detection={state.current?.detection} aiConfigured={ai.configured} busy={working} onReview={reviewWithAi} onDecision={decideAiFinding} />
+                  <DetectionReview key={state.current?.id} detection={state.current?.detection} aiConfigured={ai.configured} busy={working} onReview={reviewWithAi} onDecision={decideAiFinding} onRepair={chooseIssue} />
                   <div className="issue-foot"><Info size={15} /><span>问题状态仅对应当前版本。<button className="record-link" onClick={() => openPage('report')}>查看跨版本历史</button></span></div>
                 </div>
                 <div className="control-panel" role="tabpanel" id="control-panel-assistant"
@@ -519,7 +551,8 @@ function App() {
                 </div>
               </div>
               <div className="evidence-column" role="group" tabIndex={-1} ref={evidenceFocus} aria-label="修复效果对比">
-                <Evidence state={state} issue={issue} history={history} proposal={proposal} view={view} onView={setView}
+                <Evidence state={state} issue={issue} history={history} proposal={proposal} view={view} onView={setView} problem={(history?.issue ?? issue) ? issueTitle((history?.issue ?? issue)!) : '当前问题'}
+                  impact={issueNames[(history?.issue ?? issue)?.ruleId ?? '']?.[1] ?? (history?.issue ?? issue)?.description ?? '需核对目标元素。'}
                   busy={working} applying={busy === applyingLabel} archivedEvidence={archivedEvidence}
                   patchReady={patchReady} onConfirm={() => setConfirmApply(true)} onReject={reject} />
               </div>
@@ -529,7 +562,7 @@ function App() {
         <footer><span>A11y Studio · 网页无障碍工作区</span><span>基于 Chromium 和 axe-core</span></footer>
       </div>
     </main>
-    {confirmApply && proposal && patchReady && <ConfirmDialog imagePurpose={proposal?.imagePurpose} onClose={() => setConfirmApply(false)} onConfirm={apply} />}
+    {confirmApply && proposal && patchReady && <ConfirmDialog imagePurpose={proposal?.imagePurpose} sourceReview={Boolean(proposal.sourceReview)} onClose={() => setConfirmApply(false)} onConfirm={apply} />}
   </div>;
 }
 
@@ -646,15 +679,20 @@ function Assistant({ issue, history, knowledge, ai, visionReady, busy, proposal,
     : purpose === 'informative' && !input.trim()
       ? '请填写非空替代文本，再生成补丁预览。'
       : '');
+  const agentOnly = target?.ruleId === 'focus-style-unchanged' || target?.ruleId === 'aria-valid-attr-value' || target?.ruleId === 'aria-broken-idref';
+  const trace = proposal?.agentTrace ?? (analysis && 'agentTrace' in analysis ? analysis.agentTrace : undefined);
   const refs = verification?.wcag ?? proposal?.wcag ?? knowledge?.refs ?? target?.wcag ?? [];
   const imageAnalysis = analysis && 'purpose' in analysis ? analysis : undefined;
   const sources = analysis?.sources ?? proposal?.sources;
+  const labelDecision = analysis && 'labelDecision' in analysis ? analysis.labelDecision : undefined;
+  const linkDecision = analysis && 'linkDecision' in analysis ? analysis.linkDecision : undefined;
+  const nameDecision = labelDecision ?? linkDecision;
   const suggested = imageAnalysis?.contentAlt ?? (analysis && 'suggestedValue' in analysis ? analysis.suggestedValue : null);
   const problem = target && (issueNames[target.ruleId]?.[1] ?? target.description);
   return <>
     {!history && <div className="assistant-toolbar">
       <span className="ai-pill"><Sparkles size={13} />{isImageAlt ? (visionReady ? '视觉 AI 已配置' : '视觉 AI 未配置') : (ai ? 'AI 已配置' : 'AI 未配置')}</span>
-      {issue && issueNames[issue.ruleId] && !busy && <a href="#repair-value">前往修复操作</a>}
+      {issue && issueNames[issue.ruleId] && !agentOnly && !busy && <a href="#repair-value">前往修复操作</a>}
     </div>}
     {target ? <div className="assistant-body">
       <div className="issue-heading"><span className={'issue-dot' + (history ? ' fixed' : '')} aria-hidden="true">{history ? <Check size={16} /> : '!'}</span><div><h3>{issueTitle(target)}</h3><span>{target.ruleId} · {impactName[target.impact] ?? target.impact}</span></div></div>
@@ -663,8 +701,8 @@ function Assistant({ issue, history, knowledge, ai, visionReady, busy, proposal,
         <p><b>问题</b> · {problem}</p>
         <p><b>建议</b> · {imageAnalysis?.purpose === 'decorative'
           ? '若确认纯装饰，可用空 alt。' + (suggested ? ' 内容性候选：' + suggested : '')
-          : suggested ? (isImageAlt ? '替代文本候选：' : '建议值：') + suggested : '请人工确定合适的修复值。'}</p>
-        <p><b>{analysis.status === 'needs-manual-review' || !suggested ? '待人工确认' : '理由'}</b> · {analysis.reason}</p>
+          : suggested ? (linkDecision ? '链接名称：' : labelDecision ? '添加可见标签：' : isImageAlt ? '替代文本候选：' : '建议值：') + suggested : nameDecision === 'needs-input' ? (linkDecision ? '在下方填写链接实际用途，再生成补丁。' : '请填写字段用途。') : '请人工确定合适的修复值。'}</p>
+        <p><b>{nameDecision === 'confirm' ? '建议人工确认' : nameDecision === 'needs-input' ? '需要补充信息' : analysis.status === 'needs-manual-review' || !suggested ? '待人工确认' : '理由'}</b> · {analysis.reason}</p>
       </div>}
       <details className="detail-block">
         <summary>查看详细依据</summary>
@@ -678,7 +716,7 @@ function Assistant({ issue, history, knowledge, ai, visionReady, busy, proposal,
         <a href={verification?.wcagUrl || proposal?.wcagUrl || knowledge?.url || target.helpUrl} target="_blank" rel="noreferrer">{proposal?.wcagTitle || knowledge?.title || '查看规则与规范说明'} <ArrowUpRight size={12} /></a>
         {(proposal?.guidance || knowledge?.guidance) && <p>{proposal?.guidance || knowledge?.guidance}</p>}
         {sources?.length ? <div><h4>检索到的规范依据</h4><ul>{sources.map(source => <li key={source.id}><a href={source.url} target="_blank" rel="noreferrer">{source.title} · {source.refs.join('、')}</a><p>{source.text}</p></li>)}</ul></div> : null}
-        {proposal?.agentTrace && <div><h4>AI 工具调用</h4><ol>{proposal.agentTrace.map((step, index) => <li key={index}>{step.summary} <code>{step.tool}</code></li>)}</ol></div>}
+        {trace && <div><h4>AI 工具调用</h4><ol>{trace.map((step, index) => <li key={index}>{step.summary} <code>{step.tool}</code></li>)}</ol></div>}
         {proposal?.risk && <p>{proposal.risk}</p>}
         {proposal && <button type="button" className="secondary" onClick={onShowPatch}>查看完整代码差异</button>}
       </details>
@@ -695,6 +733,7 @@ function Assistant({ issue, history, knowledge, ai, visionReady, busy, proposal,
           <li>新增自动检测问题 {verification.added.length} 项</li>
           {verification.contrastCheck?.valid && <li>对比度 {verification.contrastCheck.ratio.toFixed(2)}:1，要求 {verification.contrastCheck.required}:1</li>}
         </ul>
+        {verification.sourceChecks && <ul>{verification.sourceChecks.map(check => <li key={check.name}>{check.name} · {check.detail}</li>)}</ul>}
         {verification.proposalReason && <p><b>历史修复方案</b> {verification.proposalReason}</p>}
         {verification.agentTrace && <div><h4>AI 工具调用记录</h4><ol>{verification.agentTrace.map((step, index) => <li key={index}>{step.summary} <code>{step.tool}</code></li>)}</ol></div>}
         {verification.sources && <div><h4>检索依据</h4><ul>{verification.sources.map(source => <li key={source.id}><a href={source.url} target="_blank" rel="noreferrer">{source.title} · {source.refs.join('、')}</a></li>)}</ul></div>}
@@ -711,15 +750,17 @@ function Assistant({ issue, history, knowledge, ai, visionReady, busy, proposal,
               onChange={() => onPurpose('decorative')} /> 装饰性图片</label>
           </fieldset>
         </>}
-        <label className="input-label" htmlFor="repair-value">{target.ruleId === 'color-contrast' ? '修复颜色' : '建议的文本内容'}</label>
-        <input id="repair-value" value={input} maxLength={160} disabled={busy} readOnly={isImageAlt && purpose === 'decorative'} onChange={event => onInput(event.target.value)}
-          placeholder={target.ruleId === 'image-alt' ? (purpose === 'decorative' ? '使用空 alt' : '填写图片在页面中传达的信息') : target.ruleId === 'color-contrast' ? '#1c2731' : '填写符合实际用途的名称'} />
+        {!agentOnly && <><label className="input-label" htmlFor="repair-value">{target.ruleId === 'color-contrast' ? '修复颜色' : '建议的文本内容'}</label>
+        <input id="repair-value" value={input} maxLength={['label','link-name'].includes(target.ruleId) ? 120 : 160} disabled={busy} readOnly={isImageAlt && purpose === 'decorative'} onChange={event => onInput(event.target.value)}
+          placeholder={target.ruleId === 'image-alt' ? (purpose === 'decorative' ? '使用空 alt' : '填写图片在页面中传达的信息') : target.ruleId === 'color-contrast' ? '#1c2731' : '填写符合实际用途的名称'} /></>}
         <p className="muted note">{isImageAlt
           ? (ai ? 'AI 按需读取目标图片和邻近文字。确认纯装饰时可留空。' : '当前模型未配置为支持图像输入，可手动填写。')
-          : (ai ? 'AI 按需使用局部代码和视觉证据。' : '可手动填写内容并生成补丁。配置模型服务后可使用 AI 建议。')}</p>
+          : target.ruleId === 'link-name' ? '例如：查看课程目录。填写链接真实用途后即可生成补丁。'
+          : target.ruleId === 'label' ? '可编辑标签文案，再生成原生标签补丁。'
+          : (ai ? (Object.hasOwn(sourceRepairKinds, target.ruleId) ? 'Agent 会检查局部源码并验证隔离副本。若需指定文案，填写后重新分析。' : 'AI 按需使用局部代码和视觉证据。') : '可手动填写内容并生成补丁。配置模型服务后可使用 AI 建议。')}</p>
         <p id="repair-preview-hint" className="note" role="status">{previewHint || (isImageAlt && purpose === 'decorative' ? '预览将添加空 alt（alt=""），请确认该图片只用于装饰。' : null)}</p>
         <div className="repair-actions">
-          <button className="button dark" disabled={busy || Boolean(previewHint)} aria-describedby={isImageAlt ? 'repair-preview-hint' : undefined} onClick={() => onPropose('manual')}><Code2 size={15} />生成补丁预览</button>
+          <button className="button dark" disabled={busy || Boolean(previewHint) || (['label','link-name'].includes(target.ruleId) && !input.trim()) || (agentOnly && !proposal?.sourceReview)} aria-describedby={isImageAlt ? 'repair-preview-hint' : undefined} onClick={() => onPropose('manual')}><Code2 size={15} />生成补丁预览</button>
           <button className="secondary" disabled={busy || !ai} onClick={() => onPropose('agent')}><Sparkles size={15} />AI 分析与修复</button>
         </div>
         {proposal && <div className="proposal">
@@ -759,7 +800,7 @@ function Report({ state, onRollback, onOpen, onWorkspace, busy }: {
           <div><b>{item.status === 'passed' ? '验证通过' : '验证失败 · 已保留原版本'} · {versionName(state, item.fromSnapshot)} → {versionName(state, item.toSnapshot)}</b>
             <p>{item.reason}</p>
             {item.imageReview && <p>图片语义审核：用户已确认 · {imagePurposeLabel[item.imageReview.purpose]}</p>}<small>{dateText(item.createdAt)} · 解决 {item.resolved.length} / 残留 {item.remaining.length} / 新增 {item.added.length}</small>
-            {item.status === 'passed' && item.resolved.map(resolved => <button className="record-link" key={resolved.id} disabled={busy} onClick={() => onOpen({ issue: resolved, verification: item })}>{issueTitle(resolved)} · 查看证据 <ArrowRight size={14} /></button>)}
+            {item.status === 'passed' && [...item.resolved, ...(item.reviewedTarget ? [item.reviewedTarget] : [])].map(resolved => <button className="record-link" key={resolved.id} disabled={busy} onClick={() => onOpen({ issue: resolved, verification: item })}>{issueTitle(resolved)} · 查看证据 <ArrowRight size={14} /></button>)}
             {item.diff && <details><summary>补丁与源码校验</summary>
               <p>{item.proposalReason}</p>
               {item.wcagUrl && <a href={item.wcagUrl} target="_blank" rel="noreferrer">{item.wcag?.join('、') || '规范依据'}</a>}
@@ -786,8 +827,8 @@ function Report({ state, onRollback, onOpen, onWorkspace, busy }: {
   </div>;
 }
 
-function ConfirmDialog({ imagePurpose, onClose, onConfirm }: {
-  imagePurpose?: ImagePurpose; onClose: () => void; onConfirm: (semanticReviewed: boolean) => void;
+function ConfirmDialog({ imagePurpose, sourceReview, onClose, onConfirm }: {
+  imagePurpose?: ImagePurpose; sourceReview: boolean; onClose: () => void; onConfirm: (semanticReviewed: boolean) => void;
 }) {
   const [semanticReviewed, setSemanticReviewed] = useState(false);
   const dialog = useRef<HTMLDialogElement>(null);
@@ -809,9 +850,11 @@ function ConfirmDialog({ imagePurpose, onClose, onConfirm }: {
     <p id="confirm-description">系统会修改当前版本的副本，并重新扫描、检查页面结构与控件聚焦。复测失败时继续使用上一个有效版本。</p>
     {imagePurpose && <p><label><input type="checkbox" checked={semanticReviewed}
       onChange={event => setSemanticReviewed(event.target.checked)} /> 我已确认图片用途和替代文本符合页面语境（{imagePurposeLabel[imagePurpose]}）</label></p>}
+    {sourceReview && <p><label><input type="checkbox" checked={semanticReviewed}
+      onChange={event => setSemanticReviewed(event.target.checked)} /> 我已审核源码差异并确认符合页面用途</label></p>}
     <div className="confirm-actions">
       <button ref={cancel} className="secondary" onClick={onClose}>取消</button>
-      <button className="button dark" disabled={Boolean(imagePurpose && !semanticReviewed)} onClick={() => onConfirm(semanticReviewed)}>确认应用并复测 <ArrowRight size={15} /></button>
+      <button className="button dark" disabled={Boolean((imagePurpose || sourceReview) && !semanticReviewed)} onClick={() => onConfirm(semanticReviewed)}>确认应用并复测 <ArrowRight size={15} /></button>
     </div>
   </dialog>;
 }
