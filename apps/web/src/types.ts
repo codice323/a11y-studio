@@ -25,7 +25,7 @@ export type Scan = {
   size: { width: number; height: number };
 };
 
-export type Snapshot = { id: string; parent_id: string | null; description: string; created_at: string };
+export type Snapshot = { id: string; parent_id: string | null; description: string; name: string; created_at: string };
 
 export type Verification = {
   id: string;
@@ -61,6 +61,7 @@ export type State = {
   baseline: Scan | null;
   current: Scan | null;
   summary: { initial: number | null; resolved: number; remaining: number; added: number };
+  resolved: { issue: Issue; verificationId: string }[];
   verifications: Verification[];
 };
 
@@ -87,4 +88,9 @@ export type HistoryItem = { issue: Issue; verification: Verification };
 export function versionLabel(state: State, id: string) {
   const index = state.snapshots.findIndex(snapshot => snapshot.id === id);
   return index < 0 ? '候选版本' : `V${index}`;
+}
+
+export function versionName(state: State, id: string) {
+  const name = state.snapshots.find(snapshot => snapshot.id === id)?.name;
+  return name ? `${versionLabel(state, id)} · ${name}` : versionLabel(state, id);
 }

@@ -33,7 +33,7 @@ export async function createProject(opts:{fixture?:string; file?:Express.Multer.
     else throw new Error('请选择示例或上传项目。');
     const files=walk(dest);const html=files.filter(x=>/\.html?$/i.test(x)).sort();if(!html.length)throw new Error('项目中未找到 HTML 文件。');
     const entry=html.find(x=>x==='index.html')||html.find(x=>x.endsWith('/index.html'))||html[0];const created=now();
-    db.transaction(()=>{db.prepare('INSERT INTO projects VALUES(?,?,?,?,?)').run(pid,name,entry,sid,created);db.prepare('INSERT INTO snapshots VALUES(?,?,?,?,?,?,?)').run(sid,pid,null,entry,treeHash(dest),created,'原始版本 V0')})();
+    db.transaction(()=>{db.prepare('INSERT INTO projects VALUES(?,?,?,?,?)').run(pid,name,entry,sid,created);db.prepare('INSERT INTO snapshots(id,project_id,parent_id,entry,hash,created_at,description) VALUES(?,?,?,?,?,?,?)').run(sid,pid,null,entry,treeHash(dest),created,'原始版本 V0')})();
     return {id:pid,name,entry,currentSnapshot:sid,createdAt:created};
   } catch(e){fs.rmSync(path.join(DATA,'projects',pid),{recursive:true,force:true});throw e;}
 }

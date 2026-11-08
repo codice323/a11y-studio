@@ -148,8 +148,8 @@ test('URL 快照从首页导入，经真实扫描、修复和三视图复测后�
       await page.getByRole('button', { name: '生成补丁预览' }).click();
       const pendingDiff = page.getByLabel('待审核的源码差异');
       await pendingDiff.waitFor();
-      await page.getByRole('button', { name: '审核并应用' }).click();
-      assert.equal(await page.evaluate(() => document.activeElement?.textContent), '再检查一下');
+      await page.getByRole('button', { name: '确认应用修复' }).click();
+      assert.equal(await page.evaluate(() => document.activeElement?.textContent), '取消');
       await page.keyboard.press('Escape');
       await issuesTab.click();
       assert.equal(await issueButton.getAttribute('aria-pressed'), 'true');
@@ -164,14 +164,14 @@ test('URL 快照从首页导入，经真实扫描、修复和三视图复测后�
         columns.map(column => column.getBoundingClientRect().height),
       );
       assert.deepEqual(currentHeights, [controls.height, evidence.height]);
-      await page.getByRole('button', { name: '审核并应用' }).click();
-      await page.getByRole('button', { name: '确认并验证' }).click();
+      await page.getByRole('button', { name: '确认应用修复' }).click();
+      await page.getByRole('button', { name: '确认应用并复测' }).click();
       const semantics = page.getByRole('table');
       await semantics.getByText('打开导航', { exact: false }).waitFor({ timeout: 25000 });
       assert.match(await semantics.innerText(), /可访问名称\s+（空）\s+打开导航/);
       assert.match(await semantics.innerText(), /角色\s+button\s+button/);
       assert.equal(await assistantTab.getAttribute('aria-selected'), 'true');
-      assert.equal(await page.getByRole('button', { name: '审核并应用' }).count(), 0);
+      assert.equal(await page.getByRole('button', { name: '确认应用修复' }).count(), 0);
       await page.getByRole('button', { name: '查看历史补丁' }).click();
       assert.match(await page.getByLabel('已保存的源码差异').innerText(), /aria-label="打开导航"/);
       await page.getByRole('button', { name: '页面对照' }).click();

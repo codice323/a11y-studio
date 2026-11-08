@@ -23,6 +23,41 @@ test('静态项目的真实检测、审核修复、失败回滚、导出与异�
   const linkIssue=state.current.issues.find((x:any)=>x.ruleId==='link-name');mockFailure=true;const modelError=await post(`/api/projects/${p.id}/issues/${linkIssue.id}/proposals`,{source:'ai'});assert.equal(modelError.res.status,400);assert.match(modelError.data.error,/429/);mockFailure=false;assert.equal((await api('/api/projects/'+p.id)).data.project.currentSnapshot,old);
   const cancelJob=await post(`/api/projects/${p.id}/audits`,{});const cancelled=await post(`/api/jobs/${cancelJob.data.id}/cancel`,{});assert.equal(cancelled.res.status,200);let cancelState;for(let i=0;i<40;i++){cancelState=(await api('/api/jobs/'+cancelJob.data.id)).data;if(cancelState.status==='cancelled')break;await new Promise(r=>setTimeout(r,100))}assert.equal(cancelState.status,'cancelled');
   const rolled=await post(`/api/projects/${p.id}/rollback`,{snapshotId:initialId});assert.equal(rolled.data.currentSnapshot,initialId);state=(await api('/api/projects/'+p.id)).data;assert.equal(state.summary.resolved,0);
+  assert.deepEqual(state.resolved,[]);
+  assert.equal(state.verifications.filter((v:any)=>v.status==='passed').length,3);
+  const versionOne=state.snapshots[1], versionTwo=state.snapshots[2];
+  assert.equal(versionOne.name,'表单标签优化');
+  assert.equal(versionTwo.name,'图片替代文本修复');
+  const renamePath=`/api/projects/${p.id}/snapshots/${versionTwo.id}`;
+  for(const name of ['   ','字'.repeat(49),'first\nsecond']){
+   const invalidName=await api(renamePath,{method:'PATCH',headers:{'content-type':'application/json'},body:JSON.stringify({name})});
+   assert.equal(invalidName.res.status,400);
+  }
+  const renamed=await api(renamePath,{method:'PATCH',headers:{'content-type':'application/json'},body:JSON.stringify({name:'  图片 <最终>  '})});
+  assert.deepEqual(renamed.data,{id:versionTwo.id,name:'图片 <最终>'});
+  for(const [snapshot,count] of [[versionOne,1],[versionTwo,2]] as const){
+   await post(`/api/projects/${p.id}/rollback`,{snapshotId:snapshot.id});
+   const selected=(await api(`/api/projects/${p.id}/reports`)).data;
+   assert.equal(selected.current.snapshotId,snapshot.id);
+   assert.equal(selected.summary.resolved,count);
+   assert.equal(selected.resolved.length,count);
+   assert.equal(selected.snapshots[2].name,'图片 <最终>');
+   assert.equal(selected.snapshots[2].hash,versionTwo.hash);
+  }
+  const pending=(await post(`/api/projects/${p.id}/issues/${contrast.id}/proposals`,{source:'manual',value:'#222222'})).data;
+  await post(`/api/projects/${p.id}/rollback`,{snapshotId:initialId});
+  await post(`/api/projects/${p.id}/rollback`,{snapshotId:versionTwo.id});
+  await assert.rejects(async()=>wait((await post(`/api/proposals/${pending.id}/apply`,{})).data.id),/建议已处理或版本已变化/);
+  await post(`/api/projects/${p.id}/rollback`,{snapshotId:initialId});
+  const alternate=(await post(`/api/projects/${p.id}/issues/${linkIssue.id}/proposals`,{source:'manual',value:'阅读文章'})).data;
+  const branch=await wait((await post(`/api/proposals/${alternate.id}/apply`,{})).data.id);
+  assert.equal(branch.status,'passed');
+  state=(await api('/api/projects/'+p.id)).data;
+  assert.equal(state.snapshots.at(-1).parent_id,initialId);
+  assert.equal(state.snapshots[2].id,versionTwo.id);
+  assert.deepEqual(state.resolved.map((item:any)=>item.issue.ruleId),['link-name']);
+  const branchExport=unzipSync(new Uint8Array(await (await fetch(base+`/api/projects/${p.id}/export`)).arrayBuffer()));
+  assert.match(strFromU8(branchExport['report/report.html']),/图片 &lt;最终&gt;/);
   const htmlUpload=new FormData();
   htmlUpload.set('file',new Blob(['<!doctype html><html lang="zh-CN"><head><title>HTML 上传测试</title></head><body><main><button id="unnamed"></button></main></body></html>'],{type:'text/html'}),'upload.html');
   const uploaded=await api('/api/projects',{method:'POST',body:htmlUpload});
@@ -49,8 +84,8 @@ test('静态项目的真实检测、审核修复、失败回滚、导出与异�
    assert.equal(await page.getByText('检索到的规范依据',{exact:true}).isVisible(),false);
    await page.getByText('查看详细依据',{exact:true}).click();
    await page.getByText('检索到的规范依据',{exact:true}).waitFor();
-   await page.getByRole('button',{name:'保留原样'}).click();
-   await page.getByLabel('建议的文本内容').fill('电子邮箱');await page.getByRole('button',{name:'生成补丁预览'}).click();await page.getByRole('button',{name:'审核并应用'}).click();const modal=await new AxeBuilder({page}).withTags(['wcag2a','wcag2aa','wcag21a','wcag21aa']).analyze();assert.deepEqual(modal.violations.filter(x=>x.impact==='critical'||x.impact==='serious').map(x=>x.id),[]);await page.keyboard.press('Escape');assert.equal(await page.getByRole('dialog').count(),0);await page.getByRole('button',{name:'结果报告',exact:true}).click();const reportAudit=await new AxeBuilder({page}).withTags(['wcag2a','wcag2aa','wcag21a','wcag21aa']).analyze();const reportSerious=reportAudit.violations.filter(x=>x.impact==='critical'||x.impact==='serious');assert.deepEqual(reportSerious.map(x=>x.id),[],`报告页高严重度问题: ${JSON.stringify(reportSerious.map(x=>({id:x.id,nodes:x.nodes.map(n=>({target:n.target,summary:n.failureSummary}))})))}`);
+   await page.getByRole('button',{name:'取消',exact:true}).click();
+   await page.getByLabel('建议的文本内容').fill('电子邮箱');await page.getByRole('button',{name:'生成补丁预览'}).click();await page.getByRole('button',{name:'确认应用修复'}).click();const modal=await new AxeBuilder({page}).withTags(['wcag2a','wcag2aa','wcag21a','wcag21aa']).analyze();assert.deepEqual(modal.violations.filter(x=>x.impact==='critical'||x.impact==='serious').map(x=>x.id),[]);await page.keyboard.press('Escape');assert.equal(await page.getByRole('dialog').count(),0);await page.getByRole('button',{name:'结果报告',exact:true}).click();const reportAudit=await new AxeBuilder({page}).withTags(['wcag2a','wcag2aa','wcag21a','wcag21aa']).analyze();const reportSerious=reportAudit.violations.filter(x=>x.impact==='critical'||x.impact==='serious');assert.deepEqual(reportSerious.map(x=>x.id),[],`报告页高严重度问题: ${JSON.stringify(reportSerious.map(x=>({id:x.id,nodes:x.nodes.map(n=>({target:n.target,summary:n.failureSummary}))})))}`);
    await page.getByRole('button',{name:'切换项目'}).click();
    const browserFixture='<!doctype html><html lang="zh-CN"><title>上传验收</title><main><h1>验收</h1><input id="email" type="email"></main></html>';
    await page.locator('input[type=file]').setInputFiles({name:'browser-upload.html',mimeType:'text/html',buffer:Buffer.from(browserFixture)});
@@ -58,8 +93,8 @@ test('静态项目的真实检测、审核修复、失败回滚、导出与异�
    await page.getByRole('button',{name:/表单控件缺少标签/}).click();
    await page.getByRole('button',{name:'AI 分析与修复'}).click();
    await page.getByText('AI 修复建议',{exact:true}).waitFor();
-   await page.getByRole('button',{name:'审核并应用'}).click();
-   await page.getByRole('button',{name:'确认并验证'}).click();
+   await page.getByRole('button',{name:'确认应用修复'}).click();
+   await page.getByRole('button',{name:'确认应用并复测'}).click();
    await page.getByRole('table').getByRole('cell',{name:/电子邮箱/}).waitFor();
    await page.getByRole('button',{name:'切换项目'}).click();
    await page.getByRole('button',{name:'ZIP',exact:true}).click();
@@ -79,11 +114,25 @@ test('静态项目的真实检测、审核修复、失败回滚、导出与异�
    await page.getByRole('status').filter({hasText:'待人工确认'}).waitFor();
    assert.equal(await page.getByRole('alert').count(),0);
    await page.getByRole('img',{name:'待修复的目标图片'}).waitFor();
-   assert.ok(await page.getByRole('button',{name:'生成补丁预览'}).isDisabled());
+   const previewButton=page.getByRole('button',{name:'生成补丁预览'});
+   const repairValue=page.getByLabel('建议的文本内容');
+   assert.ok(await previewButton.isDisabled());
+   await page.getByText('请先选择内容性图片或装饰性图片，再生成补丁预览。',{exact:true}).waitFor();
+   assert.equal(await repairValue.inputValue(),'蓝柱高于红柱');
    await page.getByRole('radio',{name:'内容性图片'}).check();
-   assert.equal(await page.getByLabel('建议的文本内容').inputValue(),'蓝柱高于红柱');
-   await page.getByRole('button',{name:'生成补丁预览'}).click();
-   await page.getByRole('button',{name:'审核并应用'}).waitFor();
+   await repairValue.fill('');
+   assert.ok(await previewButton.isDisabled());
+   await repairValue.fill('蓝柱高于红柱');
+   await previewButton.click();
+   const evidencePanel=page.getByRole('group',{name:'修复效果对比'});
+   const confirmPatch=evidencePanel.getByRole('button',{name:'确认应用修复'});
+   await confirmPatch.waitFor();
+   await page.getByRole('radio',{name:'装饰性图片'}).check();
+   assert.ok(await confirmPatch.isDisabled());
+   await evidencePanel.getByRole('button',{name:'取消',exact:true}).click();
+   await page.getByText('已取消补丁预览，保留编辑内容。当前版本未更改。',{exact:true}).waitFor();
+   await page.getByRole('radio',{name:'内容性图片'}).check();
+   assert.equal(await repairValue.inputValue(),'蓝柱高于红柱');
   }finally{await browser.close()}
  } finally {server?.kill('SIGTERM');await new Promise<void>(r=>mock?.close(()=>r()));fs.rmSync(tmp,{recursive:true,force:true});}
 });

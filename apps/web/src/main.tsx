@@ -9,7 +9,7 @@ import {
 import { DetectionReview } from './DetectionReview';
 import type { AiAuditFinding } from '../../../packages/shared/types';
 import { Evidence, type EvidenceView } from './Evidence';
-import { versionLabel, type HistoryItem, type Issue, type Proposal, type State, type Verification } from './types';
+import { versionName, type HistoryItem, type Issue, type Proposal, type State, type Verification } from './types';
 import './style.css';
 
 const issueNames: Record<string, [string, string]> = {
@@ -31,13 +31,14 @@ type Project = { id: string; name: string; assets?: { stylesheets: number; image
 type UrlImport = { url: string; mode: 'static' | 'rendered' };
 type Knowledge = { title: string; url: string; guidance: string; refs: string[] };
 type Source = 'html' | 'zip' | 'url';
-type Selection = { issueId: string } | { history: HistoryItem } | null;
+type Selection = { issueId: string } | { history: HistoryItem; archived: boolean } | null;
 const controlTabs = [
   { id: 'issues', label: '问题与历史' },
   { id: 'assistant', label: 'AI 修复助手' },
 ] as const;
 type ControlTab = typeof controlTabs[number]['id'];
-type RepairDraft = { value: string; proposal: Proposal | null; analysis?: ImageAltAnalysis | RepairAnalysis; purpose?: ImagePurpose };
+type RepairDraft = { value: string; edited?: boolean; proposal: Proposal | null; analysis?: ImageAltAnalysis | RepairAnalysis; purpose?: ImagePurpose };
+const applyingLabel = '正在应用补丁并重新验证…';
 const imagePurposeLabel = { informative:'内容性图片', decorative:'装饰性图片', uncertain:'用途待确认' };
 
 async function request<T>(url: string, options?: RequestInit): Promise<T> {
@@ -81,6 +82,9 @@ function App() {
   const [controlTab, setControlTab] = useState<ControlTab>('issues');
   const [page, setPage] = useState<'workspace' | 'report'>('workspace');
   const [ai, setAi] = useState({ configured: false, visionConfigured: false });
+  const [versionNameDraft, setVersionNameDraft] = useState<string | null>(null);
+  const renameButton = useRef<HTMLButtonElement>(null);
+  const versionNameInput = useRef<HTMLInputElement>(null);
   const [confirmApply, setConfirmApply] = useState(false);
   const [knowledge, setKnowledge] = useState<Knowledge | null>(null);
   const running = useRef(false);
@@ -95,6 +99,7 @@ function App() {
   const draft = drafts[draftKey];
   const proposal = draft?.proposal ?? null;
   const input = draft?.purpose === 'decorative' ? '' : draft?.value ?? (issue?.ruleId === 'color-contrast' ? '#1c2731' : '');
+  const patchReady = Boolean(proposal && input === proposal.patch.value && draft?.purpose === proposal.imagePurpose);
   const selectedRule = (history?.issue ?? issue)?.ruleId;
   const route = state ? '/api/projects/' + state.project.id : '';
   const working = Boolean(busy);
@@ -172,6 +177,8 @@ function App() {
     setSelection(null);
     setControlTab('issues');
     setDrafts({});
+    setVersionNameDraft(null);
+    setConfirmApply(false);
     setFilter('all');
     setView('visual');
     setList('open');
@@ -281,18 +288,24 @@ function App() {
     setDrafts(previous => ({ ...previous, [draftKey]: { ...(previous[draftKey] ?? { value: '', proposal: null }), ...changes } }));
   }
 
-  function saveDraft(value: string, next: Proposal | null) {
-    updateDraft({value, proposal: next});
-  }
-
   function chooseImagePurpose(purpose: ImagePurpose) {
-    updateDraft({purpose, proposal: null,
-      value: draft?.value || (purpose === 'informative' ? (draft?.analysis && 'contentAlt' in draft.analysis ? draft.analysis.contentAlt : '') ?? '' : '')});
+    updateDraft({ purpose });
   }
 
-  function chooseHistory(item: HistoryItem, nextView: EvidenceView = view, moveFocus = false) {
+  function showPatch() {
+    setView('diff');
+    requestAnimationFrame(() => {
+      const evidence = evidenceFocus.current;
+      evidence?.focus();
+      if (window.matchMedia('(min-width: 901px)').matches) {
+        evidence?.querySelector('.patch-review')?.scrollIntoView({ block: 'nearest' });
+      }
+    });
+  }
+
+  function chooseHistory(item: HistoryItem, nextView: EvidenceView = view, moveFocus = false, archived = false) {
     setList('history');
-    setSelection({ history: item });
+    setSelection({ history: item, archived });
     setView(nextView);
     setPage('workspace');
     openAssistant(!moveFocus);
@@ -306,21 +319,24 @@ function App() {
         route + '/issues/' + issue.id + '/proposals', { source, value: input, imagePurpose: draft?.purpose },
       );
       if (!('patch' in next)) {
-        updateDraft({analysis: next, proposal: null, value: draft?.value || ('contentAlt' in next ? next.contentAlt : next.suggestedValue) || ''});
+        const suggested = 'contentAlt' in next ? next.contentAlt : next.suggestedValue;
+        updateDraft({ analysis: next, ...(!draft?.edited && !proposal && suggested != null ? { value: suggested } : {}) });
         return;
       }
-      if (next.imagePurpose === 'decorative') updateDraft({proposal: next});
-      else updateDraft({value:next.patch.value,proposal:next,
-        ...(source === 'agent' ? {analysis:next.analysis} : {})});
-      setView(source === 'manual' ? 'diff' : 'visual');
-      setNotice('建议已生成，请审核实际源码差异。');
+      updateDraft({
+        proposal: next,
+        ...(next.imagePurpose !== 'decorative' ? { value: next.patch.value } : {}),
+        ...(source === 'agent' ? { analysis: next.analysis, edited: false } : {}),
+      });
+      showPatch();
+      setNotice('补丁预览已生成，请在右侧审核源码差异并确认应用。');
     });
   }
 
   function apply(semanticReviewed: boolean) {
-    if (!proposal || !state) return;
+    if (!proposal || !state || !patchReady || working) return;
     setConfirmApply(false);
-    run('正在应用补丁并重新验证…', async () => {
+    run(applyingLabel, async () => {
       const result = await runJob<Verification>('/api/proposals/' + proposal.id + '/apply', {semanticReviewed});
       await refresh(state.project.id);
       updateDraft({proposal: null});
@@ -342,7 +358,8 @@ function App() {
       await post('/api/proposals/' + proposal.id + '/reject');
       updateDraft({proposal: null});
       setView('visual');
-      setNotice('建议已拒绝，当前版本继续使用。');
+      setNotice('已取消补丁预览，保留编辑内容。当前版本未更改。');
+      requestAnimationFrame(() => document.getElementById('repair-value')?.focus());
     });
   }
 
@@ -351,14 +368,38 @@ function App() {
     run('正在恢复版本…', async () => {
       await post(route + '/rollback', { snapshotId: id });
       await refresh(state.project.id);
-      if (!history) resetSelection();
+      resetSelection();
+      setList('open');
+      setView('visual');
       setNotice('已恢复到所选有效版本。历史证据仍可查看。');
     });
   }
 
-  const records = state?.verifications.flatMap(verification =>
-    verification.status === 'passed' ? verification.resolved.map(item => ({ verification, issue: item })) : [],
-  ) ?? [];
+  function renameCurrentVersion(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!state || versionNameDraft === null) return;
+    run('正在保存版本名称…', async () => {
+      await request(route + '/snapshots/' + state.project.currentSnapshot, {
+        method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: versionNameDraft }),
+      });
+      await refresh(state.project.id);
+      closeRename();
+      setNotice('版本名称已保存。');
+    });
+  }
+
+  function closeRename() {
+    setVersionNameDraft(null);
+    requestAnimationFrame(() => renameButton.current?.focus());
+  }
+
+  const verificationById = new Map(state?.verifications.map(item => [item.id, item]));
+  const records = (state?.resolved ?? []).flatMap(({ issue, verificationId }) => {
+    const verification = verificationById.get(verificationId);
+    return verification ? [{ issue, verification }] : [];
+  });
+  const archivedEvidence = Boolean(selection && 'history' in selection && selection.archived);
   const unresolved = state?.current?.issues ?? [];
   const filtered = unresolved
     .filter(item => filter === 'all' || (filter === 'unknown' ? severityRank(item.impact) === 4 : item.impact === filter))
@@ -399,16 +440,36 @@ function App() {
         {busy && <div className="busy"><span role="status"><LoaderCircle className="spin" size={16} />{busy}</span>{jobId && <button className="cancel-job" disabled={cancelRequested} onClick={() => void cancelJob()}>{cancelRequested ? '正在取消…' : '取消任务'}</button>}</div>}
 
         {!state ? <Home fixtures={fixtures} projects={projects} busy={working} onCreate={createProject} onOpen={openProject} onError={setError} /> :
-          page === 'report' ? <Report state={state} busy={working} onRollback={rollback} onOpen={(item) => chooseHistory(item, 'visual', true)} onWorkspace={() => openPage('workspace')} /> :
+          page === 'report' ? <Report state={state} busy={working} onRollback={rollback} onOpen={(item) => chooseHistory(item, 'visual', true, true)} onWorkspace={() => openPage('workspace')} /> :
           <>
             <div className="project-strip">
               <div className="project-symbol"><FileCode2 size={19} /></div>
-              <div className="project-title"><b>{state.project.name}</b><span>本地快照：{state.project.entry} · 当前版本 {versionLabel(state, state.project.currentSnapshot)}</span></div>
-              <div className="project-actions">
-                <button className="secondary" onClick={scanAgain} disabled={working}><RefreshCw size={14} />重新检测</button>
-                <select aria-label="切换项目版本" value={state.project.currentSnapshot} onChange={event => rollback(event.target.value)} disabled={working}>
-                  {state.snapshots.map((snapshot, index) => <option key={snapshot.id} value={snapshot.id}>V{index} · {snapshot.description}</option>)}
-                </select>
+              <div className="project-title"><b>{state.project.name}</b><span>本地快照：{state.project.entry} · 当前版本 {versionName(state, state.project.currentSnapshot)}</span></div>
+              <div className="version-controls">
+                <div className="project-actions">
+                  <button className="secondary" onClick={scanAgain} disabled={working}><RefreshCw size={14} />重新检测</button>
+                  <select aria-label="切换项目版本" value={state.project.currentSnapshot} onChange={event => rollback(event.target.value)} disabled={working}>
+                    {state.snapshots.map(snapshot => <option key={snapshot.id} value={snapshot.id}>{versionName(state, snapshot.id)}</option>)}
+                  </select>
+                  <button className="secondary" ref={renameButton} disabled={working || versionNameDraft !== null}
+                    onClick={() => {
+                      setVersionNameDraft(state.snapshots.find(item => item.id === state.project.currentSnapshot)?.name ?? '');
+                      requestAnimationFrame(() => {
+                        versionNameInput.current?.focus();
+                        versionNameInput.current?.select();
+                      });
+                    }}>重命名</button>
+                </div>
+                {versionNameDraft !== null && <form className="version-rename" onSubmit={renameCurrentVersion}
+                  onKeyDown={event => { if (event.key === 'Escape' && !working) { event.preventDefault(); closeRename(); } }}>
+                  <input id="version-name" aria-label="版本名称" value={versionNameDraft} onChange={event => setVersionNameDraft(event.target.value)}
+                    ref={versionNameInput}
+                    required disabled={working} />
+                  <div className="version-rename-actions">
+                    <button className="secondary" type="button" disabled={working} onClick={closeRename}>取消</button>
+                    <button className="button dark" disabled={working || !versionNameDraft.trim()}>保存</button>
+                  </div>
+                </form>}
               </div>
             </div>
             <div className="workbench">
@@ -442,24 +503,25 @@ function App() {
                     </Blank> : records.length ? records.map(item =>
                       <IssueButton key={item.verification.id + item.issue.id} issue={item.issue}
                         active={history?.verification.id === item.verification.id && history.issue.id === item.issue.id}
-                        disabled={working} history={`${versionLabel(state, item.verification.fromSnapshot)} → ${versionLabel(state, item.verification.toSnapshot)}`}
+                        disabled={working} history={`${versionName(state, item.verification.fromSnapshot)} → ${versionName(state, item.verification.toSnapshot)}`}
                         onClick={() => chooseHistory(item)} />,
-                    ) : <Blank icon={<History />} title="暂无已解决记录">通过自动复测的修复会显示在这里。</Blank>}
+                    ) : <Blank icon={<History />} title="当前版本暂无已解决问题">此处显示当前版本包含且通过复测的修复。</Blank>}
                   </div>
                   <DetectionReview key={state.current?.id} detection={state.current?.detection} aiConfigured={ai.configured} busy={working} onReview={reviewWithAi} onDecision={decideAiFinding} />
-                  <div className="issue-foot"><Info size={15} /><span>已解决列表包含历史版本，当前问题以所选版本为准。</span></div>
+                  <div className="issue-foot"><Info size={15} /><span>问题状态仅对应当前版本。<button className="record-link" onClick={() => openPage('report')}>查看跨版本历史</button></span></div>
                 </div>
                 <div className="control-panel" role="tabpanel" id="control-panel-assistant"
                   aria-labelledby="control-tab-assistant" tabIndex={0} ref={assistantPanel} hidden={controlTab !== 'assistant'}>
                   <Assistant issue={issue} history={history} knowledge={knowledge} ai={ai.configured} visionReady={ai.visionConfigured} busy={working} proposal={proposal} analysis={draft?.analysis} purpose={draft?.purpose} onPurpose={chooseImagePurpose}
                     previewUrl={issue?.ruleId === 'image-alt' ? route + '/issues/' + encodeURIComponent(issue.id) +
                       '/image-preview?snapshot=' + encodeURIComponent(state.project.currentSnapshot) : undefined}
-                    input={input} onInput={value => saveDraft(value, proposal)} onPropose={propose} onConfirm={() => setConfirmApply(true)}
-                    onReject={reject} onShowPatch={() => { setView('diff'); evidenceFocus.current?.focus(); }} />
+                    input={input} onInput={value => updateDraft({ value, edited: true })} onPropose={propose} onShowPatch={showPatch} />
                 </div>
               </div>
               <div className="evidence-column" role="group" tabIndex={-1} ref={evidenceFocus} aria-label="修复效果对比">
-                <Evidence state={state} issue={issue} history={history} proposal={proposal} view={view} onView={setView} />
+                <Evidence state={state} issue={issue} history={history} proposal={proposal} view={view} onView={setView}
+                  busy={working} applying={busy === applyingLabel} archivedEvidence={archivedEvidence}
+                  patchReady={patchReady} onConfirm={() => setConfirmApply(true)} onReject={reject} />
               </div>
             </div>
             <div className="bottom-note"><ShieldCheck size={16} /><span>修复应用于本地副本。自动复测结果和人工检查项见报告。</span><button onClick={() => openPage('report')}>查看完整报告 <ArrowRight size={14} /></button></div>
@@ -467,7 +529,7 @@ function App() {
         <footer><span>A11y Studio · 网页无障碍工作区</span><span>基于 Chromium 和 axe-core</span></footer>
       </div>
     </main>
-    {confirmApply && <ConfirmDialog imagePurpose={proposal?.imagePurpose} onClose={() => setConfirmApply(false)} onConfirm={apply} />}
+    {confirmApply && proposal && patchReady && <ConfirmDialog imagePurpose={proposal?.imagePurpose} onClose={() => setConfirmApply(false)} onConfirm={apply} />}
   </div>;
 }
 
@@ -569,16 +631,21 @@ function ImagePreview({ url }: { url: string }) {
   </div>;
 }
 
-function Assistant({ issue, history, knowledge, ai, visionReady, busy, proposal, analysis, purpose, onPurpose, previewUrl, input, onInput, onPropose, onConfirm, onReject, onShowPatch }: {
+function Assistant({ issue, history, knowledge, ai, visionReady, busy, proposal, analysis, purpose, onPurpose, previewUrl, input, onInput, onPropose, onShowPatch }: {
   issue?: Issue; history?: HistoryItem; knowledge: Knowledge | null; ai: boolean; visionReady: boolean; busy: boolean;
   proposal: Proposal | null; analysis?: ImageAltAnalysis | RepairAnalysis; purpose?: ImagePurpose;
   onPurpose: (purpose: ImagePurpose) => void; previewUrl?: string; input: string; onInput: (value: string) => void;
-  onPropose: (source: 'agent' | 'manual') => void; onConfirm: () => void; onReject: () => void;
+  onPropose: (source: 'agent' | 'manual') => void;
   onShowPatch: () => void;
 }) {
   const target = history?.issue ?? issue;
   const verification = history?.verification;
   const isImageAlt = target?.ruleId === 'image-alt';
+  const previewHint = isImageAlt && (!purpose
+    ? '请先选择内容性图片或装饰性图片，再生成补丁预览。'
+    : purpose === 'informative' && !input.trim()
+      ? '请填写非空替代文本，再生成补丁预览。'
+      : '');
   const refs = verification?.wcag ?? proposal?.wcag ?? knowledge?.refs ?? target?.wcag ?? [];
   const imageAnalysis = analysis && 'purpose' in analysis ? analysis : undefined;
   const sources = analysis?.sources ?? proposal?.sources;
@@ -636,7 +703,7 @@ function Assistant({ issue, history, knowledge, ai, visionReady, busy, proposal,
       </div> : issueNames[target.ruleId] ? <>
         {isImageAlt && <>
           {previewUrl && <ImagePreview key={previewUrl} url={previewUrl} />}
-          <fieldset disabled={busy} className="image-purpose">
+          <fieldset disabled={busy} className="image-purpose" aria-describedby={previewHint ? 'repair-preview-hint' : undefined}>
             <legend>请选择实际图片用途</legend>
             <label><input type="radio" name="image-purpose" checked={purpose === 'informative'}
               onChange={() => onPurpose('informative')} /> 内容性图片</label>
@@ -650,17 +717,14 @@ function Assistant({ issue, history, knowledge, ai, visionReady, busy, proposal,
         <p className="muted note">{isImageAlt
           ? (ai ? 'AI 按需读取目标图片和邻近文字。确认纯装饰时可留空。' : '当前模型未配置为支持图像输入，可手动填写。')
           : (ai ? 'AI 按需使用局部代码和视觉证据。' : '可手动填写内容并生成补丁。配置模型服务后可使用 AI 建议。')}</p>
+        <p id="repair-preview-hint" className="note" role="status">{previewHint || (isImageAlt && purpose === 'decorative' ? '预览将添加空 alt（alt=""），请确认该图片只用于装饰。' : null)}</p>
         <div className="repair-actions">
-          <button className="button dark" disabled={busy || (isImageAlt && (!purpose || (purpose === 'informative' && !input.trim())))} onClick={() => onPropose('manual')}><Code2 size={15} />生成补丁预览</button>
+          <button className="button dark" disabled={busy || Boolean(previewHint)} aria-describedby={isImageAlt ? 'repair-preview-hint' : undefined} onClick={() => onPropose('manual')}><Code2 size={15} />生成补丁预览</button>
           <button className="secondary" disabled={busy || !ai} onClick={() => onPropose('agent')}><Sparkles size={15} />AI 分析与修复</button>
         </div>
         {proposal && <div className="proposal">
           <div className="proposal-head"><b>{proposal.source === 'manual' ? '人工修复建议' : 'AI 修复建议'}</b><span>{proposal.imagePurpose ? '待人工确认' : '待审核'}</span></div>
-          <div className="repair-actions">
-            <button className="button dark" disabled={busy || input !== proposal.patch.value} onClick={onConfirm}><Check size={15} />审核并应用</button>
-            <button className="secondary" disabled={busy} onClick={onReject}>保留原样</button>
-          </div>
-          <small>{input !== proposal.patch.value ? '输入已更新，请重新生成补丁预览。' : '应用前请核对源码差异。'}</small>
+          <button type="button" className="secondary" onClick={onShowPatch}>前往右侧审核补丁</button>
         </div>}
       </> : <p className="manual-only">此规则需要人工处理。可查看规范和报告中的复核项。</p>}
     </div> : <Blank icon={<Sparkles />} title="选择一个问题">查看使用影响、修复依据和可审核的补丁。</Blank>}
@@ -670,7 +734,7 @@ function Assistant({ issue, history, knowledge, ai, visionReady, busy, proposal,
 function Metrics({ state }: { state: State }) {
   return <div className="metrics">
     <div><span>初始问题</span><strong>{state.summary.initial ?? '—'}</strong><small>原始版本扫描</small></div>
-    <div className="metric-ok"><span>已解决</span><strong>{state.current ? state.summary.resolved : '—'}</strong><small>相对原始版本</small></div>
+    <div className="metric-ok"><span>已解决</span><strong>{state.current ? state.summary.resolved : '—'}</strong><small>当前版本包含的已验证修复</small></div>
     <div><span>原有问题残留</span><strong>{state.current ? state.summary.remaining : '—'}</strong><small>仍需处理</small></div>
     <div><span>新增问题</span><strong>{state.current ? state.summary.added : '—'}</strong><small>相对原始版本</small></div>
   </div>;
@@ -685,13 +749,14 @@ function Report({ state, onRollback, onOpen, onWorkspace, busy }: {
   state: State; onRollback: (id: string) => void; onOpen: (item: HistoryItem) => void; onWorkspace: () => void; busy: boolean;
 }) {
   return <div className="report">
+    <p className="muted">当前报告 · {versionName(state, state.project.currentSnapshot)}</p>
     <Metrics state={state} />
     <div className="export-banner"><span className="section-icon"><Download size={19} /></span><div><h2>导出源码与报告</h2><p>ZIP 包含当前本地快照、扫描截图、HTML / JSON 报告和验证日志。</p></div><ExportButton route={'/api/projects/' + state.project.id} disabled={busy} /></div>
     <div className="report-grid">
-      <section className="panel report-section"><div className="panel-head"><div><span className="kicker">VALIDATION</span><h2>修复与验证记录</h2></div></div>
+      <section className="panel report-section"><div className="panel-head"><div><span className="kicker">VALIDATION</span><h2>跨版本修复与验证记录</h2></div></div>
         {state.verifications.length ? state.verifications.map(item => <div className="log-row" key={item.id}>
           <span className={'log-icon ' + (item.status === 'passed' ? 'ok' : 'failed')} aria-hidden="true">{item.status === 'passed' ? <Check size={15} /> : <X size={15} />}</span>
-          <div><b>{item.status === 'passed' ? '验证通过' : '验证失败 · 已保留原版本'} · {versionLabel(state, item.fromSnapshot)} → {versionLabel(state, item.toSnapshot)}</b>
+          <div><b>{item.status === 'passed' ? '验证通过' : '验证失败 · 已保留原版本'} · {versionName(state, item.fromSnapshot)} → {versionName(state, item.toSnapshot)}</b>
             <p>{item.reason}</p>
             {item.imageReview && <p>图片语义审核：用户已确认 · {imagePurposeLabel[item.imageReview.purpose]}</p>}<small>{dateText(item.createdAt)} · 解决 {item.resolved.length} / 残留 {item.remaining.length} / 新增 {item.added.length}</small>
             {item.status === 'passed' && item.resolved.map(resolved => <button className="record-link" key={resolved.id} disabled={busy} onClick={() => onOpen({ issue: resolved, verification: item })}>{issueTitle(resolved)} · 查看证据 <ArrowRight size={14} /></button>)}
@@ -712,7 +777,7 @@ function Report({ state, onRollback, onOpen, onWorkspace, busy }: {
           {state.current?.incomplete.map(item => <div className="manual-item" key={item.ruleId}><Info size={14} />{item.help} · {item.count} 项需要进一步判断</div>)}
         </div>
         <div className="versions"><h3>版本记录</h3>{state.snapshots.map((snapshot, index) => <div key={snapshot.id}>
-          <span><b>V{index}</b> {snapshot.description}{snapshot.id === state.project.currentSnapshot ? ' · 当前' : ''}</span>
+          <span><b>{versionName(state, snapshot.id)}</b>{snapshot.id === state.project.currentSnapshot ? ' · 当前' : ''}</span>
           {snapshot.id !== state.project.currentSnapshot && <button disabled={busy} aria-label={`恢复版本 V${index}`} onClick={() => onRollback(snapshot.id)}><RotateCcw size={13} />恢复</button>}
         </div>)}</div>
       </section>
@@ -745,8 +810,8 @@ function ConfirmDialog({ imagePurpose, onClose, onConfirm }: {
     {imagePurpose && <p><label><input type="checkbox" checked={semanticReviewed}
       onChange={event => setSemanticReviewed(event.target.checked)} /> 我已确认图片用途和替代文本符合页面语境（{imagePurposeLabel[imagePurpose]}）</label></p>}
     <div className="confirm-actions">
-      <button ref={cancel} className="secondary" onClick={onClose}>再检查一下</button>
-      <button className="button dark" disabled={Boolean(imagePurpose && !semanticReviewed)} onClick={() => onConfirm(semanticReviewed)}>确认并验证 <ArrowRight size={15} /></button>
+      <button ref={cancel} className="secondary" onClick={onClose}>取消</button>
+      <button className="button dark" disabled={Boolean(imagePurpose && !semanticReviewed)} onClick={() => onConfirm(semanticReviewed)}>确认应用并复测 <ArrowRight size={15} /></button>
     </div>
   </dialog>;
 }

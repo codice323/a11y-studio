@@ -17,7 +17,8 @@
 | POST /api/projects/:id/issues/:issueId/proposals | `{source:"manual",value:"..."}` 或 `{source:"ai"}` |
 | POST /api/proposals/:id/apply | 审核后应用并异步验证 |
 | POST /api/proposals/:id/reject | 拒绝建议 |
-| POST /api/projects/:id/rollback | `{snapshotId:"..."}` 恢复有效版本 |
+| PATCH /api/projects/:id/snapshots/:snapshotId | `{name:"图片替代文本修复"}` 重命名有效版本，返回 `{id,name}`。名称去除首尾空白，限 1–48 个字符、单行 |
+| POST /api/projects/:id/rollback | `{snapshotId:"..."}` 恢复有效版本。切换到不同快照会取消项目此前的待审核补丁 |
 | GET /api/projects/:id/reports | 报告数据 |
 | GET /api/projects/:id/export | 源码、截图与报告 ZIP |
 
@@ -59,3 +60,5 @@ V2 扫描在原有结果上增加 `detection` 字段，旧扫描可没有此字�
 - `POST /api/projects/:id/audits/:auditId/ai-review`，请求体 `{"consent":true}`。显式确认后才向配置的模型发送最多 20 项可访问名称、角色、类型及附近文字。不会发送图片、完整 HTML 或补丁。成功后，同一扫描的重复请求返回已保存批次。模型不可用时，不影响已有规则、行为或修复记录。
 - `PATCH /api/projects/:id/audits/:auditId/ai-review/:findingId`，请求体 `{"decision":"accepted"}`。可选 `accepted`、`rejected`、`needs-review`。结果保存到对应扫描和 JSON 报告。接受项既不进入自动违规列表，也不修改文件。
 - 工作台与结果报告显示 V2 行为证据、最佳实践及已保存的 AI 复核结果。AI 复核的请求和决定通过 API 提交。导出 ZIP 内的 JSON 保留完整证据。图片 Alt 检查只看文本和邻近文字，无法辨认图片内容。
+
+项目详情和报告包含有效快照的 `name` 和 `parent_id`。旧快照自动按原始版本或补丁规则显示默认名称。`resolved` 是当前快照继承的、已通过验证且未在当前检测中再次出现的问题，每项关联 `verificationId`。`summary.resolved` 是该列表的数量。`verifications` 仍包含全部分支的成功和失败记录。

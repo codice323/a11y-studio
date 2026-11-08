@@ -13,6 +13,9 @@ CREATE TABLE IF NOT EXISTS snapshots(id TEXT PRIMARY KEY,project_id TEXT,parent_
 CREATE TABLE IF NOT EXISTS audits(id TEXT PRIMARY KEY,project_id TEXT,snapshot_id TEXT,status TEXT,result TEXT,error TEXT,created_at TEXT);
 CREATE TABLE IF NOT EXISTS proposals(id TEXT PRIMARY KEY,project_id TEXT,snapshot_id TEXT,issue_id TEXT,status TEXT,data TEXT,created_at TEXT);
 CREATE TABLE IF NOT EXISTS verifications(id TEXT PRIMARY KEY,project_id TEXT,proposal_id TEXT,status TEXT,data TEXT,created_at TEXT);`);
+if (!db.prepare("PRAGMA table_info(snapshots)").all().some(column => (column as { name: string }).name === 'name')) {
+  db.exec('ALTER TABLE snapshots ADD COLUMN name TEXT');
+}
 export const id = () => crypto.randomUUID();
 export const now = () => new Date().toISOString();
 export const hash = (data:Buffer|string) => crypto.createHash('sha256').update(data).digest('hex');
