@@ -7,7 +7,7 @@ import { scanBehavior, unavailableBehavior } from './scan-behavior';
 import type { BehaviorAudit, DetectionEvidence } from '../../packages/shared/types';
 
 let activeScans=0;const MAX_SCANS=2;
-const mime:Record<string,string>={'.html':'text/html; charset=utf-8','.htm':'text/html; charset=utf-8','.css':'text/css; charset=utf-8','.png':'image/png','.jpg':'image/jpeg','.jpeg':'image/jpeg','.gif':'image/gif','.webp':'image/webp'};
+const mime:Record<string,string>={'.html':'text/html; charset=utf-8','.htm':'text/html; charset=utf-8','.css':'text/css; charset=utf-8','.png':'image/png','.jpg':'image/jpeg','.jpeg':'image/jpeg','.gif':'image/gif','.webp':'image/webp','.woff':'font/woff','.woff2':'font/woff2'};
 export function sanitizedHtml(source:string){const $=cheerio.load(source);$('script,iframe,object,embed,base,meta[http-equiv]').remove();$('*').each((_,el)=>{for(const attr of Object.keys((el as any).attribs||{}))if(/^on/i.test(attr)||['srcdoc','formaction'].includes(attr.toLowerCase())||(/^(href|src|action)$/i.test(attr)&&/^\s*javascript:/i.test($(el).attr(attr)||'')))$(el).removeAttr(attr)});return $.html();}
 function executable(){ const candidates=[process.env.CHROME_PATH,'/Applications/Google Chrome.app/Contents/MacOS/Google Chrome','/usr/bin/chromium','/usr/bin/chromium-browser','/usr/bin/google-chrome'].filter(Boolean) as string[];return candidates.find(x=>fs.existsSync(x));}
 export function withSnapshotPage<T>(projectId: string, snapshotId: string, signal: AbortSignal | undefined, inspect: (page: Page) => Promise<T>, waitForSlotMs = 6000) {
@@ -15,7 +15,8 @@ export function withSnapshotPage<T>(projectId: string, snapshotId: string, signa
  return withRepairPage(snapshotDir(projectId, snapshotId), snap.entry, signal, inspect, waitForSlotMs);
 }
 
-export async function withRepairPage<T>(dir: string, entry: string, signal: AbortSignal | undefined, inspect: (page: Page, product?: Awaited<ReturnType<typeof buildReactProject>>) => Promise<T>, waitForSlotMs = 6000, isolated = false) {
+export type ResourceFailure = { type: string; path: string; reason: string; status?:number };
+export async function withRepairPage<T>(dir: string, entry: string, signal: AbortSignal | undefined, inspect: (page: Page, product: Awaited<ReturnType<typeof buildReactProject>> | undefined, resources: ResourceFailure[]) => Promise<T>, waitForSlotMs = 6000, isolated = false) {
  let browser: Browser | undefined;
  const closeBrowser = () => { void browser?.close().catch(() => {}); };
  const engineering = isReactProject(dir);
@@ -51,12 +52,16 @@ export async function withRepairPage<T>(dir: string, entry: string, signal: Abor
       const relative=isolated && !requested ? entry : requested;
       const output=product?.files.get(relative);
       const headers={'Cache-Control':'no-store','X-DNS-Prefetch-Control':'off','X-Content-Type-Options':'nosniff',
-        'Content-Security-Policy':`default-src 'none'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'none'; script-src ${product?"'self'":"'none'"}; frame-src 'none'; worker-src 'none'; connect-src 'none'; form-action 'none'; base-uri 'none'`};
+        'Content-Security-Policy':`default-src 'none'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self' data:; script-src ${product?"'self'":"'none'"}; frame-src 'none'; worker-src 'none'; connect-src 'none'; form-action 'none'; base-uri 'none'`};
       if(output)return route.fulfill({status:200,contentType:output.type,body:output.body,headers});
-      if(req.resourceType()==='script'||(product&&!/\.(?:png|jpe?g|webp|gif|css)$/i.test(relative)))return route.abort();
+      if(req.resourceType()==='script'||(product&&!/\.(?:png|jpe?g|webp|gif|css|woff2?)$/i.test(relative)))return route.abort();
       let file=safePath(dir,relative);
       if(product&&!fs.existsSync(file))file=safePath(dir,'public/'+relative);
       const ext=path.extname(file).toLowerCase();
+      if (mime[ext] && ['image','stylesheet','font'].includes(req.resourceType()) && !fs.existsSync(file)) {
+        recordResource(req, 404);
+        return route.fulfill({status:404,contentType:mime[ext],body:'',headers});
+      }
       if(!mime[ext]||!fs.realpathSync(file).startsWith(fs.realpathSync(dir)+path.sep)||!fs.statSync(file).isFile())return route.abort();
       let body:Buffer|string=fs.readFileSync(file);
       if(ext==='.html'||ext==='.htm')body=sanitizedHtml(body.toString('utf8'));
@@ -64,9 +69,22 @@ export async function withRepairPage<T>(dir: string, entry: string, signal: Abor
     }catch{return route.abort();}
   });
   const page=await context.newPage();
-  await page.goto('http://a11y.local/'+entry.split('/').map(encodeURIComponent).join('/'),{waitUntil:'load',timeout:15000});
+  const resources: ResourceFailure[] = [];
+  function recordResource(request: import('playwright-core').Request, status?: number) {
+    const type = request.resourceType();
+    if (!['image','stylesheet','font'].includes(type) || resources.length >= 30) return;
+    const url = new URL(request.url());
+    const file = url.origin === 'http://a11y.local' ? url.pathname : url.origin;
+    const reason = status === 404 ? '本地快照缺少关联资源。请将 HTML、图片和 CSS 按原路径一起打包为 ZIP 后重新导入。' :
+      url.origin === 'http://a11y.local' ? '本地资源格式不受支持或请求被阻止' : '隔离浏览器禁止请求外部资源';
+    if (!resources.some(item => item.path === file && item.type === type)) resources.push({type, path:file, reason, status});
+  }
+  page.on('requestfailed', request => recordResource(request));
+  page.on('response', response => { if (response.status() >= 400) recordResource(response.request(), response.status()); });
+  const response=await page.goto('http://a11y.local/'+entry.split('/').map(encodeURIComponent).join('/'),{waitUntil:'load',timeout:15000});
+  if (!response?.ok()) throw new Error('浏览器未成功加载项目入口。');
   if(product)await page.locator(`[${originAttribute}]`).first().waitFor({state:'attached',timeout:5000});
-  return await inspect(page,product);
+  return await inspect(page,product,resources);
  } finally {
   localSignal?.removeEventListener('abort', closeBrowser);
   try { await browser?.close(); } finally { activeScans--; }
@@ -122,7 +140,7 @@ async function scanDirectory(projectId: string, snapshotId: string, dir: string,
  const auditId=id(),created=now();
  if(persist) db.prepare('INSERT INTO audits VALUES(?,?,?,?,?,?,?)').run(auditId,projectId,snapshotId,'running',null,null,created);
  try {
-  return await withRepairPage(dir, entry, signal, async (page,product) => {
+  return await withRepairPage(dir, entry, signal, async (page,product,resourceFailures) => {
   const location = async (selector:string) => {
     if(!product||!selector)return undefined;
     try {
@@ -184,7 +202,7 @@ async function scanDirectory(projectId: string, snapshotId: string, dir: string,
   if(product)for(const finding of behavior.findings.filter(item=>item.ruleId==='focus-style-unchanged')){
     const source=await location(finding.selector);if(source)sourceLocations[finding.selector]=source;
   }
-  const result={...(product?{build:{tool:'esbuild',milliseconds:product.milliseconds},sourceLocations}:{}),id:auditId,projectId,snapshotId,status:'completed',issues,incomplete:incomplete.map(x=>({ruleId:x.id,help:x.help,count:x.nodes.length})),passes,functionChecks,contrastCheck,regression,screenshot:`/api/audits/${auditId}/screenshot`,size,createdAt:created,detection};
+  const result={...(product?{build:{tool:'esbuild',milliseconds:product.milliseconds},sourceLocations}:{}),id:auditId,projectId,snapshotId,status:'completed',issues,incomplete:incomplete.map(x=>({ruleId:x.id,help:x.help,count:x.nodes.length})),passes,functionChecks,contrastCheck,regression,resourceFailures,screenshot:`/api/audits/${auditId}/screenshot`,size,createdAt:created,detection};
   if(persist) db.prepare('UPDATE audits SET status=?,result=? WHERE id=?').run('completed',JSON.stringify(result),auditId);return result;
   }, 6000);
  } catch(error){const message=(error as Error).message;if(persist) db.prepare('UPDATE audits SET status=?,error=? WHERE id=?').run('failed',message,auditId);throw error;}

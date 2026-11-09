@@ -83,11 +83,25 @@ V2 扫描在原有结果上增加 `detection` 字段，旧扫描可没有此字�
 - 工程补丁继续走现有 proposal、preview 和 verification API。React 补丁使用 `sourceRepair:true`。应用时需传 `sourceReviewed:true`。React 图片补丁还要求明确 `imagePurpose`，应用时传 `semanticReviewed:true`。扫描报告的 `build` 记录隔离编译结果及耗时。
 - ZIP 导出保留原始目录结构，源码工程在 `source/`，网页快照在 `website/`，报告均在 `report/`。导出的 React 文件不包含扫描标记或生成 bundle。
 
-## 全景工作台 V1
+## 页面与状态对照
 
-- `GET /api/projects/:id/panorama?left=<snapshotId>&right=<snapshotId>` 列出版本中已有的本地 HTML、项目保存的交互状态、步骤及两侧已采集问题数。
-- `POST /api/projects/:id/panorama` 创建可取消的 `panorama` 任务。请求提供 `left`、`right`，并传 `start`（已导入的 HTML 文件）或 `stateId`。延伸状态时附加 `step` 与 `from: "left" | "right"`。操作支持 `click`、`fill`、`validate`、`tab`、`shift-tab`、`escape` 和 `scroll`。带控件的步骤只接受角色及精确可访问名称。输入使用固定测试值，校验只触发原生约束检查。
+任务结果逐侧区分 `captured`（已采集）、`unmatched`（页面或操作无法可靠对应）、`failed`（采集失败）和 `skipped`（前置状态未就绪，未执行）。页面目录来自两侧实际版本，采集证据以项目、版本、状态三者关联。同 URL 的不同操作序列可以独立保存。
+
+- `GET /api/projects/:id/panorama?left=<snapshotId>&right=<snapshotId>` 列出版本中已有的本地 HTML、项目保存的交互状态、步骤及两侧已采集问题数。状态的 `counts` 只包含有独立检测结果、且最近一次尝试未失败或中断的版本。0 表示确定性违规为零，仍可能存在待复核证据。截图可用性单独判断。`entries` 按版本 ID 提供已有扫描的入口文件、整页截图路径和尺寸，作为尚未采集入口状态时的只读预览。
+- `POST /api/projects/:id/panorama` 创建可取消的 `panorama` 任务。进行中的相同请求返回同一任务 ID，已完成且截图齐全的状态直接复用证据。请求提供 `left`、`right`，并传 `start`（已导入的 HTML 文件）或 `stateId`。延伸状态时附加 `step` 与 `from: "left" | "right"`。操作支持 `click`、`fill`、`validate`、`tab`、`shift-tab`、`escape` 和 `scroll`。带控件的步骤只接受角色及精确可访问名称。输入使用固定测试值，校验只触发原生约束检查。
+- 同一 POST 入口传入 `{left,right,site:true}`，按实际 HTML 文件批量采集。React 工程也会执行入口导航区域中同源、可唯一定位的链接，保存实际路由及逐页检测结果。任务至多运行 100 秒，并返回 `failures`。
+- URL 导入可选 `discover:true`，跟踪两层同源导航、最多保存六页。抓取总时限为 55 秒，所有请求继续经过地址与重定向校验，公开源站页面保存为本地静态快照。渲染模式实际点击可唯一定位的同源导航链接，保存来源和目标路径；导入副本不继续执行脚本。
 - 任务在 `/api/jobs/:id` 提供阶段进度和取消。成功采集的一侧按项目、版本和状态缓存，重试可复用。无法重放的一侧返回 `unmatched`、错误与步骤编号，禁止拿其他截图替代。
-- `GET /api/projects/:id/panorama/captures/:captureId/:kind` 返回该项目的 `viewport` 或 `full` 截图。状态还包含精简 DOM、Chromium 无障碍树、焦点顺序、axe 问题和可用源码定位。
-- `POST /api/projects/:id/panorama/proposals` 接受 `stateId`、当前 `snapshotId`、`issueId` 与人工提供的 `value`，生成原生按钮名称的源码补丁。沿用现有预览、审核与应用接口。应用任何补丁时，已采集状态会在候选副本中重放。新增违规、无法可靠重放、键盘回归和其他路由中未获审核的布局或语义变化会阻止应用。
-- 每个版本列出至多 12 个本地 HTML 文件。每项目可保存 12 个状态，每个序列最多 6 步。不会自动枚举全站。URL 快照仅能浏览本地证据。React 路由由隔离后的客户端脚本重放，静态工程仅执行浏览器原生行为。截图遮盖普通文本输入区域，仍应只导入有权限且去除真实个人数据的工程。
+- `GET /api/projects/:id/panorama/captures/:captureId/:kind` 返回该项目的 `viewport` 或 `full` 截图。状态还包含精简 DOM、Chromium 无障碍树、焦点顺序、axe 问题和可用源码定位。截图丢失后会返回明确错误，重试只补采证据缺失的版本。
+- `POST /api/projects/:id/panorama/proposals` 接受 `stateId`、当前 `snapshotId`、`issueId`。传 `source: "agent"` 生成待人工确认的名称建议，传 `source: "manual"` 和审核后的 `value` 生成可定位的原生按钮名称补丁。沿用现有预览、审核与应用接口。应用任何补丁时，已采集状态会在候选副本中重放。新增违规、无法可靠重放、键盘回归和其他路由中未获审核的布局或语义变化会阻止应用。
+- 每个版本列出归档内实际存在的 HTML 文件。源码工程自动发现时受 12 页总量和 3 层导航深度限制。每项目最多 12 个额外交互状态，每个序列最多 6 步。不会自动枚举全站。URL 快照仅能浏览本地证据。React 路由由隔离后的客户端脚本重放，静态工程仅执行浏览器原生行为。截图遮盖普通文本输入区域，仍应只导入有权限且去除真实个人数据的工程。
+
+`GET /api/projects/:id/reports` 和 ZIP 中的 `report.json` 含当前版本已采集的页面及状态、源路径、操作步骤、截图、DOM、可访问语义、自动检测结果与未检测的已知路径。首页问题与全站状态问题的计数分开。
+
+
+### 全站检测记录
+
+- 向同一采集接口提交 `{left,right,site:true}`，重新检测所选版本中实际存在的 HTML 文件和已记录的安全交互状态。ZIP 的路径来自快照文件，带编码、查询参数或锚点的链接不会为同一文件创建额外扫描。源码 SPA 只追踪可安全重放的同源导航链接，最多发现三层。URL 导入仍使用原有的有限同源发现，报告只统计已保存的 URL 快照。
+- `GET /api/projects/:id/reports` 和导出的 JSON 含 `site`。顶层是项目及当前快照 ID，`pages` 按页面标注检测状态和确定性问题数，`states` 按页面 ID 和状态 ID 提供 DOM、无障碍树、截图以及逐状态结果。较新的结果另含 Chrome/axe-core 版本、规则标签及每条规则的实际结果、axe 待复核节点、V2 行为证据及资源加载结果。
+- `site.confirmed` 为全站确定性违规数。相同问题在同一页面的多个状态间去重，跨页面独立计数。`site.attempts` 记录未完成的扫描，`pages[].issues: null` 表示没有完成的可计数结果。重扫失败后，上次的快照证据仍可查看。
+- 静态快照不会执行原站 JavaScript。动态初始状态与操作重放状态分开标注。有限的自动规则、键盘探查和页面发现不能代表全站的人工审查。

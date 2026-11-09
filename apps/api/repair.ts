@@ -115,12 +115,23 @@ export async function createProposal(pid:string,issueId:string,input:{source?:st
  const data={id:id(),projectId:pid,snapshotId:sid,issueId,patch,reason,impact:issue.description,wcag:guide.refs||[],wcagTitle:guide.title||'',wcagUrl:guide.url||issue.helpUrl,guidance:guide.guidance||'',risk:'请核对名称、图片语义与视觉效果；自动检测不能代替人工复核。',source,analysis,agentTrace,sources,before,after,status:'pending',imagePurpose:operation==='set-alt'?imagePurpose:undefined};
  db.prepare('INSERT INTO proposals VALUES(?,?,?,?,?,?,?)').run(data.id,pid,sid,issueId,'pending',JSON.stringify(data),now());return data;}
 export async function createPanoramaProposal(pid: string, input: unknown, signal: AbortSignal) {
- const {stateId, snapshotId, issueId, value} = z.object({
+ const {stateId, snapshotId, issueId, value, source} = z.object({
   stateId: z.uuid(), snapshotId: z.uuid(), issueId: z.string().regex(/^[a-f0-9]{20}$/),
-  value: z.string().trim().min(1).max(120),
+  value: z.string().trim().max(120), source:z.enum(['agent','manual']).default('manual'),
  }).parse(input);
  if (project(pid).current_snapshot !== snapshotId) throw new Error('请选择当前项目版本的状态问题。');
  const {entry, issue, site} = panoramaRepairScope(pid, snapshotId, stateId, issueId);
+ if (source === 'agent') {
+  const $ = cheerio.load(fs.readFileSync(safePath(site.dir,entry),'utf8'));
+  const target = issue.source?.key ? $() : $(issue.selector);
+  const surrounding = target.length === 1 ? target.parent().html()?.slice(0,2400) : undefined;
+  const advice = await runRepairAgent({issue:{ruleId:issue.ruleId,html:issue.html,selector:issue.selector,help:issue.help},
+    operation:'set-name',context:{surrounding}});
+  signal.throwIfAborted();
+  if (project(pid).current_snapshot !== snapshotId) throw new Error('项目版本已变化，请重新分析。');
+  return {status:'repair-review' as const,suggestedValue:advice.value?.trim().slice(0,120) || null,reason:advice.reason,sources:advice.sources};
+ }
+ if (!value) throw new Error('请填写并审核按钮的可访问名称。');
  const reason = '为已采集状态中的原生按钮添加人工确认的可访问名称。';
  const baseHash = treeHash(site.dir);
  const started = performance.now();
@@ -166,7 +177,7 @@ export async function previewProposal(proposalId: string, signal?: AbortSignal) 
   fs.cpSync(dir,copy,{recursive:true});
   if(source){
    if(treeHash(dir)!==source.baseHash)throw new Error('源文件已变化。');
-   const candidate=compileSourcePlan({dir,entry:scoped?.entry ?? p.entry,issue,engineering:p.mode!=='snapshot'},source.plan,pr.data.reason);
+   const candidate=compileSourcePlan({dir,entry:scoped?.entry ?? p.entry,issue,engineering:Boolean(scoped)||p.mode!=='snapshot'},source.plan,pr.data.reason);
    if(JSON.stringify(candidate.changes)!==JSON.stringify(pr.data.sourceReview.changes))throw new Error('补丁与预览不一致。');
    writeSourceCandidate(copy,candidate);
    target=candidate.target;
@@ -220,7 +231,7 @@ export async function applyProposal(proposalId:string,signal?:AbortSignal,semant
  if(issue.ruleId!==patch.ruleId||issue.selector!==patch.selector||patch.targetFile!==entry)throw new Error('补丁目标与问题不匹配。');
  const sourceDir=snapshotDir(pid,p.current_snapshot),file=safePath(sourceDir,patch.targetFile),before=fs.readFileSync(file,'utf8');
  const baseline=latestAudit(pid,p.current_snapshot);
- const ctx={projectId:pid,snapshotId:p.current_snapshot,dir:sourceDir,entry,issue,engineering:p.mode!=='snapshot',baseline};
+ const ctx={projectId:pid,snapshotId:p.current_snapshot,dir:sourceDir,entry,issue,engineering:Boolean(scoped)||p.mode!=='snapshot',baseline};
  let candidate:ReturnType<typeof compileSourcePlan>|undefined;
  let after=before;
  if(sourcePatch){
@@ -255,14 +266,14 @@ export async function applyProposal(proposalId:string,signal?:AbortSignal,semant
   scanned=await runAudit(pid,candidateId,signal,contrastSelector);
   if(candidate&&!scoped)sourceChecks=await checkSourceCandidate(ctx,candidate,dest,scanned,signal);
   const panoramaCheck=await verifyPanorama(pid,p.current_snapshot,dest,signal,scoped&&candidate
-   ? {stateId:scoped.recipe.id,issueId:issue.id,target:candidate.target,value:patch.value} : undefined);
+   ? {stateId:scoped.recipe.id,issueId:issue.id,target:candidate.target,value:patch.value} : undefined,candidateId);
   if(panoramaCheck)sourceChecks=[...(sourceChecks??[]),panoramaCheck];
   signal?.throwIfAborted();
  }catch(error){
  const failure={...reviewDetails,sourceChecks:null,imageReview,id:id(),projectId:pid,proposalId,fromSnapshot:p.current_snapshot,toSnapshot:candidateId,baselineAudit:baseline.id,audit:scanned?.id??null,resolved:[],remaining:baseline.issues,added:[],targetFixed:false,structurePassed:true,patch,proposalReason:pr.data.reason,analysis:pr.data.analysis,agentTrace:pr.data.agentTrace,sources:pr.data.sources,wcag:pr.data.wcag,wcagUrl:pr.data.wcagUrl,diff,status:'failed',reason:`复测无法完成，已保留原版本：${(error as Error).message}`,createdAt:now(),beforeHash,afterHash};
  db.transaction(()=>{db.prepare('INSERT INTO verifications VALUES(?,?,?,?,?,?)').run(failure.id,pid,proposalId,'failed',JSON.stringify(failure),now());db.prepare('UPDATE proposals SET status=? WHERE id=?').run('failed',proposalId);db.prepare('UPDATE snapshots SET description=? WHERE id=?').run('验证失败',candidateId)})();return failure;
  }
- const initialIds=new Set(baseline.issues.map((i:any)=>i.id)),currentIds=new Set(scanned.issues.map((i:any)=>i.id));const resolved=baseline.issues.filter((i:any)=>!currentIds.has(i.id));const remaining=baseline.issues.filter((i:any)=>currentIds.has(i.id));const added=scanned.issues.filter((i:any)=>!initialIds.has(i.id));const targetFixed=!currentIds.has(patch.issueId);const contrastPassed=patch.operation!=='set-color'||scanned.contrastCheck?.valid===true;const functionPassed=JSON.stringify(baseline.functionChecks)===JSON.stringify(scanned.functionChecks);const passed=targetFixed&&added.length===0&&contrastPassed&&functionPassed;
+ const initialIds=new Set(baseline.issues.map((i:any)=>i.id)),currentIds=new Set(scanned.issues.map((i:any)=>i.id));const resolved=baseline.issues.filter((i:any)=>!currentIds.has(i.id));const remaining=baseline.issues.filter((i:any)=>currentIds.has(i.id));const added=scanned.issues.filter((i:any)=>!initialIds.has(i.id));const targetFixed=Boolean(scoped)||!currentIds.has(patch.issueId);const contrastPassed=patch.operation!=='set-color'||scanned.contrastCheck?.valid===true;const functionPassed=JSON.stringify(baseline.functionChecks)===JSON.stringify(scanned.functionChecks);const passed=targetFixed&&added.length===0&&contrastPassed&&functionPassed;
  const report={...reviewDetails,sourceChecks,contrastBefore,imageReview,id:id(),projectId:pid,proposalId,fromSnapshot:p.current_snapshot,toSnapshot:candidateId,baselineAudit:baseline.id,audit:scanned.id,resolved,remaining,added,targetFixed,structurePassed:true,functionPassed,contrastCheck:scanned.contrastCheck,patch,proposalReason:pr.data.reason,analysis:pr.data.analysis,agentTrace:pr.data.agentTrace,sources:pr.data.sources,wcag:pr.data.wcag,wcagUrl:pr.data.wcagUrl,diff,status:passed?'passed':'failed',reason:passed?'目标问题已解决，结构与键盘聚焦检查通过，未发现新增自动检测问题。':!functionPassed?'交互控件或键盘聚焦检查发生变化，已保留原版本。':!contrastPassed?'文字对比度未通过独立核验或需要人工检查，已保留原版本。':!targetFixed?'目标问题未通过复测，已保留原版本。':'复测发现新增问题，已保留原版本。',createdAt:now(),beforeHash,afterHash};
  db.transaction(()=>{db.prepare('INSERT INTO verifications VALUES(?,?,?,?,?,?)').run(report.id,pid,proposalId,report.status,JSON.stringify(report),now());db.prepare('UPDATE proposals SET status=? WHERE id=?').run(passed?'applied':'failed',proposalId);db.prepare('UPDATE snapshots SET description=? WHERE id=?').run(passed?'已验证修复':'验证失败',candidateId);if(passed)db.prepare('UPDATE projects SET current_snapshot=? WHERE id=?').run(candidateId,pid)})();return report;
  }finally{locks.delete(pid)}}

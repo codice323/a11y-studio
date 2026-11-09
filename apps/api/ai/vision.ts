@@ -1,5 +1,5 @@
 import type { ZodType } from 'zod';
-import { collectVisualContext, type VisualTarget } from './visual-context';
+import { collectVisualContext, missingImageEvidence, type VisualTarget } from './visual-context';
 
 function visionConfig() {
   const key = process.env.AI_API_KEY?.trim();
@@ -29,7 +29,7 @@ export async function analyzeVisualContext<T>(target: VisualTarget, task: {
   if (!config.key) return {status:'unavailable' as const,reason:'视觉服务未配置 API 密钥。'};
   if (!config.supported) return {status:'unavailable' as const,reason:'当前模型未配置为支持图像输入。请使用支持视觉的模型。'};
   const evidence = await collectVisualContext(target);
-  if (!evidence) return {status:'unavailable' as const,reason:'当前快照中没有可读取的目标图像。请人工查看页面。'};
+  if (!evidence) return {status:'unavailable' as const,reason:target.mode === 'image-resource' ? missingImageEvidence : '视觉证据缺失：无法获取目标区域的浏览器像素。'};
   const content = [
     {type:'text',text:JSON.stringify({task:task.type,target:evidence.context,related:task.context})},
     {type:'image_url',image_url:{url:evidence.pixels}},

@@ -1,7 +1,7 @@
 import fs from 'node:fs';import path from 'node:path';import yauzl from 'yauzl';import {promisify} from 'node:util';
 import {buildReactProject,isReactProject} from './project-build';
 import {db,id,now,ROOT,DATA,snapshotDir,safePath,treeHash,walk} from './storage';
-const ALLOWED=new Set(['.html','.htm','.css','.png','.jpg','.jpeg','.gif','.webp']);
+const ALLOWED=new Set(['.html','.htm','.css','.png','.jpg','.jpeg','.gif','.webp','.woff','.woff2']);
 function validName(name:string, engineering=false) { if(name.startsWith('/')||name.includes('\\')||name.includes('\0')||name.split('/').some(x=>x==='..'||x==='.'||!x)||name.length>240) throw new Error('压缩包包含不安全的路径。'); if(engineering&&name.split('/').some(part=>part.startsWith('.')||part==='node_modules'))throw new Error('源码工程不能包含隐藏文件或 node_modules。'); if(!ALLOWED.has(path.extname(name).toLowerCase())&&!(engineering&&/\.(?:[jt]sx?|json|md|txt)$/i.test(name))) throw new Error(`不支持文件类型：${name}`); }
 async function extract(buffer:Buffer, dest:string, engineering:boolean) {
   const zip: yauzl.ZipFile = await new Promise((resolve,reject)=>yauzl.fromBuffer(buffer,{lazyEntries:true,autoClose:true},(err,z)=>err||!z?reject(err):resolve(z)));
@@ -27,7 +27,9 @@ export async function createProject(opts:{fixture?:string; file?:Express.Multer.
       name = opts.captured.name;
       for (const [filename, bytes] of opts.captured.files) {
         validName(filename);
-        fs.writeFileSync(safePath(dest, filename), bytes);
+        const file = safePath(dest, filename);
+        fs.mkdirSync(path.dirname(file), {recursive:true});
+        fs.writeFileSync(file, bytes);
       }
     }
     else if(opts.file){name=opts.file.originalname; const ext=path.extname(name).toLowerCase();if(ext==='.zip')await extract(opts.file.buffer,dest,Boolean(opts.engineering));else if(['.html','.htm'].includes(ext))fs.writeFileSync(path.join(dest,'index.html'),opts.file.buffer);else throw new Error('请上传 HTML 或 ZIP 文件。');}

@@ -195,6 +195,10 @@ export function isRasterImage(resource: Pick<Resource, 'type' | 'body'>) {
   return type === 'image/webp' && body.subarray(0, 4).toString('ascii') === 'RIFF' && body.subarray(8, 12).toString('ascii') === 'WEBP';
 }
 
+const embeddedRaster = /^data:image\/(?:png|gif|jpeg|webp);base64,[a-z0-9+/=]+$/i;
+const embeddedFont = /^data:font\/woff2?;base64,[a-z0-9+/=]+$/i;
+const fontExtensions: Record<string, string> = {'font/woff':'woff','font/woff2':'woff2','application/font-woff':'woff'};
+
 function resourceUrl(reference: string, base: URL) {
   try { return new URL(reference, base); } catch { return null; }
 }
@@ -211,7 +215,7 @@ async function rewriteCss(source: string, base: URL, image: (reference: string, 
     if (!tokens.length) return;
     updates.push(Promise.all(tokens.map(async token => {
       const reference = token[1] ?? token[2] ?? token[3];
-      if (reference.startsWith('#')) return token[0];
+      if (reference.startsWith('#') || (embeddedRaster.test(reference) || embeddedFont.test(reference))) return token[0];
       const file = await image(reference, base);
       return file ? `url("${file}")` : 'none';
     })).then(replacements => {
@@ -227,7 +231,7 @@ async function rewriteCss(source: string, base: URL, image: (reference: string, 
   return css.toString();
 }
 
-async function renderPage(initial: Resource, budget: Budget, total: AbortSignal, fallbackCache: DnsFallbackCache) {
+async function renderPage(initial: Resource, budget: Budget, total: AbortSignal, fallbackCache: DnsFallbackCache, documentOrigin?: string, destination?: URL) {
   const candidates = [process.env.CHROME_PATH, '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome', '/usr/bin/chromium', '/usr/bin/chromium-browser', '/usr/bin/google-chrome'].filter(Boolean) as string[];
   const executablePath = candidates.find(candidate => fs.existsSync(candidate));
   if (!executablePath) throw new Error('未找到 Chromium 或 Chrome，请设置 CHROME_PATH。');
@@ -254,12 +258,18 @@ async function renderPage(initial: Resource, budget: Budget, total: AbortSignal,
       try {
         if (request.method() !== 'GET' || ++requests > 100) { blocked++; await route.abort(); return; }
         const requested = parseUrl(request.url());
+        if (destination && request.isNavigationRequest() &&
+            requested.href !== initial.url.href && requested.href !== destination.href) {
+          blocked++;
+          await route.abort();
+          return;
+        }
         // Every outbound request is made by the server through the same public-IP
         // validation and pinned DNS connection as static imports. The browser never connects directly.
         const resource = initialPending && requested.href === initial.url.href
-          ? initial : await fetchResource(requested, 3 * 1024 * 1024, budget, total, fallbackCache);
+          ? initial : await fetchResource(requested, 3 * 1024 * 1024, budget, total, fallbackCache, request.isNavigationRequest() ? documentOrigin : undefined);
         initialPending = false;
-        if (['stylesheet', 'image'].includes(request.resourceType())) resources.set(requested.href, resource);
+        if (['stylesheet', 'image', 'font'].includes(request.resourceType())) resources.set(requested.href, resource);
         await route.fulfill({ status: 200, contentType: resource.contentType || 'application/octet-stream', body: resource.body,
           headers: { 'Cache-Control': 'no-store', 'Access-Control-Allow-Origin': '*' } });
       } catch { blocked++; await route.abort().catch(() => {}); }
@@ -270,10 +280,29 @@ async function renderPage(initial: Resource, budget: Budget, total: AbortSignal,
     // Allow asynchronous application rendering without waiting forever for polling.
     await page.waitForLoadState('networkidle', { timeout: 6000 }).catch(() => {});
     await page.waitForTimeout(1000);
+    if (destination) {
+      const links = page.locator('nav a[href], [role=navigation] a[href]');
+      const matches = await links.evaluateAll((nodes, expected) => nodes.flatMap((node,index) => {
+        const anchor = node as HTMLAnchorElement;
+        const url = new URL(anchor.href);
+        url.hash = '';
+        return url.href === expected && !anchor.hasAttribute('download') &&
+          (!anchor.target || anchor.target === '_self') && anchor.getClientRects().length > 0 ? [index] : [];
+      }), destination.href);
+      if (matches.length !== 1) throw new Error('无法唯一定位可见的同源导航链接。');
+      await links.nth(matches[0]).click({timeout:3500});
+      await page.waitForURL(url => url.origin === destination.origin && url.pathname === destination.pathname && !url.search, {timeout:4500});
+      await page.waitForLoadState('networkidle',{timeout:2500}).catch(()=>{});
+    }
     total.throwIfAborted();
     // CSS-in-JS libraries often insert rules into CSSOM without updating the
     // <style> text node. Materialize accessible inline rules before serialization.
     await page.evaluate(() => {
+      for (const image of document.images) if (image.currentSrc && image.complete && image.naturalWidth) {
+        image.setAttribute('src', image.currentSrc);
+        image.removeAttribute('srcset');
+        image.closest('picture')?.querySelectorAll('source').forEach(source => source.remove());
+      }
       for (const element of document.querySelectorAll('style')) {
         try {
           const rules = element.sheet?.cssRules;
@@ -291,15 +320,13 @@ async function renderPage(initial: Resource, budget: Budget, total: AbortSignal,
   }
 }
 
-export async function captureUrlSnapshot(input: string, signal?: AbortSignal, mode: 'static' | 'rendered' = 'static') {
-  const deadline = AbortSignal.timeout(mode === 'rendered' ? 45000 : 20000);
-  const total = signal ? AbortSignal.any([signal, deadline]) : deadline;
-  const budget = { remaining: mode === 'rendered' ? 24 * 1024 * 1024 : MAX_TOTAL };
-  const fallbackCache: DnsFallbackCache = new Map();
-  let page = await fetchResource(input, MAX_HTML, budget, total, fallbackCache);
+async function captureUrlPage(input: string | URL, total: AbortSignal, mode: 'static' | 'rendered',
+  budget: Budget, fallbackCache: DnsFallbackCache, origin?: string, destination?: URL) {
+  let page = await fetchResource(input, MAX_HTML, budget, total, fallbackCache, origin);
   if (!['text/html', 'application/xhtml+xml'].includes(page.type)) throw new Error('该地址返回的不是 HTML 网页。');
-  const rendered = mode === 'rendered' ? await renderPage(page, budget, total, fallbackCache) : undefined;
+  const rendered = mode === 'rendered' ? await renderPage(page, budget, total, fallbackCache, origin, destination) : undefined;
   if (rendered) page = rendered.page;
+  if (origin && page.url.origin !== origin) throw new Error('后续页面导航超出源站。');
   const $ = cheerio.load(asText(page));
   const files = new Map<string, Buffer>();
   const imageRequests = new Map<string, Promise<string | null>>();
@@ -321,23 +348,27 @@ export async function captureUrlSnapshot(input: string, signal?: AbortSignal, mo
       ? Promise.resolve(rendered.resources.get(url.href)!)
       : fetchResource(url, MAX_IMAGE, budget, total, fallbackCache, mode === 'static' ? page.url.origin : undefined)).then(result => {
       if (result.body.length > MAX_IMAGE) throw new Error('图片超过大小限制。');
-      if (!isRasterImage(result)) throw new Error('图片格式不受支持。');
-      const name = `image-${slot}.${imageExtensions[result.type]}`;
+      const font = fontExtensions[result.type];
+      const validFont = font && result.body.subarray(0, 4).toString('ascii') === (font === 'woff2' ? 'wOF2' : 'wOFF');
+      if (!isRasterImage(result) && !validFont) throw new Error('资源格式不受支持。');
+      const name = `${validFont ? 'font' : 'image'}-${slot}.${validFont ? font : imageExtensions[result.type]}`;
       files.set(name, result.body);
-      images++;
+      if (!validFont) images++;
       return name;
     }).catch(() => { skip(); return null; });
     imageRequests.set(url.href, task);
     return task;
   }
 
-  $('script, iframe, frame, frameset, object, embed, base, meta[http-equiv], portal, animate, animateMotion, animateTransform, set, audio, video, source, track').remove();
+  $('script, iframe, frame, frameset, object, embed, base, meta[http-equiv], portal, animate, animateMotion, animateTransform, set, audio, video, track').remove();
+  $('source').not('picture source').remove();
   // Remove active navigation and network attributes before saving an exportable document.
   $('*').each((_, element) => {
     if (!('attribs' in element)) return;
     const node = $(element);
     for (const attribute of Object.keys(element.attribs)) {
       if (/^on/i.test(attribute) || /^(?:srcdoc|ping|srcset|imagesrcset|imagesizes|action|formaction|background|attributionsrc|src|href|xlink:href)$/i.test(attribute)) {
+        if (['srcset','sizes'].includes(attribute) && ['img','source'].includes(element.name)) continue;
         if (attribute === 'src' && (element.name === 'img' || (element.name === 'input' && node.attr('type')?.toLowerCase() === 'image'))) continue;
         if (attribute === 'href' && ['a', 'area', 'link'].includes(element.name)) continue;
         if ((attribute === 'href' || attribute === 'xlink:href') && node.attr(attribute)?.startsWith('#')) continue;
@@ -392,17 +423,101 @@ export async function captureUrlSnapshot(input: string, signal?: AbortSignal, mo
     if (name) node.attr('src', name);
     else node.removeAttr('src');
   });
-  await Promise.all([...styleTasks, ...inlineTasks, ...imageTasks]);
-  signal?.throwIfAborted();
+  const responsiveTasks = $('img[srcset], picture source[srcset]').toArray().map(async element => {
+    const node = $(element);
+    // A candidate URL may contain commas (notably a data URL); the descriptor is separated by whitespace.
+    const srcset = node.attr('srcset') ?? '';
+    const candidates = [...srcset.matchAll(/(?:^|,\s*)((?:data:[^\s]+|[^\s,]+))(?:\s+(\d+w|[\d.]+x))?\s*(?=,|$)/g)].slice(0, 8);
+    const saved = await Promise.all(candidates.map(async ([, reference, descriptor]) => {
+      const file = embeddedRaster.test(reference) ? reference : await image(reference, page.url);
+      return file ? file + (descriptor ? ' ' + descriptor : '') : null;
+    }));
+    const next = saved.filter(Boolean).join(', ');
+    if (next) node.attr('srcset', next);
+    else node.removeAttr('srcset');
+  });
+  await Promise.all([...styleTasks, ...inlineTasks, ...imageTasks, ...responsiveTasks]);
+  total.throwIfAborted();
 
   // The scanner supplies its own equivalent policy. This one also protects the exported page.
   $('meta[charset]').remove();
-  $('head').prepend('<meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="default-src \'none\'; style-src \'self\' \'unsafe-inline\'; img-src \'self\' data:; form-action \'none\'; base-uri \'none\'">');
+  $('head').prepend('<meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="default-src \'none\'; style-src \'self\' \'unsafe-inline\'; img-src \'self\' data:; font-src \'self\' data:; form-action \'none\'; base-uri \'none\'">');
   const html = $.html();
   if (Buffer.byteLength(html) > MAX_HTML) throw new Error('保存后的网页超过大小限制。');
   files.set('index.html', Buffer.from(html));
   const title = $('title').text().replace(/\s+/g, ' ').trim().slice(0, 80);
   const empty = !$('body').text().trim() && !$('body img, body input, body button, body svg, body canvas, body video').length;
-  return { name: title ? `${title} · ${page.url.hostname}` : page.url.hostname, files, assets: { stylesheets, images, skipped },
+  return { url: page.url, from: destination ? new URL(input).pathname : undefined, name: title ? `${title} · ${page.url.hostname}` : page.url.hostname, files, assets: { stylesheets, images, skipped },
     ...(rendered ? { rendering: { mode, requests: rendered.requests, blocked: rendered.blocked, empty } } : {}) };
+}
+
+// Same-origin, two levels, six documents, one time and byte budget. Only explicit
+// navigation landmarks are followed when the user enables discovery.
+export async function captureUrlSnapshot(input: string, signal?: AbortSignal, mode: 'static' | 'rendered' = 'static', discover = false) {
+  const total = AbortSignal.any([...(signal ? [signal] : []), AbortSignal.timeout(discover ? 55000 : mode === 'rendered' ? 45000 : 20000)]);
+  const budget = {remaining: mode === 'rendered' ? 24 * 1024 * 1024 : MAX_TOTAL};
+  const cache: DnsFallbackCache = new Map();
+  const home = await captureUrlPage(input, total, mode, budget, cache);
+  if (!discover) return home;
+  const pages = [home];
+  const pageKey = (url: URL) => url.origin + url.pathname.replace(/\/index\.html?$/i, '/') + url.search;
+  const queued = new Set([pageKey(home.url)]);
+  const queue: {url: URL; parent:URL; depth: number}[] = [];
+  const failures: {path:string; reason:string}[] = [];
+  const enqueue = (page: typeof home, depth: number) => {
+    if (depth > 2) return;
+    const $ = cheerio.load(page.files.get('index.html')!.toString());
+    for (const element of $('nav a[href], [role=navigation] a[href]').toArray()) {
+      const url = resourceUrl($(element).attr('href') ?? '', page.url);
+      if (!url || url.origin !== home.url.origin || url.search ||
+          /(?:^|[\W_])(?:logout|signout|delete|remove|purchase|checkout|unsubscribe)(?:[\W_]|$)/i.test(url.pathname)) continue;
+      url.hash = '';
+      if (queued.has(pageKey(url)) || queued.size >= 18) continue;
+      queued.add(pageKey(url));
+      queue.push({url, parent:page.url, depth});
+    }
+  };
+  enqueue(home, 1);
+  for (let attempted = 0; queue.length && attempted < 5 && !total.aborted; attempted++) {
+    const {url,parent,depth} = queue.shift()!;
+    try {
+      const page = await captureUrlPage(mode === 'rendered' ? parent : url, total, mode, budget, cache,
+        home.url.origin, mode === 'rendered' ? url : undefined);
+      if (!pages.some(item => item.url.href === page.url.href)) {
+        pages.push(page);
+        enqueue(page, depth + 1);
+      }
+    } catch (error) {
+      failures.push({path:url.pathname,reason:(error as Error).message});
+    }
+  }
+  signal?.throwIfAborted();
+  const names = new Map(pages.map((page, index) => [pageKey(page.url), index ? `page-${index}/index.html` : 'index.html']));
+  const files = new Map<string, Buffer>();
+  pages.forEach((page, index) => {
+    const $ = cheerio.load(page.files.get('index.html')!.toString());
+    $('a[href], area[href]').each((_, element) => {
+      const node = $(element);
+      const url = resourceUrl(node.attr('href')!, page.url);
+      if (!url) return;
+      const hash = url.hash;
+      url.hash = '';
+      const name = names.get(pageKey(url));
+      if (name) node.attr('href', name + hash);
+    });
+    if (index) $('a[href], area[href]').each((_, element) => {
+      const node = $(element);
+      const href = node.attr('href')!;
+      if (/^(?:page-\d+\/)?index\.html(?:#|$)/.test(href)) node.attr('href', '../' + href);
+    });
+    $('html').attr('data-captured-path',page.url.pathname);
+    if (page.from) $('html').attr('data-captured-from',page.from);
+    files.set(names.get(pageKey(page.url))!, Buffer.from($.html()));
+    for (const [file, bytes] of page.files) if (file !== 'index.html') files.set(index ? `page-${index}/${file}` : file, bytes);
+  });
+  return {...home, files, assets: {
+    stylesheets:pages.reduce((sum,page)=>sum+page.assets.stylesheets,0),
+    images:pages.reduce((sum,page)=>sum+page.assets.images,0),
+    skipped:pages.reduce((sum,page)=>sum+page.assets.skipped,0),
+  }, discovery:{pages:pages.length,failed:failures,unchecked:queue.length}};
 }

@@ -105,7 +105,6 @@ test('URL 快照从首页导入，经真实扫描、修复和三视图复测后�
       await page.getByLabel('公开网页地址').fill('http://93.184.216.34/page');
       await page.getByRole('button', { name: '导入 URL 并检测' }).click();
       await page.getByText(/URL 快照已导入并完成检测/).waitFor({ timeout: 15000 });
-      await page.getByRole('button', {name: '精准修复', exact: true}).click();
       assert.deepEqual(hits.slice(1).sort(), ['/page', '/sample.png', '/theme.css']);
       await page.setViewportSize({ width: 1440, height: 900 });
       const [controls, evidence] = await page.locator('.workbench > div').evaluateAll(columns =>
@@ -226,7 +225,7 @@ test('URL 快照从首页导入，经真实扫描、修复和三视图复测后�
       await page.getByRole('button', { name: '结果报告', exact: true }).click();
       assert.equal(await page.locator('.metrics > div').count(), 4);
       await page.getByRole('heading', { name: 'V2 检测证据' }).waitFor();
-      assert.ok(await page.getByText('#skipped', { exact: true }).isVisible());
+      assert.ok(await page.getByText('#skipped', { exact: true }).filter({ visible: true }).isVisible());
       assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
       await page.getByRole('button', { name: /按钮缺少名称.*查看证据/ }).click();
       await page.getByRole('button', { name: '无障碍语义' }).click();
@@ -351,7 +350,6 @@ test('真实快照可双向对比，分叉及切换项目后仍使用正确的�
       const summary = page.getByRole('region', { name: '版本差异摘要' });
       const open = async (name: string) => {
         await page.locator('.recent-list').getByRole('button', { name }).click();
-        await page.getByRole('button', {name: '精准修复', exact: true}).click();
       };
       const show = async (name: string) => {
         if (name === '代码变更' && !await evidence.locator('.developer-options').evaluate(element => (element as HTMLDetailsElement).open)) {
@@ -368,10 +366,12 @@ test('真实快照可双向对比，分叉及切换项目后仍使用正确的�
       };
       await page.goto(base);
       await open('慢绿生活');
+      await show('无障碍语义');
       await summary.waitFor();
       assert.equal(await left.inputValue(), v0);
       assert.equal(await right.inputValue(), v3);
       assert.match(await summary.innerText(), /右侧不再报告 3 个问题/);
+      await show('页面对照');
       const original = await waitForImages();
       assert.notEqual(original[0], original[1]);
       if (process.env.A11Y_COMPARE_SCREENSHOT) await page.screenshot({ path: process.env.A11Y_COMPARE_SCREENSHOT });

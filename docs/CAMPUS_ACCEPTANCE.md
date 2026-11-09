@@ -7,7 +7,7 @@
 | HTML | `campus-single.html` | 一个文件，内嵌 CSS 和资源，六个内容区使用页内锚点。工作台只有一个采集页面。 |
 | ZIP | `campus-multipage.zip` | 根目录入口和五个相对路径子页，外部共享 CSS 和本地 PNG。工作台可选六页，按静态快照处理。普通 ZIP 拒绝 JS 文件，子页独立源码修复和跨文件补丁不在此入口覆盖范围内。 |
 | 源码工程 | `campus-react-source.zip` | React、Vite、TypeScript。A11y Studio 用受控 esbuild 编译和 AST 定位，导出项目可由 Vite 重建。仅允许 React、React DOM 作为应用依赖，不运行上传者的构建命令或插件。 |
-| URL | `url-site/` | 普通 HTTP 源站提供六页、CSS、图片、JS 和 JSON。静态模式保留离线公告，渲染模式保留 JS 执行后的实时公告。工作台保存单页快照，不会递归采集子页或恢复运行时交互。 |
+| URL | `url-site/` | 普通 HTTP 源站提供六页、CSS、图片、JS 和 JSON。静态模式保留离线公告，渲染模式保留 JS 执行后的实时公告。默认保存入口快照。勾选同源导航采集后最多保存六页；导入后仅浏览静态副本。 |
 
 普通 ZIP 可上传 HTML/HTM、CSS、PNG、JPEG、GIF 和 WebP。源码工程在此基础上接受受限 JS/TS/JSX/TSX、JSON、Markdown 和文本，支持静态工程与上述受限 React 工程。上传压缩文件最大 8 MB，解压最多 100 个文件、总计 20 MB。单 HTML/HTM 上传使用工作台内建的 `index.html` 快照名称。
 
@@ -55,7 +55,7 @@ URL 自动验收复用测试进程的固定源站映射。导入器仍运行真�
 |---|---|
 | 1. 导入 | HTML 拒绝错投的 ZIP，普通 ZIP 拒绝 JS 文件，源码工程拒绝额外运行依赖，URL 两个模式均拒绝私网重定向。五个场景都可在同一入口恢复、看到进度并导入成功。 |
 | 2. 首次检测 | 五个入口场景各检出 4 项标注的 axe 违规，共 20 个匹配。三项辅助证据分别为悬空 ARIA 引用、不可见焦点和正 tabindex。目标尺寸、弹窗焦点与媒体留在人工复核范围。 |
-| 3. 全景浏览 | ZIP 列出六页，可切到课程报名页。React 重放到「个人中心 → 我的设置 → 编辑资料」，浏览器语义含弹窗。HTML 与两类 URL 各有一个可查看的快照。 |
+| 3. 页面与状态对照 | ZIP 列出六页，可切到课程报名页。React 重放到「个人中心 → 我的设置 → 编辑资料」，浏览器语义含弹窗。HTML 与两类 URL 各有一个可查看的快照。 |
 | 4. AI 与人工编辑 | 五次视觉 Mock 均收到图像数据和页面上下文。四个快照场景的第二项修复都使用了可编辑的标签建议。React 对比度修复使用两轮 Agent Mock 调用，并执行实际的工具读取、构建和复测。 |
 | 5. 补丁预览 | 文件差异显示实际写入的内容。快照修改 `index.html`，源码工程修改 `src/campus.tsx` 和 `src/campus.css`。 |
 | 6. 应用与复测 | 共 10 次成功修复，五个 V2 均未新增扫描违规。故意降低对比度的 HTML 补丁被拒绝，项目保留先前 V2。 |
@@ -67,3 +67,12 @@ URL 自动验收复用测试进程的固定源站映射。导入器仍运行真�
 本轮修正了导入页拖放或文件选取可绕过当前 HTML/ZIP 入口文件类型提示的问题。当前保留的主要产品缺口是普通 ZIP 的跨页、跨文件修复能力，URL 的多页与交互采集，以及隔离预览中的媒体复核能力。
 
 最终核对通过了 `npm run test:campus`、`npm run typecheck` 和 `npm run build`。既有 `npm test` 回归共 28 项，全部通过。
+
+### 逐页面扫描与子页补丁回归
+
+先构建前端。使用空的测试数据目录启动独立服务，例如 `PORT=4189 A11Y_DATA_DIR="$(mktemp -d)" node --import tsx apps/api/server.ts`。Chrome 路径可通过 `CHROME_PATH` 设置。
+
+- `node tests/campus-site-accountability.e2e.mjs` 从校园 ZIP 生成独立的五处植入副本，验证每页独立证据、问题不串页、子页补丁、版本与重新检测。
+- `node tests/campus-site-accountability.e2e.mjs --independent` 验证编码路径、链接别名、干净的负例、跨页面独立计数及页面检测失败。
+- `node tests/campus-site-accountability.e2e.mjs --live` 通过现有本机工作台重新扫描原校园 ZIP 项目。可用 `A11Y_SITE_ORIGIN` 指定服务，`A11Y_CAMPUS_ZIP` 指定原 ZIP，`A11Y_SITE_EVIDENCE` 指定输出目录。
+- 只有显式设置 `A11Y_SITE_REAL_AI=1` 且测试服务配置了模型时，植入副本才调用真实模型。人工复核和补丁验证始终由真实浏览器执行。

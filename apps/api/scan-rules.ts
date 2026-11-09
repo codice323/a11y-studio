@@ -29,6 +29,8 @@ export async function scanRules(page: Page, extended = true) {
   const results = await builder.analyze();
   return {
     ...classifyAxeResults(results, extended),
+    rules: (['violations', 'incomplete', 'passes', 'inapplicable'] as const).flatMap(outcome =>
+      results[outcome].map(rule => ({ id: rule.id, outcome }))),
     engine: { name: results.testEngine.name, version: results.testEngine.version, tags },
   };
 }

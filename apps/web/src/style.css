@@ -447,11 +447,11 @@ footer { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 8p
 .semantic-table th { overflow-wrap: anywhere; }
 
 /* Panorama uses the same workspace panels and version controls as precise repair. */
-.panorama, .panorama-readonly { padding: 16px; margin-bottom: 14px; }
+.panorama { margin-block: 8px; }
+.screen-reader-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
 .panorama-heading, .panorama-bar { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; }
 .panorama-heading { justify-content: space-between; }
 .panorama-heading h2, .panorama-heading p { margin: 0 0 5px; }
-.workbench-modes { margin: 12px 0; }
 .panorama-bar [aria-pressed="true"] { color: var(--ink); background: #dce8ff; border-color: #95aee5; }
 .panorama-bar label, .panorama-tree label { display: flex; align-items: center; gap: 5px; font-size: 13px; }
 .panorama-bar select, .panorama-bar input, .panorama-tree select { max-width: 100%; }
@@ -482,3 +482,5 @@ footer { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 8p
 @media (max-width: 580px) {
   .panorama-pair { grid-template-columns: minmax(0, 1fr); }
 }
+
+.import-resource-warning { padding: 10px 14px; margin-block: 8px; }

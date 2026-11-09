@@ -119,7 +119,6 @@ test('静态与 React 源码工程经真实工作台审核、复测和独立 Vit
           if (attempt === 80) assert.fail('未完成首轮扫描：' + await page.locator('body').innerText());
           await delay(125);
         }
-        await page.getByRole('button', {name: '精准修复', exact: true}).click();
         for (const [index, repair] of fixture.repairs.entries()) {
           const step = performance.now();
           await page.getByRole('tab', { name: '问题与历史' }).click();

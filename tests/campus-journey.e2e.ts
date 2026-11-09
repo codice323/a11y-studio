@@ -25,6 +25,8 @@ const modes=[
   {id:'url-rendered',tab:'URL',actor:'无障碍体验审核',rendered:true},
 ] as const;
 type Mode=typeof modes[number];
+const selected = process.env.CAMPUS_MODES?.split(',');
+const testedModes = selected ? modes.filter(mode => selected.includes(mode.id)) : modes;
 type Scenario={mode:Mode;page:Page;id:string;original:string;previous?:string;requests:{method:string;url:string;status:number;error?:string}[]};
 let agentCalls=0;
 const visionCalls:{model:string;mime:string;bytes:number;contextPresent:boolean}[]=[];
@@ -50,8 +52,8 @@ async function stop(service:ChildProcess) {
     service.kill('SIGKILL'); await exit;
   }
 }
-function precise(page:Page){return page.getByRole('button',{name:'精准修复',exact:true}).click();}
-function panorama(page:Page){return page.getByRole('region',{name:'全景交互浏览',exact:true});}
+function precise(page:Page){return page.getByRole('tab',{name:'问题与历史'}).waitFor();}
+function panorama(page:Page){return page.getByRole('region',{name:'修复效果对比',exact:true});}
 async function panoramaReady(page:Page){
   await panorama(page).getByText(/左右已匹配同一页面和状态/).waitFor();
 }
@@ -65,7 +67,7 @@ async function apply(page:Page){
   const confirmation=page.getByRole('dialog').getByRole('checkbox');
   if(await confirmation.count())await confirmation.check();
   await page.getByRole('button',{name:'确认应用并复测',exact:true}).click();
-  await page.getByText(/已应用 · 本次修复版本/).waitFor();
+  await page.getByText(/已应用 · 本次修复版本/).waitFor({timeout:70000});
 }
 async function seeDiff(page:Page){
   const options=page.locator('.developer-options');
@@ -74,6 +76,8 @@ async function seeDiff(page:Page){
 }
 async function step(page:Page,name:string){
   const panel=panorama(page);
+  const disclosure = panel.locator('summary').filter({hasText:/^记录安全操作$/});
+  if (!await disclosure.evaluate(node => (node.parentElement as HTMLDetailsElement).open)) await disclosure.click();
   const picker=panel.getByLabel('控件',{exact:true});
   const option=picker.getByRole('option').filter({hasText:new RegExp('^'+name+' \\(')});
   const before=await panel.getByLabel('交互状态').inputValue();
@@ -89,6 +93,7 @@ async function saveJson(file:string,data:unknown){await fs.writeFile(path.join(o
 
 test('校园综合服务平台按用户操作顺序验收四种导入入口', {timeout:600_000}, async()=>{
   assert.ok(Number.isInteger(maxStage)&&maxStage>=1&&maxStage<=5);
+  assert.ok(testedModes.length > 0 && (!selected || selected.every(id=>testedModes.some(mode=>mode.id===id))));
   const scratch=await fs.mkdtemp(path.join(os.tmpdir(),'a11y-campus-'));
   await fs.mkdir(out,{recursive:true});
   const fixtures=await campusFixtures(path.join(scratch,'fixtures'));
@@ -172,7 +177,7 @@ test('校园综合服务平台按用户操作顺序验收四种导入入口', {t
     }
     const browser=await chromium.launch({executablePath:chrome,headless:true});
     try{
-      for(const mode of modes){
+      for(const mode of testedModes){
         const page=await browser.newPage({viewport:{width:1400,height:900},acceptDownloads:true});
         page.setDefaultTimeout(28_000);
         const scenario:Scenario={mode,page,id:'',original:'',requests:[]};
@@ -199,6 +204,7 @@ test('校园综合服务平台按用户操作顺序验收四种导入入口', {t
             await alert.getByText(/非公网/).waitFor();
             rejection=await alert.innerText();
             await page.screenshot({path:path.join(out,'stage-1-'+mode.id+'-rejected.png')});
+            await page.getByLabel(/同时采集同源导航页/).check();
             await url.fill('http://93.184.216.34/');
             await page.getByRole('button',{name:'导入 URL 并检测'}).click();
           }else{
@@ -262,16 +268,28 @@ test('校园综合服务平台按用户操作顺序验收四种导入入口', {t
 
       if(maxStage>=3)for(const s of scenarios)await record(3,s,async()=>{
         const {page}=s;
-        await page.getByRole('button',{name:'全景交互浏览',exact:true}).click();
+        await page.getByRole('button',{name:'页面对照',exact:true}).click();
         await panoramaReady(page);
         const panel=panorama(page);
         const picker=panel.getByLabel('页面',{exact:true});
+        assert.equal(await page.getByRole('button',{name:'全景交互浏览',exact:true}).count(),0);
+        assert.equal(await panel.getByRole('region',{name:'当前状态问题'}).count(),0);
+        await panel.locator('.shots img').nth(1).waitFor();
+        await page.getByRole('tab',{name:'问题与历史'}).click();
+        await panel.getByRole('button',{name:'检测已发现页面'}).click();
+        const expected = s.mode.id==='html'?1:6;
+        await page.getByText(new RegExp('已检测 '+expected+'/'+expected+' 个已发现页面')).waitFor({timeout:125000});
+        await panoramaReady(page);
         const pages=await picker.getByRole('option').allTextContents();
+        assert.equal(pages.length,expected);
+        const coverage=await (await page.request.get(origin+'/api/projects/'+s.id+'/panorama?'+new URLSearchParams({left:s.original,right:s.original}))).json();
+        const findings=coverage.recipes.map((recipe:{path:string;counts:Record<string,number>})=>({page:recipe.path,issues:recipe.counts[s.original]}));
+        assert.equal(new Set(findings.filter((item:{issues?:number})=>item.issues!==undefined).map((item:{page:string})=>item.page)).size,expected);
         if(s.mode.id==='zip'){
           assert.equal(pages.length,6);
           await picker.selectOption('/pages/enroll.html');
           await panoramaReady(page);
-          await panel.getByRole('button',{name:'语义对比',exact:true}).click();
+          await panel.getByRole('button',{name:'无障碍语义',exact:true}).click();
           assert.match(await panel.locator('.panorama-pair pre').first().innerText(),/课程报名/);
           await picker.selectOption('/index.html');
           await panoramaReady(page);
@@ -279,21 +297,19 @@ test('校园综合服务平台按用户操作顺序验收四种导入入口', {t
           await step(page,'个人中心');
           await step(page,'我的设置');
           await step(page,'编辑资料');
-          await panel.getByRole('button',{name:'语义对比',exact:true}).click();
+          await panel.getByRole('button',{name:'无障碍语义',exact:true}).click();
           assert.match(await panel.locator('.panorama-pair pre').first().innerText(),/dialog "编辑资料"/);
           await page.screenshot({path:path.join(out,'stage-3-source-dialog.png'),fullPage:true});
           await picker.selectOption('/index.html');
           await panoramaReady(page);
-        }else{
-          assert.equal(pages.length,1);
         }
         if(s.mode.id!=='source'){
-          assert.match(await panel.innerText(),/静态快照，仅支持浏览已采集状态/);
+          await page.getByText(/静态快照，仅检测可用页面/).waitFor();
           assert.equal(await panel.getByRole('group',{name:'记录安全操作'}).count(),0);
         }
-        await panel.getByRole('button',{name:'视觉对比',exact:true}).click();
-        await panel.locator('.panorama-pair img').first().waitFor();
-        return {steps:['打开全景','检查页面树','验证模式支持的状态','返回首页'],pages,
+        await panel.getByRole('button',{name:'页面对照',exact:true}).click();
+        await panel.locator('.shots img').first().waitFor();
+        return {steps:['打开页面对照','批量检测页面','验证模式支持的状态','返回首页'],pages,findings,
           interaction:s.mode.id==='source'?'个人中心 → 我的设置 → 编辑资料，双侧语义含 dialog':'静态快照'};
       });
       if(maxStage>=3)console.log('阶段 3：ZIP 六页、源码路由与弹窗、HTML/URL 快照边界已验收。');
@@ -317,7 +333,7 @@ test('校园综合服务平台按用户操作顺序验收四种导入入口', {t
         return {steps:['选中图片','触发 Mock 多模态调用','选择内容性图片','编辑建议','检查真实 Diff'],
           model:visionCalls.at(-1),candidate:await value.inputValue(),diff:await diff.innerText(),human:'说明应符合实际页面用途'};
       });
-      if(maxStage>=4)console.log('阶段 4：五次 Mock 视觉调用均检查真实像素与校园上下文，补丁含真实文件差异。');
+      if(maxStage>=4)console.log(`阶段 4：${visionCalls.length} 次 Mock 视觉调用均检查真实像素与校园上下文，补丁含真实文件差异。`);
 
       if(maxStage>=5)for(const s of scenarios)await record(5,s,async()=>{
         const {page}=s;
@@ -350,13 +366,14 @@ test('校园综合服务平台按用户操作顺序验收四种导入入口', {t
         await page.getByLabel('版本名称').fill('校园验收 V2');
         await page.getByRole('button',{name:'保存',exact:true}).click();
         await page.getByText('版本名称已保存。').waitFor();
+        await page.getByRole('button',{name:'自由版本对比',exact:true}).click();
 
-        await page.getByRole('button',{name:'全景交互浏览',exact:true}).click();
+        await page.getByRole('button',{name:'页面对照',exact:true}).click();
         await panoramaReady(page);
         const panel=panorama(page);
-        assert.equal(await panel.getByLabel('全景左侧版本').inputValue(),s.original);
-        assert.equal(await panel.getByLabel('全景右侧版本').inputValue(),current);
-        await panel.getByLabel('全景左侧版本').selectOption(s.previous!);
+        assert.equal(await panel.getByLabel('左侧版本').inputValue(),s.original);
+        assert.equal(await panel.getByLabel('右侧版本').inputValue(),current);
+        await panel.getByLabel('左侧版本').selectOption(s.previous!);
         await panoramaReady(page);
         assert.equal((await readProject(s.id)).project.currentSnapshot,current);
         await page.getByLabel('切换项目版本').selectOption(s.original);
@@ -391,6 +408,8 @@ test('校园综合服务平台按用户操作顺序验收四种导入入口', {t
         const archived=unzipSync(await fs.readFile(zipfile));
         const report=JSON.parse(strFromU8(archived['report/report.json']));
         assert.equal(report.project.currentSnapshot,current);
+        assert.ok(Array.isArray(report.site.states));
+        if(s.mode.id==='url-rendered') assert.match(strFromU8(archived['website/page-1/index.html']),/data-captured-from=/);
         assert.equal(report.verifications.length,rejectedPatch?3:2);
         assert.equal(report.verifications.filter(item=>item.status==='passed'&&item.diff).length,2);
         assert.equal(report.verifications.filter(item=>item.status==='failed').length,rejectedPatch?1:0);
@@ -413,7 +432,8 @@ test('校园综合服务平台按用户操作顺序验收四种导入入口', {t
           await offline.goto('http://127.0.0.1:'+(serve.address() as AddressInfo).port);
           const image=offline.getByRole('img',{name:'蓝色教学楼旁有两棵绿树，天空中有太阳'});
           await image.waitFor();
-          assert.ok(await image.evaluate(node=>(node as HTMLImageElement).naturalWidth>0));
+          await offline.waitForFunction(()=>(document.querySelector<HTMLImageElement>('#campus-hero')?.naturalWidth??0)>0);
+          assert.equal(await offline.locator('header').evaluate(node=>getComputedStyle(node).backgroundColor),'rgb(18, 51, 75)');
           if(s.mode.id==='source'){
             await offline.getByRole('link',{name:'课程中心',exact:true}).click();
             await offline.getByRole('heading',{name:'课程中心',exact:true}).waitFor();
@@ -449,7 +469,7 @@ test('校园综合服务平台按用户操作顺序验收四种导入入口', {t
           labelDecision,rejectedPatch,export:zipfile};
       });
       if(maxStage>=5){
-        assert.equal(agentCalls,2);
+        assert.equal(agentCalls,testedModes.some(mode=>mode.id==='source') ? 2 : 0);
         console.log('阶段 5：两次应用、失败补丁保留原版本、版本命名/对照/回退、ZIP 下载和离线打开全部通过。');
       }
     }finally{await browser.close();}

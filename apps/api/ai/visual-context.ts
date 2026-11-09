@@ -27,6 +27,8 @@ function snapshotPixels(directory: string, source: string) {
   } catch { return null; }
 }
 
+export const missingImageEvidence = '视觉证据缺失：浏览器未能解码目标图片。若只上传了 HTML，请将 HTML 和关联图片、CSS 按原目录打包为 ZIP 后重新导入。';
+
 export type VisualTarget = {
   projectId: string;
   snapshotId: string;

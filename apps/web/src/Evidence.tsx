@@ -1,3 +1,4 @@
+import type { PageInspection, PanoramaJump } from './Panorama';
 import { useEffect, useState } from 'react';
 import { Info, ListChecks, LoaderCircle } from 'lucide-react';
 import { inspectAudit, inspectProposal, type ProposalPreview } from './semantics';
@@ -9,31 +10,27 @@ import { PatchReview } from './PatchReview';
 
 export type EvidenceView = 'visual' | 'diff' | 'semantics';
 type EvidenceProps = {
-  state: State; stateScoped?: boolean; issue?: Issue; history?: HistoryItem; proposal: Proposal | null;
+  state: State; jump?:PanoramaJump; onInspection:(value:PageInspection)=>void; scopeTargetId?:string; stateScoped?: boolean; issue?: Issue; history?: HistoryItem; proposal: Proposal | null;
   view: EvidenceView; onView: (view: EvidenceView) => void;
   problem: string; impact: string;
   busy: boolean; applying: boolean; archivedEvidence: boolean; patchReady: boolean; onConfirm: () => void; onReject: () => void;
 };
 
 export function Evidence(props: EvidenceProps) {
-  return <ProjectEvidence key={`${props.state.project.id}:${props.state.project.currentSnapshot}`} {...props} />;
+  return <ProjectEvidence key={`${props.state.project.id}:${props.state.project.currentSnapshot}:${props.jump?.key ?? ''}`} {...props} />;
 }
 
 function ProjectEvidence(props: EvidenceProps) {
   const { state, history, proposal, issue, view, onView } = props;
   const [pair, setPair] = useState<VersionPair>(() => ({
-    left: state.originalSnapshotId ?? '', right: state.project.currentSnapshot,
+    left: props.jump?.left ?? state.originalSnapshotId ?? '', right: props.jump?.right ?? state.project.currentSnapshot,
   }));
   const [freeFor, setFreeFor] = useState<string>();
   const historyKey = history && `${history.verification.id}:${history.issue.id}`;
   if (proposal || (historyKey && freeFor !== historyKey)) {
     return <RepairEvidence {...props} onCompare={proposal ? undefined : () => setFreeFor(historyKey)} />;
   }
-  if (props.stateScoped) return <section className="preview panel" aria-label="交互状态预览">
-    <div className="panel-head"><h2>交互状态预览</h2></div>
-    <p className="preview-tip">采集证据可在全景视图查看。生成补丁后，此处显示同一交互状态的修复前后证据。</p>
-  </section>;
-  return <VersionComparison state={state} target={history?.issue ?? issue} pair={pair} onPair={setPair}
+  return <VersionComparison state={state} target={props.stateScoped ? undefined : history?.issue ?? issue} pair={pair} onPair={setPair} jump={props.jump} onInspection={props.onInspection} scopeTargetId={props.scopeTargetId} busy={props.busy}
     view={view} onView={onView} onHistory={historyKey ? () => setFreeFor(undefined) : undefined} />;
 }
 

@@ -1,96 +1,140 @@
 import { useEffect, useRef, useState } from 'react';
 import type { PanoramaComparison, PanoramaIssue, PanoramaRecipe, PanoramaSide, PanoramaStep } from '../../../packages/shared/panorama';
 import { startJob, waitJob } from './jobs';
+import type { EvidenceView } from './Evidence';
+import type { VersionPair } from './VersionComparison';
 import { versionName, type State } from './types';
 
-type Inventory = {pages: string[]; recipes: PanoramaRecipe[]; interactive: boolean; limit: number};
-type Request = {start?: string; stateId?: string; step?: PanoramaStep; from?: 'left' | 'right'};
-type Evidence = 'visual' | 'semantics' | 'keyboard';
+type Entry = {file: string; screenshot: string; size: {width: number; height: number}};
+type Inventory = {pages: string[]; recipes: PanoramaRecipe[]; interactive: boolean; limit: number; entries: Record<string, Entry>};
+const pagePath = (file: string) => '/' + file.split('/').map(encodeURIComponent).join('/');
+type Request = {site?:true; start?: string; stateId?: string; step?: PanoramaStep; from?: 'left' | 'right'};
 const actions = {
   click: '点击控件', fill: '输入固定测试值', validate: '检查原生表单校验', tab: 'Tab',
   'shift-tab': 'Shift+Tab', escape: 'Escape', scroll: '滚动',
 };
 const stepName = (step: PanoramaStep) => actions[step.action] + ('target' in step ? ' · ' + step.target.name : '');
 
+export type PageInspection = {
+  projectId: string; version: string; path: string; stateId?: string;
+  scoped: boolean; findings: PanoramaIssue[];
+  scanStatus: 'scanned' | 'pending' | 'failed' | 'unscanned';
+  scanError?: string;
+  review?: {axe:number; behavior:number; behaviorStatus:string};
+  coverage?: string;
+  comparison?: string;
+};
 export type PanoramaJump = {stateId: string; left: string; right: string; key: string};
 
-export function Panorama({state, onRepair, disabled, activeView, jump}: {
-  state: State; onRepair: (issue: PanoramaIssue, stateId: string, version: string) => void; disabled: boolean; activeView: boolean; jump?: PanoramaJump;
+export function Panorama({state, onInspection, disabled, jump, pair: versions, view, onScope, targetId, scopeTargetId}: {
+  state: State; onInspection: (value: PageInspection) => void; disabled: boolean; jump?: PanoramaJump;
+  pair: VersionPair; view: EvidenceView; onScope:(scoped:boolean)=>void; targetId?:string; scopeTargetId?:string;
 }) {
-  const {project, originalSnapshotId, snapshots} = state;
-  const baseline = originalSnapshotId ?? project.currentSnapshot;
-  const [versions, setVersions] = useState<{left?: string; right?: string}>(jump ? {left: jump.left, right: jump.right} : {});
-  const left = versions.left ?? baseline;
-  const right = versions.right ?? project.currentSnapshot;
+  const {project} = state;
+  const {left, right} = versions;
   const route = '/api/projects/' + encodeURIComponent(project.id) + '/panorama';
-  const [inventory, setInventory] = useState<Inventory>();
+  const [loaded, setLoaded] = useState<{query: string; inventory: Inventory}>();
   const [selection, setSelection] = useState<Request>(jump ? {stateId: jump.stateId} : {start: project.entry});
-  const [result, setResult] = useState<PanoramaComparison>();
+  const [compared, setCompared] = useState<{query: string; result: PanoramaComparison}>();
   const [job, setJob] = useState('');
   const [progress, setProgress] = useState('');
-  const [error, setError] = useState('');
+  const [listError, setListError] = useState('');
+  const [captureError, setCaptureError] = useState('');
+  const [missing, setMissing] = useState<Record<string, boolean>>({});
+  const [zoom, setZoom] = useState(100);
   const [attempt, setAttempt] = useState(0);
   const [from, setFrom] = useState<'left' | 'right'>('left');
   const [controlIndex, setControlIndex] = useState('');
   const [action, setAction] = useState<'click' | 'validate' | 'fill'>('click');
   const [scroll, setScroll] = useState(0);
-  const [issue, setIssue] = useState<PanoramaIssue>();
-  const [view, setView] = useState<Evidence>('visual');
+  const [batchFailures, setBatchFailures] = useState<{page:string;reason:string}[]>([]);
   const [full, setFull] = useState(true);
   const [sync, setSync] = useState(true);
   const leftShot = useRef<HTMLDivElement>(null);
   const rightShot = useRef<HTMLDivElement>(null);
   const routeQuery = route + '?' + new URLSearchParams({left, right});
-  const activeJob = useRef('');
+  const inventory = loaded?.query === routeQuery ? loaded.inventory : undefined;
+  const resultQuery = JSON.stringify([routeQuery,state.current?.id,selection,attempt]);
+  const result = compared?.query === resultQuery ? compared.result : undefined;
 
+  const hasAudit = Boolean(state.current);
   useEffect(() => {
-    if (!activeView || disabled) return;
+    if (!left || !right || !hasAudit) return;
     const controller = new AbortController();
+    const signal = controller.signal;
     const refresh = async () => {
-      const response = await fetch(routeQuery, {signal: controller.signal, cache: 'no-store'});
-      if (!response.ok) throw new Error('无法加载页面列表。');
-      const next: Inventory = await response.json();
-      if (!controller.signal.aborted) setInventory(next);
+      try {
+        const response = await fetch(routeQuery, {
+          signal: AbortSignal.any([signal, AbortSignal.timeout(10000)]), cache: 'no-store',
+        });
+        const body = await response.json().catch(() => null);
+        if (!response.ok || !Array.isArray(body?.pages) || !Array.isArray(body?.recipes)) {
+          const reason = body?.error ?? (response.status === 404 ? '当前后端未提供全景接口，请更新服务后重试。' :
+            response.ok ? '返回的页面列表格式无效。' : '请检查后端服务后重试。');
+          throw new Error(`全景页面列表加载失败（HTTP ${response.status}）。${reason}`);
+        }
+        if (!signal.aborted) {
+          setLoaded({query: routeQuery, inventory: body});
+          setListError('');
+        }
+        return true;
+      } catch (error) {
+        if (!signal.aborted) setListError(error instanceof TypeError ? '无法连接后端加载全景页面列表，请检查服务后重试。' :
+          (error as Error).name === 'TimeoutError' ? '全景页面列表请求超时，请重试。' : (error as Error).message);
+        return false;
+      }
     };
     void (async () => {
-      setResult(undefined);
-      setIssue(undefined);
-      setProgress('准备采集本地页面…');
-      setError('');
+      setCompared(undefined);
+      setJob('');
+      setProgress('正在加载页面列表');
+      setListError('');
+      setCaptureError('');
+      setMissing({});
       try {
-        await refresh();
-        const id = await startJob(route, 'panorama', {left, right, ...selection}, controller.signal);
-        if (controller.signal.aborted) return;
-        activeJob.current = id;
+        if (!await refresh() || signal.aborted) return;
+        setProgress('准备采集本地页面');
+        const id = await startJob(route, 'panorama', {left, right, ...selection}, signal);
+        if (signal.aborted) return;
         setJob(id);
-        const next = await waitJob<PanoramaComparison>(id, 'panorama', controller.signal, setProgress);
+        if (selection.site) {
+          const batch = await waitJob<{failures:{page:string;reason:string}[]}>(id, 'panorama', signal, setProgress);
+          if (!signal.aborted) {
+            setBatchFailures(batch.failures);
+            setSelection({start:project.entry});
+          }
+          return;
+        }
+        const next = await waitJob<PanoramaComparison>(id, 'panorama', signal, setProgress);
         await refresh();
-        if (!controller.signal.aborted) setResult(next);
+        if (!signal.aborted) setCompared({query: resultQuery, result: next});
       } catch (error) {
-        if (!controller.signal.aborted) setError((error as Error).message);
+        if (!signal.aborted) setCaptureError((error as Error).message);
       } finally {
-        if (!controller.signal.aborted) {
-          activeJob.current = '';
+        if (!signal.aborted) {
           setJob('');
           setProgress('');
         }
       }
     })();
-    return () => {
-      controller.abort();
-      if (activeJob.current) void fetch('/api/jobs/' + activeJob.current + '/cancel', {method: 'POST'}).catch(() => {});
-      activeJob.current = '';
-    };
-  }, [activeView, disabled, route, routeQuery, left, right, selection, attempt]);
+    return () => controller.abort();
+  }, [hasAudit, route, routeQuery, resultQuery, left, right, selection, attempt, project.entry]);
 
   // After an action, the returned recipe is the stable selection for version changes.
   const stateId = result?.stateId ?? selection.stateId;
   const active = inventory?.recipes.find(recipe => recipe.id === stateId);
-  const page = active?.path ?? '/' + (selection.start ?? project.entry);
+  const page = active?.path ?? pagePath(selection.start ?? project.entry);
   const paths = [...new Set([
-    ...(inventory?.pages ?? [project.entry]).map(file => '/' + file.split('/').map(encodeURIComponent).join('/')),
+    ...(inventory?.pages ?? [project.entry]).map(pagePath),
     ...(inventory?.recipes ?? []).map(recipe => recipe.path),
   ])];
+  useEffect(() => {
+    if (!targetId || jump) return;
+    setSelection(current => current.start === project.entry && !current.step ? current : {start:project.entry});
+  }, [targetId, jump, project.entry]);
+  const scoped = Boolean(jump || selection.stateId || selection.start && selection.start !== project.entry || active?.steps.length);
+  useEffect(() => onScope(scoped), [onScope, scoped]);
+  const pathNames = new Map(inventory?.recipes.filter(recipe => recipe.title).map(recipe => [recipe.path,recipe.title]));
   const states = inventory?.recipes.filter(recipe => recipe.path === page) ?? [];
   const side = result?.[from];
   const controls = side?.status === 'captured' ? side.capture.controls : [];
@@ -99,22 +143,17 @@ export function Panorama({state, onRepair, disabled, activeView, jump}: {
   const canAct = Boolean(stateId && inventory?.interactive && side?.status === 'captured' && (active?.steps.length ?? 0) < 6);
 
   function selectRequest(next: Request) {
-    setResult(undefined);
+    setCompared(undefined);
     setProgress('准备采集本地页面…');
     setSelection(next);
   }
 
   function choosePage(path: string) {
-    const file = inventory?.pages.find(item => '/' + item.split('/').map(encodeURIComponent).join('/') === path);
+    const file = inventory?.pages.find(item => pagePath(item) === path);
     const saved = inventory?.recipes.find(item => item.path === path);
     setControlIndex('');
     if (file) selectRequest({start: file});
     else if (saved) selectRequest({stateId: saved.id});
-  }
-
-  function chooseVersions(next: typeof versions) {
-    if (stateId) selectRequest({stateId});
-    setVersions(next);
   }
 
   function perform(step: PanoramaStep) {
@@ -134,31 +173,79 @@ export function Panorama({state, onRepair, disabled, activeView, jump}: {
     ? [result.left.capture, result.right.capture] as const : null;
   const resolved = pair?.[0].issues.filter(item => !pair[1].issues.some(other => other.id === item.id)) ?? [];
   const added = pair?.[1].issues.filter(item => !pair[0].issues.some(other => other.id === item.id)) ?? [];
-  const findings = result?.right.status === 'captured' ? result.right.capture.issues :
-    result?.left.status === 'captured' ? result.left.capture.issues : [];
+  const discovered = new Set([
+    ...(inventory?.pages ?? []).map(file => 'page:' + file),
+    ...(inventory?.recipes ?? []).map(recipe => recipe.steps.length ? 'state:' + recipe.id : 'page:' + recipe.start),
+  ]).size;
+  const covered = new Set(inventory?.recipes.filter(recipe => recipe.counts[state.project.currentSnapshot] !== undefined).map(recipe => recipe.path));
+  const inspectedStates = inventory?.recipes.filter(recipe => recipe.counts[state.project.currentSnapshot] !== undefined).length ?? 0;
+  const shownVersion = project.currentSnapshot;
+  const currentSide = right === shownVersion ? result?.right : left === shownVersion ? result?.left : undefined;
+  const shown = currentSide?.status === 'captured' ? currentSide.capture : undefined;
+  const scanError = captureError || listError || (currentSide?.status !== 'captured' ? currentSide?.error : undefined);
+  const scanStatus = shown ? 'scanned' : progress ? 'pending' : scanError ? 'failed' : 'unscanned';
+  const coverage = inventory ? `当前版本已检测 ${covered.size}/${paths.length} 个已发现页面、${inspectedStates}/${discovered} 个已知状态。` : undefined;
+  const comparison = pair && scoped ? `右侧较左侧解决 ${resolved.length} 个问题，新增 ${added.length} 个问题。` : undefined;
+  useEffect(() => {
+    onInspection({projectId:project.id,version:shownVersion,path:page,stateId,scoped,findings:shown?.issues ?? [],coverage,comparison,
+      scanStatus,scanError,review:shown && {axe:shown.manual,behavior:shown.keyboard.findings.length,behaviorStatus:shown.keyboard.status}});
+  }, [onInspection, project.id, shownVersion, page, stateId, scoped, shown, coverage, comparison, scanStatus, scanError]);
 
-  function renderSide(value: PanoramaSide | undefined, position: 'left' | 'right') {
-    if (!value) return <p className="muted">等待本地采集。</p>;
-    if (value.status === 'unmatched') return <p role="status"><b>状态无法可靠匹配</b><br />
-      {value.step === undefined ? '' : '步骤 ' + value.step + ' · '}{value.error}</p>;
-    const item = value.capture;
-    const bounds = full && issue ? item.issues.find(found => found.id === issue.id)?.bounds : null;
-    const file = route + '/captures/' + item.id + '/' + (full ? 'full' : 'viewport');
+  function renderShot(position: 'left' | 'right', src: string, title: string, size: Entry['size'],
+    fullFile: string, bounds?: PanoramaIssue['bounds']) {
+    if (missing[src]) return <p role="alert">截图无法读取，请重试采集此状态。</p>;
     return <>
-      <p className="panorama-caption">{item.title || item.path} · {item.issues.length} 个问题 · {item.manual} 项待人工核查</p>
-      {view === 'visual' ? <div className="panorama-shot" ref={position === 'left' ? leftShot : rightShot}
+      <div className="panorama-shot" ref={position === 'left' ? leftShot : rightShot}
         tabIndex={0} aria-label={position === 'left' ? '滚动左侧页面截图' : '滚动右侧页面截图'}
         onScroll={event => mirror(event.currentTarget, position)}>
-        <div className="panorama-image" style={{aspectRatio: full ? `${item.width} / ${item.height}` : '900 / 700'}}>
-          <img src={file} alt={item.title + (full ? ' 完整页面截图' : ' 视口截图')} />
+        <div className="panorama-image" style={{aspectRatio: `${size.width} / ${size.height}`, width: zoom + '%'}}>
+          <img src={src} alt={title} onError={() => setMissing(files => ({...files, [src]: true}))} />
           {bounds && <span className="panorama-highlight" aria-hidden="true" style={{
-            left: bounds.x / item.width * 100 + '%', top: bounds.y / item.height * 100 + '%',
-            width: bounds.width / item.width * 100 + '%', height: bounds.height / item.height * 100 + '%',
+            left: bounds.x / size.width * 100 + '%', top: bounds.y / size.height * 100 + '%',
+            width: bounds.width / size.width * 100 + '%', height: bounds.height / size.height * 100 + '%',
           }} />}
         </div>
-      </div> : view === 'semantics' ? <>
+      </div>
+      <a href={fullFile} target="_blank" rel="noreferrer">在新标签页查看整页截图</a>
+    </>;
+  }
+
+  function renderSide(value: PanoramaSide | undefined, position: 'left' | 'right') {
+    const version = position === 'left' ? left : right;
+    if (value?.status !== 'captured') {
+      const audit = [state.baseline, state.current].find(scan => scan?.snapshotId === version);
+      const entry = inventory?.entries?.[version] ??
+        (audit?.screenshot && audit.size ? {...audit, file: project.entry} : undefined);
+      const start = !selection.step && (active?.steps.length === 0 ? active.start : !selection.stateId ? selection.start : undefined);
+      return <>
+        {value ? <p role="status"><b>{value.status === 'unmatched' ? '状态无法可靠匹配' :
+          value.status === 'failed' ? '此版本采集失败' : '此版本未采集'}</b><br />
+          {value.step === undefined ? '' : '步骤 ' + value.step + ' · '}{value.error}</p> :
+          <p className="muted">{listError ? '无法从页面列表读取此状态。' :
+            captureError ? '本次未能采集此状态。' : busy ? '正在准备此版本的状态证据。' : '此版本尚未采集。'}</p>}
+        {entry && entry.file === start && value?.status !== 'unmatched' && (view === 'visual' ? <>
+          <p className="panorama-caption">首页整页截图 · 来自此版本的扫描记录</p>
+          {renderShot(position, entry.screenshot, '已扫描首页整页截图', entry.size, entry.screenshot)}
+        </> : <p className="muted">首页扫描截图已可查看。语义和键盘证据需完成全景采集。</p>)}
+      </>;
+    }
+    const item = value.capture;
+    const bounds = full ? item.issues.find(found => found.id === (scopeTargetId ?? targetId))?.bounds : null;
+    const fullFile = route + '/captures/' + item.id + '/full';
+    const file = full ? fullFile : route + '/captures/' + item.id + '/viewport';
+    return <>
+      {Boolean(item.resourceFailures?.length) && <details><summary>{item.resourceFailures!.length} 个资源加载失败</summary>
+        <ul>{item.resourceFailures!.map((item,index)=><li key={index}><code>{item.path}</code> · {item.reason}</li>)}</ul>
+      </details>}
+
+      {view === 'visual' ? renderShot(position, file, (item.title || item.path) + (full ? ' 完整页面截图' : ' 视口截图'),
+        full ? item : {width: 900, height: 700}, fullFile, bounds) : view === 'semantics' ? <>
         <h4>浏览器无障碍语义</h4><pre tabIndex={0}>{item.ax || '未取得无障碍树内容。'}</pre>
         <details><summary>DOM 结构（已限制字段）</summary><pre tabIndex={0}>{item.dom}</pre></details>
+        <details><summary>键盘检测</summary><p>采集时焦点：{item.focus || '文档'}。{item.keyboard.status !== 'completed' && '键盘探测未完成。'}</p>
+          <ol>{item.keyboard.tabSequence.map((selector,index)=><li key={index}><code>{selector}</code></li>)}</ol>
+          {item.keyboard.findings.map((finding,index)=><p key={index}>{finding.selector} · {finding.explanation}</p>)}
+        </details>
       </> : <>
         <p>采集时焦点 · {item.focus || '文档'}。键盘探测 · {item.keyboard.status === 'completed' ? '已完成' : '未完成，需人工复核'}</p>
         <ol>{item.keyboard.tabSequence.map((selector, index) => <li key={index}><code>{selector}</code></li>)}</ol>
@@ -167,59 +254,54 @@ export function Panorama({state, onRepair, disabled, activeView, jump}: {
     </>;
   }
 
-  return <section className="panel panorama" aria-label="全景交互浏览">
-    <div className="panorama-heading"><div><h2>全景交互浏览</h2>
-      <p>{project.mode === 'snapshot' ? '静态快照，仅支持浏览已采集状态。' : '在隔离工程里逐步操作，另一版本重放同一序列。'}</p></div>
-      <small>{paths.length} 个页面 · {inventory?.recipes.length ?? 0}/{inventory?.limit ?? 12} 个已采集状态</small>
-    </div>
+  return <section className="panorama" aria-label="页面与状态">
     <div className="panorama-bar">
-      <label>左侧版本<select aria-label="全景左侧版本" value={left} disabled={busy} onChange={event => chooseVersions({...versions, left: event.target.value})}>
-        {snapshots.map(item => <option key={item.id} value={item.id}>{versionName(state, item.id)}</option>)}
-      </select></label>
-      <button type="button" className="secondary" disabled={busy || left === right} onClick={() => chooseVersions({left: right, right: left})}>交换版本</button>
-      <label>右侧版本<select aria-label="全景右侧版本" value={right} disabled={busy} onChange={event => chooseVersions({...versions, right: event.target.value})}>
-        {snapshots.map(item => <option key={item.id} value={item.id}>{versionName(state, item.id)}</option>)}
-      </select></label>
-      <button type="button" className="secondary" disabled={busy} onClick={() => chooseVersions({})}>恢复默认对照</button>
-    </div>
-    <div className="panorama-grid">
-      <nav aria-label="已采集页面和状态" className="panorama-tree">
         <label>页面<select aria-label="页面" value={page} disabled={busy} onChange={event => choosePage(event.target.value)}>
-          {paths.map(path => <option key={path}>{path}</option>)}
+          {paths.map(path => <option key={path} value={path}>{pathNames.get(path) ? pathNames.get(path) + ' · ' : ''}{path}</option>)}
         </select></label>
-        <ul>{paths.map(path => <li key={path}><button className="record-link" disabled={busy} aria-current={path === page ? 'page' : undefined}
-          onClick={() => choosePage(path)}>{path}</button>
-          <small>{inventory?.recipes.filter(recipe => recipe.path === path).length ?? 0} 个已采集状态</small>
-          {path === page && states.length > 0 && <ul>{states.map(recipe => <li key={recipe.id}><button type="button" className="record-link" disabled={busy}
-            aria-current={recipe.id === stateId ? 'true' : undefined} onClick={() => selectRequest({stateId: recipe.id})}>{recipe.label}</button>
-            <small>左 {recipe.counts[left] ?? '—'} / 右 {recipe.counts[right] ?? '—'} 个问题</small></li>)}</ul>}
-        </li>)}</ul>
         <label>交互状态<select aria-label="交互状态" value={active?.id ?? ''} disabled={busy || !states.length} onChange={event => selectRequest({stateId: event.target.value})}>
-          {!active && <option value="">尚未采集</option>}
+          {!active && <option value="">{listError ? '状态列表加载失败' : '尚未采集'}</option>}
           {states.map(recipe => <option key={recipe.id} value={recipe.id}>{recipe.label}</option>)}
         </select></label>
-      </nav>
-      <div className="panorama-main">
+      <button type="button" className="secondary" disabled={busy || !inventory} onClick={() => {
+        setBatchFailures([]);
+        selectRequest({site:true});
+      }}>检测已发现页面</button>
+    </div>
+    {batchFailures.length > 0 && <details><summary>未完成 {batchFailures.length} 个页面检查</summary>
+      <ul>{batchFailures.map(({page,reason},index)=><li key={index}>{page} · {reason}</li>)}</ul>
+    </details>}
         {progress && <p role="status">{progress}… {job && <button type="button" className="secondary"
           onClick={() => void fetch('/api/jobs/' + job + '/cancel', {method: 'POST'})}>取消全景采集</button>}</p>}
-        {error && <p role="alert">{error} <button type="button" className="secondary" onClick={() => setAttempt(value => value + 1)}>重试采集</button></p>}
-        {result && !pair && <button type="button" className="secondary" disabled={busy} onClick={() => setAttempt(value => value + 1)}>重试未匹配侧</button>}
+        {listError && <p role="alert">{listError}</p>}
+        {captureError && <p role="alert">全景采集未完成。{captureError}</p>}
+        {(listError || captureError || (result && !pair) || Object.values(missing).some(Boolean)) &&
+          <button type="button" className="secondary" disabled={busy} onClick={() => setAttempt(value => value + 1)}>
+            {listError ? '重试加载页面列表' : '重试采集'}
+          </button>}
+
         {active && active.steps.length > 0 && <details className="panorama-steps"><summary>操作记录 · {active.steps.length} 步</summary>
           <ol>{active.steps.map((step, index) => <li key={index}>{stepName(step)}</li>)}</ol></details>}
-        <div className="panorama-bar" role="group" aria-label="全景证据">
-          {([['visual', '视觉对比'], ['semantics', '语义对比'], ['keyboard', '键盘对比']] as const).map(([key, label]) =>
-            <button className="secondary" type="button" key={key} aria-pressed={view === key} onClick={() => setView(key)}>{label}</button>)}
-          {view === 'visual' && <><label><input type="checkbox" checked={full} onChange={event => setFull(event.target.checked)} />完整页面</label>
-            <label><input type="checkbox" checked={sync} onChange={event => setSync(event.target.checked)} />同步滚动</label></>}
-        </div>
-        <div className="panorama-pair">
+        {scoped && view === 'visual' && <div className="panorama-bar" role="group" aria-label="页面截图选项">
+          <label><input type="checkbox" checked={full} onChange={event => setFull(event.target.checked)} />完整页面</label>
+          <label><input type="checkbox" checked={sync} onChange={event => setSync(event.target.checked)} />同步滚动</label>
+          <label>截图缩放<select value={zoom} onChange={event => setZoom(Number(event.target.value))}>
+            {[50, 75, 100, 125, 150, 200].map(value => <option key={value} value={value}>{value}%</option>)}
+          </select></label>
+        </div>}
+        {scoped && view !== 'diff' && <div className="panorama-pair">
           <section><h3>左侧 · {versionName(state, left)}</h3>{renderSide(result?.left, 'left')}</section>
           <section><h3>右侧 · {versionName(state, right)}</h3>{renderSide(result?.right, 'right')}</section>
-        </div>
-        {pair && <p role="status">左右已匹配同一页面和状态。右侧较左侧解决 {resolved.length} 个问题，新增 {added.length} 个问题。
-          {pair.some(item => item.manual || item.keyboard.status !== 'completed') && ' 仍有证据需要人工确认。'}</p>}
-        {inventory?.interactive && <fieldset className="panorama-actions" disabled={busy || !canAct}>
+        </div>}
+        {pair && <p className="screen-reader-only" role="status">左右已匹配同一页面和状态。</p>}
+        {inventory?.interactive && <details className="panorama-steps"><summary>记录安全操作</summary><fieldset className="panorama-actions" aria-label="记录安全操作" disabled={busy || !canAct}>
           <legend>记录安全操作</legend>
+          {side?.status === 'captured' && Boolean(side.capture.navigation?.length) && <details>
+            <summary>站内导航</summary>
+            <div className="panorama-bar">{side.capture.navigation!.map((link,index) => <button
+              key={index} type="button" className="secondary" title={link.path}
+              onClick={() => perform({action:'click', target:{role:'link',name:link.name}, navigationPath:link.path})}>{link.name}</button>)}</div>
+          </details>}
           <div className="panorama-bar">
             <label>操作侧<select aria-label="操作侧" value={from} onChange={event => {setFrom(event.target.value === 'left' ? 'left' : 'right'); setControlIndex('');}}>
               <option value="left">左侧版本</option><option value="right">右侧版本</option>
@@ -239,17 +321,6 @@ export function Panorama({state, onRepair, disabled, activeView, jump}: {
             <label>滚动到像素<input type="number" min={0} max={6000} value={scroll} onChange={event => setScroll(Number(event.target.value))} /></label>
             <button type="button" className="secondary" onClick={() => perform({action: 'scroll', y: scroll})}>对齐浏览器滚动</button>
           </div>
-        </fieldset>}
-        <section className="panorama-findings" aria-label="当前状态问题">
-          <h3>当前状态问题</h3>
-          {findings.length > 0 ? <ul>{findings.map((item, index) => <li key={item.id + index}>
-            <button type="button" className="record-link" onClick={() => {setIssue(item); setFull(true); setView('visual');}}>{item.help}</button>
-            {' · '}<code>{item.selector}</code>
-            {issue === item && <p>{item.description} {item.source && <code>{item.source.file}{item.source.line ? ':' + item.source.line : ''}</code>}
-              {' '}<button type="button" className="secondary" disabled={busy || !stateId} onClick={() => stateId && onRepair(item, stateId, result?.right.status === 'captured' ? right : left)}>查看精准修复</button></p>}
-          </li>)}</ul> : <p className="muted">{result && (result.left.status === 'captured' || result.right.status === 'captured') ? '此状态未检出自动化违规。' : '尚无状态检测证据。'}</p>}
-        </section>
-      </div>
-    </div>
+        </fieldset></details>}
   </section>;
 }

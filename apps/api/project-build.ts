@@ -8,7 +8,7 @@ import { hash, safePath, walk } from './storage';
 
 const require = createRequire(import.meta.url);
 const js = /\.[jt]sx?$/i;
-const images = /\.(png|jpe?g|webp|gif)$/i;
+const images = /\.(png|jpe?g|webp|gif|woff2?)$/i;
 const sourceMark = 'data-a11y-origin';
 const runtime = new Set(['react','react-dom','react-dom/client','react/jsx-runtime','react/jsx-dev-runtime']);
 type JSXAttribute = { type: string; name?: {name?: string}; value?: {type:string;value?: unknown} | null; start: number; end: number };

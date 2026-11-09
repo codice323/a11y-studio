@@ -27,6 +27,7 @@ export type Scan = {
   incomplete: { ruleId: string; help: string; count: number }[];
   detection?: DetectionEvidence;
   sourceLocations?: Record<string, NonNullable<Issue['source']>>;
+  resourceFailures?: {type:string;path:string;reason:string;status?:number}[];
   screenshot: string;
   size: { width: number; height: number };
 };

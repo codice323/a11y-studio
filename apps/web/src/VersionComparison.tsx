@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import type { compareSnapshots } from '../../api/version-compare';
+import { Panorama, type PageInspection, type PanoramaJump } from './Panorama';
 import type { EvidenceView } from './Evidence';
 import { EnlargedComparison, Screenshot, SemanticTable, type ScreenshotData } from './EvidenceDetails';
 import { diffFile, PatchReview } from './PatchReview';
@@ -40,10 +41,12 @@ function ComparisonSummary({ comparison, diffs }: { comparison: Comparison; diff
   </section>;
 }
 
-export function VersionComparison({ state, target, pair, onPair, view, onView, onHistory }: {
+export function VersionComparison({ state, target, pair, onPair, view, onView, onHistory, jump, onInspection, scopeTargetId, busy }: {
   state: State; target?: Issue; pair: VersionPair; onPair: (pair: VersionPair) => void;
   view: EvidenceView; onView: (view: EvidenceView) => void; onHistory?: () => void;
+  jump?: PanoramaJump; onInspection:(value:PageInspection)=>void; scopeTargetId?:string; busy:boolean;
 }) {
+  const [scoped, setScoped] = useState(Boolean(jump));
   const { left, right } = pair;
   const { id: projectId, currentSnapshot } = state.project;
   const { id: issueId, selector } = target ?? {};
@@ -75,7 +78,7 @@ export function VersionComparison({ state, target, pair, onPair, view, onView, o
 
   const needsEvidence = view !== 'diff';
   useEffect(() => {
-    if (!data || !selector || !needsEvidence || evidence) return;
+    if (scoped || !data || !selector || !needsEvidence || evidence) return;
     const controller = new AbortController();
     async function inspect(side: Comparison['left']): Promise<Evidence> {
       if (!side.auditId) return { semantics: null, status: '此版本暂无可用扫描证据。' };
@@ -93,7 +96,7 @@ export function VersionComparison({ state, target, pair, onPair, view, onView, o
       if (!controller.signal.aborted) setInspected({ key, values: { left: before, right: after } });
     })();
     return () => controller.abort();
-  }, [data, key, projectId, selector, needsEvidence, left, right, evidence]);
+  }, [data, key, projectId, selector, needsEvidence, left, right, evidence, scoped]);
 
   const diffs = useMemo(() => (data?.files ?? []).flatMap(({ file, kind, source }) =>
     source ? [diffFile({ file, kind, selector: '', ...source })] : []), [data]);
@@ -125,22 +128,24 @@ export function VersionComparison({ state, target, pair, onPair, view, onView, o
       <details className="developer-options"><summary>开发者选项</summary><button type="button" aria-pressed={view === 'diff'} onClick={() => onView('diff')}>代码变更</button></details>
     </div>
     <div className="version-comparison-toolbar" role="group" aria-label="只读版本对比">
-      <label>左侧版本<select value={left} title={name(left)} onChange={event => onPair({ ...pair, left: event.target.value })}>
+      <label>左侧版本<select disabled={busy} value={left} title={name(left)} onChange={event => onPair({ ...pair, left: event.target.value })}>
         {!left && <option value="">原始版本缺失</option>}
         {state.snapshots.map(snapshot => <option key={snapshot.id} value={snapshot.id}>{name(snapshot.id)}</option>)}
       </select></label>
       <button type="button" className="secondary" disabled={!left || left === right} onClick={() => onPair({ left: right, right: left })}>交换版本</button>
-      <label>右侧版本<select value={right} title={name(right)} onChange={event => onPair({ ...pair, right: event.target.value })}>
+      <label>右侧版本<select disabled={busy} value={right} title={name(right)} onChange={event => onPair({ ...pair, right: event.target.value })}>
         {state.snapshots.map(snapshot => <option key={snapshot.id} value={snapshot.id}>{name(snapshot.id)}</option>)}
       </select></label>
     </div>
     {target && <details className="evidence-target"><summary>查看定位详情</summary><span>{target.ruleId}</span><code>{selector || '页面级问题'}</code></details>}
-    {!left ? <p className="comparison-status" role="status">找不到原始快照。请选择要对比的左侧版本。</p>
+    {(!scoped || view === 'diff') && (!left ? <p className="comparison-status" role="status">找不到原始快照。请选择要对比的左侧版本。</p>
       : !request ? <p className="comparison-status" role="status">正在加载所选版本的对比证据…</p>
       : request.error ? <p className="comparison-status" role="status">{request.error} <button type="button" className="secondary" onClick={() => setRetry(retry + 1)}>重试对比</button></p>
       : left === right || same ? <p className="comparison-status" role="status">这两个版本暂无可检测差异。{left === right && '左右选择了同一版本。'}</p>
-      : null}
-    {view === 'visual' && <>
+      : null)}
+    <Panorama state={state} pair={pair} jump={jump} onInspection={onInspection} scopeTargetId={scopeTargetId} disabled={busy}
+      onScope={setScoped} targetId={target?.id} view={view} />
+    {!scoped && view === 'visual' && <>
       <div className="shot-options" role="group" aria-label="截图排列">
         {layouts.map(([id, label]) => <button key={id} type="button" aria-pressed={layout === id} onClick={() => setLayout(id)}>{label}</button>)}
         <EnlargedComparison left={screenshot('left')} right={screenshot('right')} />
@@ -157,7 +162,7 @@ export function VersionComparison({ state, target, pair, onPair, view, onView, o
       {missingFiles.length > 0 && <ul>{missingFiles.map(file => <li key={file.file}><code>{file.file}</code> · {file.kind === 'added' ? '新增' : file.kind === 'removed' ? '删除' : '修改'} · 二进制或超出展示上限</li>)}</ul>}
       {data.files.length === 0 && <p className="blank">所选快照的文件内容相同。</p>}
     </div>}
-    {view === 'semantics' && <div className="semantic-content">
+    {!scoped && view === 'semantics' && <div className="semantic-content">
       <p className="muted">使用 Chromium 无障碍树读取所选快照的名称、角色和状态。</p>
       {!selector ? <p className="blank">请先选择可定位的问题元素。</p> : data && !evidence ? <p role="status">正在还原快照并读取浏览器语义…</p> : evidence &&
         <><SemanticTable result={{ before: evidence.left.semantics, after: evidence.right.semantics }}
@@ -166,7 +171,8 @@ export function VersionComparison({ state, target, pair, onPair, view, onView, o
           {sides.some(side => evidence[side].status) && <button type="button" className="secondary" onClick={() => setRetry(retry + 1)}>重试语义读取</button>}
         </>}
     </div>}
-    {data && <ComparisonSummary comparison={data} diffs={diffs} />}
-    <p className="comparison-status muted">只读对比 · 项目当前版本为 {name(currentSnapshot)}。</p>
+    {data && !scoped && view !== 'visual' && <ComparisonSummary comparison={data} diffs={diffs} />}
+    {scoped && view === 'diff' && <p className="muted">代码变更比较所选版本的项目文件，可能包含其他页面共用的源码。</p>}
+    {view !== 'visual' && <p className="comparison-status muted">只读对比 · 项目当前版本为 {name(currentSnapshot)}。</p>}
   </section>;
 }

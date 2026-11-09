@@ -77,21 +77,23 @@ test('URL 快照保存 HTML、CSS 和同源图片，去除主动内容并跳过�
       <meta http-equiv="refresh" content="0;url=http://third-party.net">
       <link rel="stylesheet" href="/theme.css"><link rel="stylesheet" href="/cross.css"></head>
       <body onload="run()"><script>run()</script><iframe src="/embed"></iframe>
-      <img src="../image.png" srcset="/other.png 2x"><img src="http://third-party.net/image.png" alt="外部图片">
+      <picture><source media="(min-width: 800px)" srcset="/other.png 2x"><img src="../image.png" srcset="/other.png 2x"></picture><img src="http://third-party.net/image.png" alt="外部图片">
       <button id="empty"></button><a href="javascript:run()">无效链接</a></body></html>` },
     [upstream + '/theme.css']: { type: 'text/css', body: '@import "/extra.css"; button {background: url(/image.png); width: 2rem}' },
     [upstream + '/cross.css']: { status: 302, location: 'http://third-party.net/theme.css' },
     [upstream + '/image.png']: { type: 'image/png', body: Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]) },
+    [upstream + '/other.png']: { type: 'image/png', body: Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]) },
   });
   const snapshot = await captureUrlSnapshot(upstream + '/start');
   assert.equal(snapshot.name, '快照测试 · public-source.net');
-  assert.deepEqual(snapshot.assets, { stylesheets: 1, images: 1, skipped: 3 });
+  assert.deepEqual(snapshot.assets, { stylesheets: 1, images: 2, skipped: 3 });
   const html = snapshot.files.get('index.html')?.toString() ?? '';
   assert.match(html, /href="style-1.css"/);
   assert.match(html, /src="image-1.png"/);
+  assert.match(html, /<source[^>]*srcset="image-2\.png 2x"/);
   assert.match(html, /Content-Security-Policy/);
   assert.match(html, /id="empty"/);
-  assert.doesNotMatch(html, /<script|<iframe|onload=|srcset=|javascript:|third-party\.net/);
+  assert.doesNotMatch(html, /<script|<iframe|onload=|javascript:|third-party\.net/);
   assert.match(snapshot.files.get('style-1.css')?.toString() ?? '', /url\("image-1\.png"\)/);
   assert.equal(visited.filter(url => url.endsWith('/image.png')).length, 1);
   assert.ok(visited.every(url => url.startsWith(upstream)));
