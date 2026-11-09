@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState, type ReactNode } from 'react';
 import type { PanoramaComparison, PanoramaIssue, PanoramaRecipe, PanoramaSide, PanoramaStep } from '../../../packages/shared/panorama';
 import { startJob, waitJob } from './jobs';
 import type { EvidenceView } from './Evidence';
@@ -26,9 +26,9 @@ export type PageInspection = {
 };
 export type PanoramaJump = {stateId: string; left: string; right: string; key: string};
 
-export function Panorama({state, onInspection, disabled, jump, pair: versions, view, onScope, targetId, scopeTargetId}: {
+export function Panorama({state, onInspection, disabled, jump, pair: versions, view, onScope, targetId, scopeTargetId, viewTools, pageRequest}: {
   state: State; onInspection: (value: PageInspection) => void; disabled: boolean; jump?: PanoramaJump;
-  pair: VersionPair; view: EvidenceView; onScope:(scoped:boolean)=>void; targetId?:string; scopeTargetId?:string;
+  pair: VersionPair; view: EvidenceView; onScope:(scoped:boolean)=>void; targetId?:string; scopeTargetId?:string; viewTools?:ReactNode; pageRequest?:{path:string};
 }) {
   const {project} = state;
   const {left, right} = versions;
@@ -156,6 +156,13 @@ export function Panorama({state, onInspection, disabled, jump, pair: versions, v
     else if (saved) selectRequest({stateId: saved.id});
   }
 
+  const lastPageRequest = useRef<{path:string} | undefined>(undefined);
+  useEffect(() => {
+    if (!pageRequest || !inventory || lastPageRequest.current === pageRequest || busy) return;
+    lastPageRequest.current = pageRequest;
+    if (paths.includes(pageRequest.path) && pageRequest.path !== page) choosePage(pageRequest.path);
+  }, [pageRequest, inventory, busy, page]);
+
   function perform(step: PanoramaStep) {
     if (!stateId || !canAct) return;
     setControlIndex('');
@@ -255,7 +262,7 @@ export function Panorama({state, onInspection, disabled, jump, pair: versions, v
   }
 
   return <section className="panorama" aria-label="页面与状态">
-    <div className="panorama-bar">
+    <div className="panorama-bar page-comparison-toolbar" role="group" aria-label="页面和扫描操作">
         <label>页面<select aria-label="页面" value={page} disabled={busy} onChange={event => choosePage(event.target.value)}>
           {paths.map(path => <option key={path} value={path}>{pathNames.get(path) ? pathNames.get(path) + ' · ' : ''}{path}</option>)}
         </select></label>
@@ -268,6 +275,8 @@ export function Panorama({state, onInspection, disabled, jump, pair: versions, v
         selectRequest({site:true});
       }}>检测已发现页面</button>
     </div>
+    {viewTools}
+    {project.mode === 'snapshot' && <p className="comparison-status muted">静态快照 · 动态交互状态未覆盖</p>}
     {batchFailures.length > 0 && <details><summary>未完成 {batchFailures.length} 个页面检查</summary>
       <ul>{batchFailures.map(({page,reason},index)=><li key={index}>{page} · {reason}</li>)}</ul>
     </details>}

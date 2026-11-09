@@ -6,7 +6,7 @@ import { scanRules } from './scan-rules';
 import { scanBehavior, unavailableBehavior } from './scan-behavior';
 import type { BehaviorAudit, DetectionEvidence } from '../../packages/shared/types';
 
-let activeScans=0;const MAX_SCANS=2;
+let activeScans=0;let liveBrowsers=0;const MAX_SCANS=2;
 const mime:Record<string,string>={'.html':'text/html; charset=utf-8','.htm':'text/html; charset=utf-8','.css':'text/css; charset=utf-8','.png':'image/png','.jpg':'image/jpeg','.jpeg':'image/jpeg','.gif':'image/gif','.webp':'image/webp','.woff':'font/woff','.woff2':'font/woff2'};
 export function sanitizedHtml(source:string){const $=cheerio.load(source);$('script,iframe,object,embed,base,meta[http-equiv]').remove();$('*').each((_,el)=>{for(const attr of Object.keys((el as any).attribs||{}))if(/^on/i.test(attr)||['srcdoc','formaction'].includes(attr.toLowerCase())||(/^(href|src|action)$/i.test(attr)&&/^\s*javascript:/i.test($(el).attr(attr)||'')))$(el).removeAttr(attr)});return $.html();}
 function executable(){ const candidates=[process.env.CHROME_PATH,'/Applications/Google Chrome.app/Contents/MacOS/Google Chrome','/usr/bin/chromium','/usr/bin/chromium-browser','/usr/bin/google-chrome'].filter(Boolean) as string[];return candidates.find(x=>fs.existsSync(x));}
@@ -15,18 +15,20 @@ export function withSnapshotPage<T>(projectId: string, snapshotId: string, signa
  return withRepairPage(snapshotDir(projectId, snapshotId), snap.entry, signal, inspect, waitForSlotMs);
 }
 
+export type BrowserRequestEvidence = { type:string; path:string; status:number | 'blocked' };
 export type ResourceFailure = { type: string; path: string; reason: string; status?:number };
-export async function withRepairPage<T>(dir: string, entry: string, signal: AbortSignal | undefined, inspect: (page: Page, product: Awaited<ReturnType<typeof buildReactProject>> | undefined, resources: ResourceFailure[]) => Promise<T>, waitForSlotMs = 6000, isolated = false) {
+export async function withRepairPage<T>(dir: string, entry: string, signal: AbortSignal | undefined, inspect: (page: Page, product: Awaited<ReturnType<typeof buildReactProject>> | undefined, resources: ResourceFailure[], network: BrowserRequestEvidence[]) => Promise<T>, waitForSlotMs = 6000, isolated = false, live = false) {
  let browser: Browser | undefined;
  const closeBrowser = () => { void browser?.close().catch(() => {}); };
  const engineering = isReactProject(dir);
  const deadline = Date.now() + waitForSlotMs;
- const localSignal = (engineering || isolated) ? AbortSignal.any([...(signal?[signal]:[]),AbortSignal.timeout(35000)]) : signal;
+ const localSignal = !live && (engineering || isolated) ? AbortSignal.any([...(signal?[signal]:[]),AbortSignal.timeout(35000)]) : signal;
  // Preview and evidence requests can briefly occupy both browsers during patch review.
- while (activeScans >= MAX_SCANS && Date.now() < deadline) await delay(100, undefined, {signal});
- if (activeScans >= MAX_SCANS) throw new Error('扫描任务过多，请稍后再试。');
+ while ((live ? liveBrowsers >= 2 : activeScans >= MAX_SCANS) && Date.now() < deadline) await delay(100, undefined, {signal});
+ if (live ? liveBrowsers >= 2 : activeScans >= MAX_SCANS) throw new Error('扫描任务过多，请稍后再试。');
  try {
-  activeScans++;
+  if (live) liveBrowsers++;
+  else activeScans++;
   if(signal?.aborted)throw new Error('任务已取消。');
   const product=engineering ? await buildReactProject(dir,entry) : undefined;
   localSignal?.throwIfAborted();
@@ -44,7 +46,9 @@ export async function withRepairPage<T>(dir: string, entry: string, signal: Abor
       document.addEventListener('submit', event => event.preventDefault(), true);
     });
   }
+  let requests = 0;
   await context.route('**/*',async(route)=>{
+    if (live && ++requests > 1200) return route.abort();
     const req=route.request(),u=new URL(req.url());
     if(u.origin!=='http://a11y.local'||req.method()!=='GET')return route.abort();
     try {
@@ -79,15 +83,21 @@ export async function withRepairPage<T>(dir: string, entry: string, signal: Abor
       url.origin === 'http://a11y.local' ? '本地资源格式不受支持或请求被阻止' : '隔离浏览器禁止请求外部资源';
     if (!resources.some(item => item.path === file && item.type === type)) resources.push({type, path:file, reason, status});
   }
-  page.on('requestfailed', request => recordResource(request));
-  page.on('response', response => { if (response.status() >= 400) recordResource(response.request(), response.status()); });
+  const network: BrowserRequestEvidence[] = [];
+  function logRequest(request:import('playwright-core').Request,status:BrowserRequestEvidence['status']) {
+    if (!live || network.length >= 160) return;
+    const url = new URL(request.url());
+    network.push({type:request.resourceType(),path:url.origin === 'http://a11y.local' ? url.pathname : url.origin,status});
+  }
+  page.on('requestfailed', request => {recordResource(request);logRequest(request,'blocked');});
+  page.on('response', response => { if (response.status() >= 400) recordResource(response.request(), response.status()); logRequest(response.request(),response.status()); });
   const response=await page.goto('http://a11y.local/'+entry.split('/').map(encodeURIComponent).join('/'),{waitUntil:'load',timeout:15000});
   if (!response?.ok()) throw new Error('浏览器未成功加载项目入口。');
   if(product)await page.locator(`[${originAttribute}]`).first().waitFor({state:'attached',timeout:5000});
-  return await inspect(page,product,resources);
+  return await inspect(page,product,resources,network);
  } finally {
   localSignal?.removeEventListener('abort', closeBrowser);
-  try { await browser?.close(); } finally { activeScans--; }
+  try { await browser?.close(); } finally { if (live) liveBrowsers--; else activeScans--; }
  }
 }
 

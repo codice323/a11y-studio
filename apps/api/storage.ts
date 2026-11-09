@@ -8,7 +8,8 @@ export const DATA = process.env.A11Y_DATA_DIR ? path.resolve(process.env.A11Y_DA
 fs.mkdirSync(DATA,{recursive:true});
 export const db = new Database(path.join(DATA,'studio.sqlite'));
 db.pragma('journal_mode = WAL');
-db.exec(`CREATE TABLE IF NOT EXISTS projects(id TEXT PRIMARY KEY,name TEXT,entry TEXT,current_snapshot TEXT,created_at TEXT);
+db.exec(`CREATE TABLE IF NOT EXISTS live_state_audits(project_id TEXT NOT NULL,snapshot_id TEXT NOT NULL,state_id TEXT NOT NULL,data TEXT NOT NULL,created_at TEXT NOT NULL,PRIMARY KEY(project_id,snapshot_id,state_id));
+CREATE TABLE IF NOT EXISTS projects(id TEXT PRIMARY KEY,name TEXT,entry TEXT,current_snapshot TEXT,created_at TEXT);
 CREATE TABLE IF NOT EXISTS snapshots(id TEXT PRIMARY KEY,project_id TEXT,parent_id TEXT,entry TEXT,hash TEXT,created_at TEXT,description TEXT);
 CREATE TABLE IF NOT EXISTS audits(id TEXT PRIMARY KEY,project_id TEXT,snapshot_id TEXT,status TEXT,result TEXT,error TEXT,created_at TEXT);
 CREATE TABLE IF NOT EXISTS proposals(id TEXT PRIMARY KEY,project_id TEXT,snapshot_id TEXT,issue_id TEXT,status TEXT,data TEXT,created_at TEXT);

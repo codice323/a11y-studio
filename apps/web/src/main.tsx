@@ -3,7 +3,7 @@ import type { ImageAltAnalysis, ImagePurpose, RepairAnalysis } from '../../../pa
 import { useEffect, useRef, useState, type FormEvent, type KeyboardEvent, type ReactNode } from 'react';
 import { createRoot } from 'react-dom/client';
 import {
-  Activity, ArrowRight, ArrowUpRight, Check, CheckCircle2, ChevronRight, Code2, Download,
+  Activity, ArrowRight, ArrowUpRight, Check, CheckCircle2, ChevronLeft, ChevronRight, PanelsTopLeft, Code2, Download,
   FileArchive, FileCode2, FileUp, History, Info, Layers, Link2, LoaderCircle, LockKeyhole,
   RefreshCw, RotateCcw, ScanSearch, ShieldCheck, Sparkles, X,
 } from 'lucide-react';
@@ -11,6 +11,8 @@ import { reviewRepairIssue, sourceRepairKinds } from '../../../packages/shared/s
 import { DetectionReview } from './DetectionReview';
 import type { AiAuditFinding } from '../../../packages/shared/types';
 import { Evidence, type EvidenceView } from './Evidence';
+import { LiveComparison } from './LiveComparison';
+import { ComparisonVersions, type VersionPair } from './VersionComparison';
 import type { PageInspection, PanoramaJump } from './Panorama';
 import type { PanoramaIssue } from '../../../packages/shared/panorama';
 import { versionName, type HistoryItem, type Issue, type Proposal, type State, type Verification } from './types';
@@ -44,6 +46,14 @@ const controlTabs = [
   { id: 'issues', label: '问题与历史' },
   { id: 'assistant', label: 'AI 修复助手' },
 ] as const;
+const workspaceViews = [
+  {id:'workspace', label:'诊断工作台', icon:ScanSearch},
+  {id:'live', label:'实时浏览器', icon:PanelsTopLeft},
+  {id:'report', label:'结果报告', icon:Activity},
+] as const;
+type WorkspaceView = typeof workspaceViews[number]['id'];
+const sidebarPreference = 'a11y-studio.sidebar-collapsed';
+
 type ControlTab = typeof controlTabs[number]['id'];
 type RepairDraft = { value: string; edited?: boolean; proposal: Proposal | null; analysis?: ImageAltAnalysis | RepairAnalysis; purpose?: ImagePurpose };
 const applyingLabel = '正在应用补丁并重新验证…';
@@ -81,7 +91,27 @@ function App() {
   const [view, setView] = useState<EvidenceView>('visual');
   const [list, setList] = useState<'open' | 'history'>('open');
   const [controlTab, setControlTab] = useState<ControlTab>('issues');
-  const [page, setPage] = useState<'workspace' | 'report'>('workspace');
+  const [page, setPage] = useState<WorkspaceView>('workspace');
+  const [collapsed, setCollapsed] = useState(() => {
+    try { return localStorage.getItem(sidebarPreference) === 'true'; } catch { return false; }
+  });
+  const [chosenPair, setChosenPair] = useState<{scope:string; pair:VersionPair}>();
+  const [liveView, setLiveView] = useState<{scope:string; start?:string; diagnosticPath?:string}>();
+  const [liveInspection, setLiveInspection] = useState<PageInspection>();
+  const [pageRequest, setPageRequest] = useState<{path:string}>();
+  const projectScope = state ? state.project.id + ':' + state.project.currentSnapshot : '';
+  const pairScope = projectScope + ':' + (panoramaJump?.key ?? '');
+  const pair = chosenPair?.scope === pairScope ? chosenPair.pair : {
+    left:panoramaJump?.left ?? state?.originalSnapshotId ?? '',
+    right:panoramaJump?.right ?? state?.project.currentSnapshot ?? '',
+  };
+  const activeLabel = workspaceViews.find(item => item.id === page)?.label;
+  function changePair(pair:VersionPair) { setChosenPair({scope:pairScope,pair}); }
+  function toggleSidebar() {
+    const next = !collapsed;
+    setCollapsed(next);
+    try { localStorage.setItem(sidebarPreference,String(next)); } catch { /* This browser can still collapse the sidebar. */ }
+  }
   const [ai, setAi] = useState({ configured: false, visionConfigured: false });
   const [versionNameDraft, setVersionNameDraft] = useState<string | null>(null);
   const renameButton = useRef<HTMLButtonElement>(null);
@@ -105,7 +135,7 @@ function App() {
       setControlTab('issues');
     }
   }, [inspection, panoramaIssue, state?.project.id]);
-  const panoramaContext = panoramaIssue && panoramaIssue.version === state?.project.currentSnapshot &&
+  const panoramaContext = panoramaIssue?.stateId && panoramaIssue.version === state?.project.currentSnapshot &&
     panoramaIssue.item.ruleId === 'button-name' && panoramaIssue.item.source ? panoramaIssue : undefined;
   const issue: Issue | undefined = panoramaContext ? {
     ...panoramaContext.item, impact: panoramaContext.item.impact ?? 'unknown', html: panoramaContext.item.html ?? '', helpUrl: 'https://www.w3.org/WAI/WCAG22/Understanding/name-role-value.html',
@@ -205,12 +235,26 @@ function App() {
     return next;
   }
 
-  function openPage(next: 'workspace' | 'report') {
+  function openPage(next: WorkspaceView) {
+    if (next === 'live' && state) {
+      const path = inspection?.projectId === state.project.id ? inspection.path : undefined;
+      if (liveView?.scope !== projectScope || liveView.diagnosticPath !== path) {
+        const file = path?.split('#')[0];
+        const start = state.project.mode !== 'react-source' && file && /\.html?$/i.test(file)
+          ? decodeURIComponent(file.slice(1)) : undefined;
+        setLiveInspection(undefined);
+        setLiveView({scope:projectScope,start,diagnosticPath:path});
+      }
+    }
     setPage(next);
     requestAnimationFrame(() => heading.current?.focus());
   }
 
   function resetSelection() {
+    setChosenPair(undefined);
+    setLiveView(undefined);
+    setLiveInspection(undefined);
+    setPageRequest(undefined);
     setPanoramaJump(undefined);
     setPanoramaIssue(undefined);
     setRecovery(undefined);
@@ -516,38 +560,47 @@ function App() {
 
   function selectListedIssue(item: Issue) {
     const found = stateFindings?.find(value => value.id === item.id);
-    if (found && currentInspection?.stateId && state) {
-      setPanoramaIssue({item:found,stateId:currentInspection.stateId,version:state.project.currentSnapshot,path:currentInspection.path});
+    if (found && currentInspection && state) {
+      setPanoramaIssue({item:found,stateId:currentInspection.stateId ?? '',version:state.project.currentSnapshot,path:currentInspection.path});
       setSelection(null);
       setView('visual');
       openAssistant();
     } else chooseIssue(item);
   }
 
-  return <div className="app">
+  return <div className={collapsed ? 'app sidebar-collapsed' : 'app'}>
     <a className="skip-link" href="#page-title">跳到主要内容</a>
     <aside className="sidebar">
       <a className="logo" href="/" aria-label="A11y Studio 首页">
         <span className="logomark"><span /><span /><span /><span /></span>
-        <span><strong>A11y Studio</strong><small>ACCESSIBILITY WORKSPACE</small></span>
+        <span className="logo-text"><strong>A11y Studio</strong><small>ACCESSIBILITY WORKSPACE</small></span>
       </a>
-      <nav aria-label="工作空间导航">
+      <nav id="workspace-nav" aria-label="工作空间导航">
         <div className="navlabel">工作空间</div>
-        <button className={'nav ' + (page === 'workspace' ? 'active' : '')} aria-current={page === 'workspace' ? 'page' : undefined} onClick={() => openPage('workspace')}><ScanSearch size={17} />诊断工作台</button>
-        <button className={'nav ' + (page === 'report' ? 'active' : '')} aria-current={page === 'report' ? 'page' : undefined} disabled={!state} onClick={() => openPage('report')}><Activity size={17} />结果报告</button>
+        {workspaceViews.map(({id,label,icon:Icon}) => <button key={id} type="button"
+          className={'nav' + (page === id ? ' active' : '')} aria-current={page === id ? 'page' : undefined}
+          aria-label={label} title={collapsed ? label : undefined} disabled={id !== 'workspace' && !state} onClick={() => openPage(id)}>
+          <Icon size={18} aria-hidden="true" /><span className="nav-text">{label}</span>
+        </button>)}
       </nav>
       <div className="sidebar-bottom">
-        <div className="sidebox"><ShieldCheck size={19} /><strong>受控修复</strong><p>审核补丁、复测副本、保留版本。</p></div>
-        <div className="local-status"><i />本地工作区</div>
+        <div className="sidebar-information">
+          <div className="sidebox"><ShieldCheck size={19} /><strong>受控修复</strong><p>审核补丁、复测副本、保留版本。</p></div>
+          <div className="local-status"><i />本地工作区</div>
+        </div>
+        <button type="button" className="sidebar-toggle" aria-expanded={!collapsed} aria-controls="workspace-nav"
+          aria-label={collapsed ? '展开侧边栏' : '折叠侧边栏'} title={collapsed ? '展开侧边栏' : '折叠侧边栏'} onClick={toggleSidebar}>
+          {collapsed ? <ChevronRight size={18} aria-hidden="true" /> : <ChevronLeft size={18} aria-hidden="true" />}
+        </button>
       </div>
     </aside>
     <main className={state ? undefined : 'home-page'}>
-      <header className="topbar"><div>工作空间 <span>/</span> <b>{state ? page === 'report' ? '结果报告' : '诊断工作台' : '导入项目'}</b></div><div className="topright"><span className="pill"><i />本地模式</span></div></header>
+      <header className="topbar"><div>工作空间 <span>/</span> <b>{state ? activeLabel : '导入项目'}</b></div><div className="topright"><span className="pill"><i />本地模式</span></div></header>
       <div className={state ? 'content' : 'content home-content'}>
         <div className={'page-intro' + (state ? '' : ' hero')}>
           <div><div className="eyebrow"><span />ACCESSIBILITY WORKSPACE</div>
-            <h1 id="page-title" tabIndex={-1} ref={heading}>{state ? page === 'report' ? '结果报告' : '网页无障碍工作台' : '让每个人，都能更好地使用网页'}</h1>
-            <p>{state ? page === 'report' ? '回顾实际问题变化、验证证据和人工复核项。' : '定位问题、审核补丁，并对比修复前后的证据。' : '面向网页开发者、设计师和小型团队的 AI 无障碍检测与智能修复平台。用户上传自己的网页后，系统自动检测问题、可视化定位、解释影响、提供 AI 修复方案，并在用户确认后修改代码，重新验证修复效果，最终导出网页和检测报告。'}</p>
+            <h1 id="page-title" tabIndex={-1} ref={heading}>{state ? page === 'workspace' ? '网页无障碍工作台' : activeLabel : '让每个人，都能更好地使用网页'}</h1>
+            <p>{state ? page === 'report' ? '回顾检测覆盖、问题变化和验证证据。' : page === 'live' ? '同步操作两个版本，核对导航和交互状态。' : '定位问题、审核补丁并对比修复证据。' : '面向网页开发者、设计师和小型团队的 AI 无障碍检测与智能修复平台。用户上传自己的网页后，系统自动检测问题、可视化定位、解释影响、提供 AI 修复方案，并在用户确认后修改代码，重新验证修复效果，最终导出网页和检测报告。'}</p>
           </div>
           {state && <div className="intro-actions">
             <button className="secondary" disabled={working} onClick={() => { setState(null); resetSelection(); openPage('workspace'); setError(''); setNotice(''); }}><Layers size={15} />切换项目</button>
@@ -560,8 +613,23 @@ function App() {
         {busy && <div className="busy"><span role="status"><LoaderCircle className="spin" size={16} />{busy}</span>{jobId && <button className="cancel-job" disabled={cancelRequested} onClick={() => void cancelJob()}>{cancelRequested ? '正在取消…' : '取消任务'}</button>}</div>}
 
         {!state ? <Home fixtures={fixtures} projects={projects} busy={working} onCreate={createProject} onOpen={openProject} onError={setError} /> :
-          page === 'report' ? <Report state={state} busy={working} onRollback={rollback} onOpen={(item) => chooseHistory(item, 'visual', true, true)} onWorkspace={() => openPage('workspace')} /> :
           <>
+          {page === 'report' && <Report state={state} busy={working} onRollback={rollback} onOpen={(item) => chooseHistory(item, 'visual', true, true)} onWorkspace={() => openPage('workspace')} />}
+          {liveView?.scope === projectScope && <section className="workspace-view live-workspace panel" hidden={page !== 'live'} aria-label="实时浏览器工作区">
+            <div className="panel-head"><h2>{state.project.name}</h2>
+              {liveInspection?.path && state.project.mode !== 'react-source' && /\.html?$/i.test(liveInspection.path.split('#')[0]) &&
+                <button className="secondary" onClick={() => {
+                  setPageRequest({path:liveInspection.path.split('#')[0]});
+                  openPage('workspace');
+                }}>在诊断中查看当前页面</button>}
+            </div>
+            {page === 'live' && <ComparisonVersions state={state} pair={pair} onPair={changePair} busy={working} />}
+            {pair.left && pair.right && <LiveComparison project={state.project.id} left={pair.left} right={pair.right}
+              names={{left:versionName(state,pair.left),right:versionName(state,pair.right)}} start={liveView.start}
+              current={state.project.currentSnapshot} onInspection={setLiveInspection} />}
+          </section>}
+          {page === 'live' && liveView?.scope !== projectScope && <button className="secondary" onClick={() => openPage('live')}>打开当前版本的实时浏览器</button>}
+          <section className="workspace-view" hidden={page !== 'workspace'} aria-label="诊断工作区">
             <div className="project-strip">
               <div className="project-symbol"><FileCode2 size={19} /></div>
               <div className="project-title"><b>{state.project.name}</b><span>{state.project.mode==='react-source'?'React 原始组件工程':state.project.mode==='static-source'?'静态源码工程':'网页快照'}：{state.project.entry} · 当前版本 {versionName(state, state.project.currentSnapshot)}</span></div>
@@ -622,8 +690,7 @@ function App() {
                       {Object.entries(impactName).map(([id, label]) => <option key={id} value={id}>{label}</option>)}
                     </select>
                   </div>}
-                  {currentInspection?.coverage && <p className="muted">{currentInspection.coverage}
-                    {state.project.mode === 'snapshot' && ' 静态快照，仅检测可用页面，未执行原站脚本。'}</p>}
+                  {currentInspection?.coverage && <p className="workspace-scan-status muted">{currentInspection.coverage}</p>}
                   {stateFindings && <p className="muted">所选页面或状态 · <code>{currentInspection?.path}</code>{currentInspection?.comparison && <> · {currentInspection.comparison}</>}</p>}
                   <div className="issue-list" role="region" aria-label={list === 'open' ? '待处理问题' : '已解决问题'}>
                     {list === 'open' ? filtered.length ? filtered.map(item =>
@@ -657,14 +724,14 @@ function App() {
                 </div>
               </div>
               <div className="evidence-column" role="group" tabIndex={-1} ref={evidenceFocus} aria-label="修复效果对比">
-                <Evidence state={state} jump={panoramaJump} onInspection={setInspection} scopeTargetId={panoramaIssue?.item.id} stateScoped={Boolean(panoramaIssue)} issue={issue} history={history} proposal={proposal} view={view} onView={setView} problem={(history?.issue ?? issue) ? issueTitle((history?.issue ?? issue)!) : '当前问题'}
+                <Evidence state={state} versionsVisible={page === 'workspace'} pair={pair} onPair={changePair} pageRequest={pageRequest} jump={panoramaJump} onInspection={setInspection} scopeTargetId={panoramaIssue?.item.id} stateScoped={Boolean(panoramaIssue)} issue={issue} history={history} proposal={proposal} view={view} onView={setView} problem={(history?.issue ?? issue) ? issueTitle((history?.issue ?? issue)!) : '当前问题'}
                   impact={issueNames[(history?.issue ?? issue)?.ruleId ?? '']?.[1] ?? (history?.issue ?? issue)?.description ?? '需核对目标元素。'}
                   busy={working} applying={busy === applyingLabel} archivedEvidence={archivedEvidence}
                   patchReady={patchReady} onConfirm={() => setConfirmApply(true)} onReject={reject} />
               </div>
             </div>
             <div className="bottom-note"><ShieldCheck size={16} /><span>修复应用于本地副本。自动复测结果和人工检查项见报告。</span><button onClick={() => openPage('report')}>查看完整报告 <ArrowRight size={14} /></button></div>
-          </>}
+          </section></>}
         <footer><span>A11y Studio · 网页无障碍工作区</span><span>基于 Chromium 和 axe-core</span></footer>
       </div>
     </main>
@@ -956,6 +1023,28 @@ function Report({ state, onRollback, onOpen, onWorkspace, busy }: {
         }{page.error && ` · ${page.error}`}</li>)}</ul>
         {site.attempts.length > 0 && <details><summary>未完成的扫描尝试</summary>
           <ul>{site.attempts.map(attempt => <li key={attempt.scope}><code>{attempt.path}</code> · {attempt.error ?? '扫描未完成'}</li>)}</ul>
+        </details>}
+        <details><summary>按检测维度查看覆盖</summary>
+          <ul>
+            <li>结构、语义、表单、视觉对比及目标尺寸 · {site.states.filter(item=>item.scan).length} 个历史状态有 axe 规则日志，{site.liveStates.length} 个实时状态有独立扫描。</li>
+            <li>键盘 · {site.states.filter(item=>item.keyboard.status==='completed').length} 个历史状态完成有限 Tab 探查；实时检测记录用户实际操作。</li>
+            <li>动态组件 · {site.states.filter(item=>item.coverage==='interaction').length} 个历史重放状态。未触发的状态未覆盖。</li>
+            <li>媒体及人工体验 · 字幕内容、音频描述、读屏播报和触屏操作需要人工体验。</li>
+          </ul>
+        </details>
+        {site.liveStates.length > 0 && <details><summary>实时交互扫描 · {site.liveStates.length} 个独立状态</summary>
+          {site.liveStates.map(item=><details key={item.id}>
+            <summary>{item.path} · {item.createdAt} · {item.findings.length} 项确定性违规</summary>
+            <p>axe-core {item.engine.version} · {item.rules.length} 条规则记录 · {item.actions.length} 个实际操作 · 焦点 {item.focus || '文档'}</p>
+            <ul>{item.findings.map(finding=><li key={finding.id}>{finding.ruleId} · <code>{finding.selector}</code></li>)}</ul>
+            <ul>{item.incomplete.map(rule=><li key={rule.id}>{rule.id} · {rule.count} 项 axe 待复核</li>)}
+              {item.observations.map((item,index)=><li key={index}>{item.rule} · {item.evidence}</li>)}</ul>
+            <p>媒体轨道记录：{item.media.length} 个播放器。实际播报、字幕内容及音频描述需人工确认。</p>
+            {item.media.length > 0 && <ul>{item.media.map((medium,index)=><li key={index}>{medium.type} · {
+              medium.tracks.map(track=>track.kind + (track.language ? ' '+track.language : '')).join('、') || '未声明轨道'
+            }</li>)}</ul>}
+            {item.resources.map((item,index)=><p key={index}>{item.path} · {item.reason}</p>)}
+          </details>)}
         </details>}
         {site.states.map(item => <details key={item.stateId}>
           <summary>{item.title} · {item.sourcePath ?? item.path} · {item.label} · {item.coverage === 'static' ? '静态页面' : item.coverage === 'dynamic-initial' ? '动态初始状态' : '交互状态'} · {item.issues.length} 项违规 / {item.manual} 项 axe 待复核 · V2 {item.keyboard.findings.length} 项行为证据</summary>

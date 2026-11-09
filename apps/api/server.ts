@@ -6,6 +6,7 @@ import { collectPanorama, collectSite, panoramaInput, panoramaInventory, panoram
 import { imageVisionConfigured } from './ai/vision';
 import { missingImageEvidence } from './ai/visual-context';
 import { decideAiFinding, requestAiAudit } from './audit-ai';
+import {closeLive,operateLive,scanLive,startLive} from './live-comparison';
 const app=express();app.disable('x-powered-by');app.use((req,res,next)=>{const origin=req.get('origin');if(origin){try{const o=new URL(origin);if(!['127.0.0.1','localhost'].includes(o.hostname)||!['http:'].includes(o.protocol)||![String(process.env.PORT||4173),'5173'].includes(o.port))return res.status(403).json({error:'请求来源无效。'});}catch{return res.status(403).json({error:'请求来源无效。'});}}next()});app.use((req,res,next)=>{
  const host = req.get('host');
  if (!host || !/^(?:localhost|127\.0\.0\.1)(?::\d+)?$/i.test(host)) return res.status(403).json({error:'请求主机无效。'});
@@ -46,6 +47,22 @@ app.get('/api/projects/:id/compare', (req, res, next) => {
  }
  try { res.set('Cache-Control', 'no-store').json(compareSnapshots(req.params.id, left, right, issueId, selector)); }
  catch (error) { next(error); }
+});
+app.post('/api/projects/:id/live',async(req,res,next)=>{
+ try{res.set('Cache-Control','no-store').status(201).json(await startLive(req.params.id,req.body));}catch(error){next(error);}
+});
+app.post('/api/projects/:id/live/:session/action',async(req,res,next)=>{
+ try{res.set('Cache-Control','no-store').json(await operateLive(req.params.id,req.params.session,req.body));}catch(error){next(error);}
+});
+app.post('/api/projects/:id/live/:session/scan/:side',async(req,res,next)=>{
+ try{
+  if(req.params.side!=='left'&&req.params.side!=='right')return res.status(400).json({error:'无效的比较侧。'});
+  res.set('Cache-Control','no-store').json(await scanLive(req.params.id,req.params.session,req.params.side));
+ }catch(error){next(error);}
+});
+app.delete('/api/projects/:id/live/:session',(req,res)=>{
+ closeLive(req.params.id,req.params.session);
+ res.sendStatus(204);
 });
 app.get('/api/projects/:id/panorama', (req,res,next) => {
  try {

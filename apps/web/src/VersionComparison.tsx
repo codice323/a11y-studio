@@ -41,10 +41,26 @@ function ComparisonSummary({ comparison, diffs }: { comparison: Comparison; diff
   </section>;
 }
 
-export function VersionComparison({ state, target, pair, onPair, view, onView, onHistory, jump, onInspection, scopeTargetId, busy }: {
+export function ComparisonVersions({state,pair,onPair,busy}: {
+  state:State; pair:VersionPair; onPair:(pair:VersionPair)=>void; busy:boolean;
+}) {
+  return <div className="version-comparison-toolbar" role="group" aria-label="只读版本对比">
+    {sides.map(side => <label key={side}>{side === 'left' ? '左侧版本' : '右侧版本'}
+      <select disabled={busy} value={pair[side]} title={versionName(state,pair[side])}
+        onChange={event => onPair({...pair,[side]:event.target.value})}>
+        {!pair[side] && <option value="">原始版本缺失</option>}
+        {state.snapshots.map(snapshot => <option key={snapshot.id} value={snapshot.id}>{versionName(state,snapshot.id)}</option>)}
+      </select>
+    </label>)}
+    <button type="button" className="secondary" disabled={busy || !pair.left || pair.left === pair.right}
+      onClick={() => onPair({left:pair.right,right:pair.left})}>交换版本</button>
+  </div>;
+}
+
+export function VersionComparison({ state, target, pair, onPair, view, onView, onHistory, jump, onInspection, scopeTargetId, busy, pageRequest, versionsVisible }: {
   state: State; target?: Issue; pair: VersionPair; onPair: (pair: VersionPair) => void;
   view: EvidenceView; onView: (view: EvidenceView) => void; onHistory?: () => void;
-  jump?: PanoramaJump; onInspection:(value:PageInspection)=>void; scopeTargetId?:string; busy:boolean;
+  jump?: PanoramaJump; onInspection:(value:PageInspection)=>void; scopeTargetId?:string; busy:boolean; versionsVisible:boolean; pageRequest?: {path:string};
 }) {
   const [scoped, setScoped] = useState(Boolean(jump));
   const { left, right } = pair;
@@ -123,28 +139,20 @@ export function VersionComparison({ state, target, pair, onPair, view, onView, o
     <div className="panel-head"><h2 id="evidence-title">修复效果对比</h2>
       {onHistory && <button type="button" className="secondary comparison-switch" onClick={onHistory}>返回本次修复证据</button>}
     </div>
-    <div className="evidence-tabs" role="group" aria-label="修复效果视图">
-      {views.map(([id, label]) => <button key={id} type="button" aria-pressed={view === id} onClick={() => onView(id)}>{label}</button>)}
-      <details className="developer-options"><summary>开发者选项</summary><button type="button" aria-pressed={view === 'diff'} onClick={() => onView('diff')}>代码变更</button></details>
-    </div>
-    <div className="version-comparison-toolbar" role="group" aria-label="只读版本对比">
-      <label>左侧版本<select disabled={busy} value={left} title={name(left)} onChange={event => onPair({ ...pair, left: event.target.value })}>
-        {!left && <option value="">原始版本缺失</option>}
-        {state.snapshots.map(snapshot => <option key={snapshot.id} value={snapshot.id}>{name(snapshot.id)}</option>)}
-      </select></label>
-      <button type="button" className="secondary" disabled={!left || left === right} onClick={() => onPair({ left: right, right: left })}>交换版本</button>
-      <label>右侧版本<select disabled={busy} value={right} title={name(right)} onChange={event => onPair({ ...pair, right: event.target.value })}>
-        {state.snapshots.map(snapshot => <option key={snapshot.id} value={snapshot.id}>{name(snapshot.id)}</option>)}
-      </select></label>
-    </div>
-    {target && <details className="evidence-target"><summary>查看定位详情</summary><span>{target.ruleId}</span><code>{selector || '页面级问题'}</code></details>}
-    {(!scoped || view === 'diff') && (!left ? <p className="comparison-status" role="status">找不到原始快照。请选择要对比的左侧版本。</p>
-      : !request ? <p className="comparison-status" role="status">正在加载所选版本的对比证据…</p>
-      : request.error ? <p className="comparison-status" role="status">{request.error} <button type="button" className="secondary" onClick={() => setRetry(retry + 1)}>重试对比</button></p>
-      : left === right || same ? <p className="comparison-status" role="status">这两个版本暂无可检测差异。{left === right && '左右选择了同一版本。'}</p>
-      : null)}
+    {versionsVisible && <ComparisonVersions state={state} pair={pair} onPair={onPair} busy={busy} />}
     <Panorama state={state} pair={pair} jump={jump} onInspection={onInspection} scopeTargetId={scopeTargetId} disabled={busy}
-      onScope={setScoped} targetId={target?.id} view={view} />
+      onScope={setScoped} targetId={target?.id} view={view} pageRequest={pageRequest} viewTools={<>
+        <div className="evidence-tabs comparison-view-tabs" role="group" aria-label="修复效果视图">
+          {views.map(([id, label]) => <button key={id} type="button" aria-pressed={view === id} onClick={() => onView(id)}>{label}</button>)}
+          <details className="developer-options" data-active={view === 'diff'}><summary>开发者选项</summary><button type="button" aria-pressed={view === 'diff'} onClick={event => {
+            event.currentTarget.closest('details')!.open = false;
+            onView('diff');
+          }}>代码变更</button></details>
+        </div>
+        {target && <details className="evidence-target"><summary>查看定位详情</summary><span>{target.ruleId}</span><code>{selector || '页面级问题'}</code></details>}
+        {request?.error && <p className="comparison-status" role="status">{request.error} <button type="button" className="secondary" onClick={() => setRetry(retry + 1)}>重试对比</button></p>}
+        {(!scoped || view === 'diff') && !request?.error && (left === right || same) && <p className="comparison-status muted">这两个版本暂无可检测差异。{left === right && '左右选择了同一版本。'}</p>}
+      </>} />
     {!scoped && view === 'visual' && <>
       <div className="shot-options" role="group" aria-label="截图排列">
         {layouts.map(([id, label]) => <button key={id} type="button" aria-pressed={layout === id} onClick={() => setLayout(id)}>{label}</button>)}

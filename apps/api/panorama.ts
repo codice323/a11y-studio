@@ -110,7 +110,9 @@ export function siteReport(projectId: string, snapshotId: string) {
     return {pageId:hash(path).slice(0,20),path,status,issues:status === 'completed' ? issues.size : null,
       states:captures.length, error:status !== 'completed' ? attempt?.error : undefined};
   });
-  return {projectId,snapshotId,mode,pages,states,
+  const liveStates = db.prepare('SELECT data FROM live_state_audits WHERE project_id=? AND snapshot_id=? ORDER BY created_at DESC LIMIT 30')
+    .all(projectId,snapshotId).map(row => JSON.parse((row as {data:string}).data) as Awaited<ReturnType<typeof import('./live-comparison').scanLive>>);
+  return {projectId,snapshotId,mode,pages,states,liveStates,
     attempts:attempts.filter(attempt => attempt.status !== 'completed'),
     confirmed:pages.reduce((sum, page) => sum + (page.issues ?? 0), 0),
     untested:pages.filter(page => page.status !== 'completed').map(page => page.path)};
@@ -182,8 +184,9 @@ function checkpointMatches(expected: Checkpoint, actual: Checkpoint, action?: Pa
     (action !== 'scroll' || Math.abs(expected.scrollY - actual.scrollY) <= 3);
 }
 
-async function act(page: Page, step: PanoramaStep, signal: AbortSignal) {
+export async function act(page: Page, step: PanoramaStep, signal: AbortSignal) {
   signal.throwIfAborted();
+  let invalidFields: {id:string;referenced:boolean}[] | undefined;
   if (step.action === 'tab' || step.action === 'shift-tab' || step.action === 'escape') {
     await page.keyboard.press({ tab: 'Tab', 'shift-tab': 'Shift+Tab', escape: 'Escape' }[step.action]);
   } else if (step.action === 'scroll') {
@@ -214,9 +217,21 @@ async function act(page: Page, step: PanoramaStep, signal: AbortSignal) {
     }, navigationPath);
     if (step.action === 'validate') {
       if (eligibility !== 'submission') throw new Error('请选择表单提交控件以触发原生校验。');
-      await target.evaluate(el => {
+      invalidFields = await target.evaluate(el => {
         const form = (el as HTMLButtonElement).form;
-        if (!form || form.reportValidity()) throw new Error('表单当前没有原生校验错误，未执行提交。');
+        if (!form) throw new Error('目标没有关联表单。');
+        const fields: {id:string;referenced:boolean}[] = [];
+        const listener = {handleEvent(event:Event) {
+          const field = event.target;
+          if (field instanceof Element && fields.length < 24) fields.push({id:field.id,
+            referenced:['aria-describedby','aria-errormessage'].some(attr =>
+              (field.getAttribute(attr) ?? '').split(/\s+/).some(value=>Boolean(document.getElementById(value))))});
+        }};
+        form.addEventListener('invalid',listener,true);
+        try {
+          if (form.reportValidity()) throw new Error('表单当前没有原生校验错误，未执行提交。');
+        } finally { form.removeEventListener('invalid',listener,true); }
+        return fields;
       });
     } else if (eligibility !== 'local') {
       throw new Error('不允许提交表单、打开外部资源或操作敏感输入。');
@@ -230,9 +245,10 @@ async function act(page: Page, step: PanoramaStep, signal: AbortSignal) {
   // Wait for paint and short client-side updates, within the bounded replay.
   await page.waitForTimeout(120);
   signal.throwIfAborted();
+  return invalidFields;
 }
 
-async function controlsFor(page: Page): Promise<Control[]> {
+export async function controlsFor(page: Page): Promise<Control[]> {
   const output: Control[] = [];
   const session = await page.context().newCDPSession(page);
   try {

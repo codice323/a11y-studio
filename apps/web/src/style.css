@@ -484,3 +484,82 @@ footer { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 8p
 }
 
 .import-resource-warning { padding: 10px 14px; margin-block: 8px; }
+
+.live-screen { display:block; width:100%; padding:0; border:1px solid var(--line); cursor:pointer; overflow:hidden; background:#f6f7f9; }
+.live-screen[aria-disabled="true"] { cursor:wait; opacity:1; }
+.live-screen img { display:block; width:100%; height:auto; }
+.live-screen:focus-visible { outline:3px solid #2369cc; outline-offset:2px; }
+
+/* Workspace navigation and comparison controls share a compact size scale. */
+.app { --sidebar-size: 204px; --workspace-control-height: 38px; grid-template-columns: var(--sidebar-size) minmax(0, 1fr); }
+.app.sidebar-collapsed { --sidebar-size: 64px; }
+.sidebar-bottom { display: grid; gap: 10px; }
+.sidebar-toggle {
+  justify-self: end; display: grid; place-items: center; width: 40px; height: 40px;
+  color: #e4edff; background: #1c3058; border: 1px solid #5873a4; border-radius: 8px;
+}
+.sidebar-toggle:hover { background: #273e73; color: white; }
+.sidebar-collapsed .sidebar { padding-inline: 8px; }
+.sidebar-collapsed :is(.logo-text,.navlabel,.nav-text,.sidebar-information) { display: none; }
+.sidebar-collapsed .logo { justify-content: center; margin-bottom: 28px; }
+.sidebar-collapsed .nav { justify-content: center; padding-inline: 0; }
+.sidebar-collapsed .sidebar-toggle { justify-self: center; }
+.workspace-view[hidden] { display: none; }
+.content:not(.home-content) { padding-inline: clamp(16px, 2vw, 26px); }
+.content:not(.home-content) .page-intro { margin-bottom: 16px; }
+.workbench { grid-template-columns: minmax(300px, 29%) minmax(0, 1fr); gap: 12px; }
+.issue { gap: 6px; padding: 4px 6px; }
+.issue-summary { grid-template-columns: minmax(0, max-content) auto; justify-content: start; align-items: baseline; column-gap: 6px; }
+.issue-summary .severity { white-space: nowrap; }
+.issue-summary b { line-height: 1.35; }
+.issue-summary small { max-width: 100%; }
+
+.version-comparison-toolbar,
+.page-comparison-toolbar { display: grid; align-items: end; gap: 8px; padding: 7px 12px; }
+.version-comparison-toolbar { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto; }
+.page-comparison-toolbar { grid-template-columns: minmax(0, 1.35fr) minmax(0, 1fr) auto; }
+:is(.version-comparison-toolbar,.page-comparison-toolbar) label {
+  display: grid; min-width: 0; gap: 3px; color: var(--muted); font-size: 12px; font-weight: 600;
+}
+:is(.version-comparison-toolbar,.page-comparison-toolbar) :is(select,button) {
+  min-width: 0; height: var(--workspace-control-height); min-height: var(--workspace-control-height);
+  padding-block: 0; align-items: center; font-size: 12px;
+}
+:is(.version-comparison-toolbar,.page-comparison-toolbar) select {
+  display: block; width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+:is(.version-comparison-toolbar,.page-comparison-toolbar) button { white-space: nowrap; }
+.comparison-view-tabs { margin-block: 5px; }
+.comparison-view-tabs :is(button,summary) { min-height: var(--workspace-control-height); }
+.comparison-view-tabs summary { display: flex; align-items: center; gap: 5px; }
+.comparison-view-tabs summary::after { content: '⌄'; }
+.panorama { margin-block: 0; }
+.live-workspace > section { padding: 8px 12px 12px; }
+.live-workspace .panorama-bar { gap: 7px; }
+.live-workspace .panorama-bar > :is(button,label > select) { min-height: var(--workspace-control-height); }
+.live-workspace .panorama-pair > section > p { overflow-wrap: anywhere; font-size: 13px; }
+.live-workspace .panel-head h2 { overflow-wrap: anywhere; }
+@media (max-width: 1120px) { .app { --sidebar-size: 166px; } }
+@media (max-width: 900px) { .workbench { grid-template-columns: minmax(0, 1fr); } }
+@media (max-width: 720px) {
+  .sidebar-bottom { display: block; margin: 0 0 0 auto; }
+  .sidebar-information { display: none; }
+  .sidebar-toggle { width: 38px; height: 38px; }
+  .sidebar-collapsed .logo { margin-bottom: 0; }
+  .sidebar-collapsed .nav { width: 40px; }
+  .sidebar-collapsed .sidebar { padding-inline: 12px; }
+  .app .content:not(.home-content) { padding-inline: 14px; }
+}
+@media (max-width: 460px) {
+  :is(.version-comparison-toolbar,.page-comparison-toolbar) { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  :is(.version-comparison-toolbar,.page-comparison-toolbar) > button { grid-column: 1 / -1; justify-self: start; }
+}
+.workspace-scan-status { margin: 0 12px 4px; font-size: 12px; }
+.comparison-view-tabs .developer-options[data-active="true"] summary { color: #193ea5; background: white; }
+.shot-options button, [aria-label="页面截图选项"] select { min-height: var(--workspace-control-height); }
+@media (max-width: 900px) { .workbench-controls { height: auto; max-height: var(--workbench-height); } }
+@media (max-width: 720px) {
+  .sidebar nav { order: 3; flex-basis: 100%; }
+  .sidebar-bottom { order: 2; }
+  .sidebar-collapsed nav { order: 0; flex-basis: auto; }
+}
