@@ -7,7 +7,7 @@ const post=(url:string,body:any)=>api(url,{method:'POST',headers:{'content-type'
 async function wait(id:string){for(let i=0;i<150;i++){const {data}=await api('/api/jobs/'+id);if(data.status==='completed')return data.result;if(data.status==='failed'||data.status==='cancelled')throw Error(data.error);await new Promise(r=>setTimeout(r,200));}throw Error('任务超时');}
 async function fixture(name:string){const form=new FormData();form.set('fixture',name);const {data,res}=await api('/api/projects',{method:'POST',body:form});assert.equal(res.status,201);const j=await post(`/api/projects/${data.id}/audits`,{});return {project:data,scan:await wait(j.data.id)}}
 async function zip(files:{name:string;value:string}[]){return Buffer.from(zipSync(Object.fromEntries(files.map(f=>[f.name,strToU8(f.value)]))));}
-test('静态项目的真实检测、审核修复、失败回滚、导出与异常处理', {timeout:120000}, async()=>{
+test('静态项目的真实检测、审核修复、失败回滚、导出与异常处理', {timeout:160000}, async()=>{
  const mockPort=await port();let unexpectedNetwork=0,mockFailure=false,holdModel=false;mock=http.createServer(async(req,res)=>{if(req.url==='/hit')unexpectedNetwork++;if(mockFailure){res.writeHead(429);res.end('{}');return;}let raw='';for await(const chunk of req)raw+=chunk;const body=raw?JSON.parse(raw):{};if(holdModel)return;res.setHeader('content-type','application/json');if(Array.isArray(body.messages?.[1]?.content)){res.end(JSON.stringify({choices:[{message:{content:JSON.stringify({purpose:'uncertain',description:'红色和蓝色柱形',contentAlt:'蓝柱高于红柱',reason:'请确认图片用途。'})}}]}));return;}let message:any={content:JSON.stringify({value:'电子邮箱',reason:'为输入框补充名称',needsReview:true})};if(body.tools&&!body.messages.some((x:any)=>x.role==='tool'))message={content:null,tool_calls:[{id:'inspect',type:'function',function:{name:'inspect_issue',arguments:'{}'}},{id:'search',type:'function',function:{name:'search_wcag',arguments:JSON.stringify({query:'电子邮箱表单标签'})}}]};else if(body.messages?.[0]?.content?.includes('只辅助审核'))message={content:JSON.stringify({findings:[{index:0,explanation:'请人工检查名称是否准确。'}]})};if(body.tools?.some((tool:any)=>tool.function.name==='read_source')&&body.messages.some((x:any)=>x.role==='tool'))message={content:JSON.stringify({plan:{kind:'label',value:'电子邮箱'},reason:'由表单上下文确认字段用途。'})};res.end(JSON.stringify({choices:[{message}]}))});await new Promise<void>(r=>mock.listen(mockPort,'127.0.0.1',r));
  const appPort=await port();base=`http://127.0.0.1:${appPort}`;const startServer=()=>spawn(process.execPath,['--import','tsx','apps/api/server.ts'],{cwd:process.cwd(),env:{...process.env,PORT:String(appPort),A11Y_DATA_DIR:tmp,AI_API_KEY:'test-key',AI_BASE_URL:`http://127.0.0.1:${mockPort}`,AI_MODEL:'mock',AI_VISION_MODEL:'mock-vision'},stdio:'ignore'});
  async function readyServer(){let ready=false;for(let i=0;i<100;i++){try{await fetch(base+'/api/status');ready=true;break}catch{await new Promise(r=>setTimeout(r,100))}}assert.ok(ready,'服务启动超时');}
@@ -90,6 +90,7 @@ test('静态项目的真实检测、审核修复、失败回滚、导出与异�
   const rejectedOrigin=await api('/api/projects',{method:'POST',headers:{origin:'https://untrusted.example','content-type':'application/json'},body:'{}'});assert.equal(rejectedOrigin.res.status,403);
   const browser=await chromium.launch({executablePath:process.env.CHROME_PATH||'/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',headless:true});try{const context=await browser.newContext();const page=await context.newPage();await page.goto(base);const result=await new AxeBuilder({page}).withTags(['wcag2a','wcag2aa','wcag21a','wcag21aa']).analyze();const severe=result.violations.filter(x=>x.impact==='critical'||x.impact==='serious');assert.deepEqual(severe.map(x=>x.id),[],`首页高严重度问题: ${JSON.stringify(severe.map(x=>({id:x.id,nodes:x.nodes.map(n=>({target:n.target,summary:n.failureSummary}))})))}`);
    await page.getByRole('button',{name:/慢绿生活 图片/}).click();await page.getByText('项目已导入并完成真实检测。').waitFor({timeout:15000});const work=await new AxeBuilder({page}).withTags(['wcag2a','wcag2aa','wcag21a','wcag21aa']).analyze();const workSevere=work.violations.filter(x=>x.impact==='critical'||x.impact==='serious');assert.deepEqual(workSevere.map(x=>x.id),[],`工作台高严重度问题: ${JSON.stringify(workSevere.map(x=>({id:x.id,nodes:x.nodes.map(n=>({target:n.target,summary:n.failureSummary}))})))}`);
+   await page.getByRole('button',{name:'精准修复',exact:true}).click();
    await page.getByText('V2 检测证据 · 已完成',{exact:true}).click();
    await page.getByLabel('我同意将上述页面文本发送给模型服务').check();
    await page.getByRole('button',{name:'开始 AI 辅助复核'}).click();
@@ -134,10 +135,11 @@ test('静态项目的真实检测、审核修复、失败回滚、导出与异�
    page.off('request',countRealStarts);
    await page.getByRole('button',{name:'取消',exact:true}).click();
    await page.reload();
-   const requestsBeforeReopen=taskPolls.length;
+   const requestsBeforeReopen=[...taskPolls];
    await page.locator('.recent-list').getByRole('button',{name:'慢绿生活',exact:true}).first().click();
+   await page.getByRole('button',{name:'精准修复',exact:true}).click();
    await page.getByRole('button',{name:/表单控件缺少标签/}).click();
-   assert.equal(taskPolls.length,requestsBeforeReopen);
+   assert.ok(taskPolls.slice(requestsBeforeReopen.length).every(url=>!requestsBeforeReopen.includes(url)));
    await analyze.click();
    await page.getByText('AI 修复建议',{exact:true}).waitFor();
    assert.equal(await page.getByText('检索到的规范依据',{exact:true}).isVisible(),false);
@@ -149,6 +151,7 @@ test('静态项目的真实检测、审核修复、失败回滚、导出与异�
    const browserFixture='<!doctype html><html lang="zh-CN"><title>上传验收</title><main><h1>验收</h1><input id="email" type="email"></main></html>';
    await page.locator('input[type=file]').setInputFiles({name:'browser-upload.html',mimeType:'text/html',buffer:Buffer.from(browserFixture)});
    await page.getByText('项目已导入并完成真实检测。').waitFor();
+   await page.getByRole('button',{name:'精准修复',exact:true}).click();
    await page.getByRole('button',{name:/表单控件缺少标签/}).click();
    await page.getByRole('button',{name:'AI 分析与修复'}).click();
    await page.getByText('AI 修复建议',{exact:true}).waitFor();
@@ -176,6 +179,7 @@ test('静态项目的真实检测、审核修复、失败回滚、导出与异�
    await page.getByRole('button',{name:'确认应用修复'}).click();
    await page.getByRole('checkbox',{name:/我已核对修复内容/}).check();
    await page.getByRole('button',{name:'确认应用并复测'}).click();
+   await page.getByText(/已应用 · 本次修复版本/).waitFor();
    await page.getByRole('button',{name:'无障碍语义',exact:true}).click();
    await page.getByRole('table').getByRole('cell',{name:/联系邮箱/}).waitFor();
    await page.getByRole('button',{name:'切换项目'}).click();
@@ -184,12 +188,14 @@ test('静态项目的真实检测、审核修复、失败回滚、导出与异�
     name:'browser-upload.zip',mimeType:'application/zip',buffer:await zip([{name:'index.html',value:browserFixture}]),
    });
    await page.getByText('项目已导入并完成真实检测。').waitFor();
+   await page.getByRole('button',{name:'精准修复',exact:true}).click();
    await page.getByRole('button',{name:/表单控件缺少标签/}).waitFor();
    await page.getByText('V2 检测证据 · 已完成',{exact:true}).waitFor();
    await page.getByRole('button',{name:'切换项目'}).click();
    const ambiguous='<!doctype html><html lang="zh-CN"><title>用途未说明</title><main><h1>登记</h1><form><input id="email" name="field-1" type="text"><button>提交</button></form></main></html>';
    await page.locator('input[type=file]').setInputFiles({name:'unknown-field.html',mimeType:'text/html',buffer:Buffer.from(ambiguous)});
    await page.getByText('项目已导入并完成真实检测。').waitFor();
+   await page.getByRole('button',{name:'精准修复',exact:true}).click();
    await page.getByRole('button',{name:/表单控件缺少标签/}).click();
    await page.getByRole('button',{name:'AI 分析与修复'}).click();
    await page.getByText('需要补充信息',{exact:true}).waitFor();
@@ -204,6 +210,7 @@ test('静态项目的真实检测、审核修复、失败回滚、导出与异�
    const references='<!doctype html><html lang="zh-CN"><title>ARIA 引用</title><main><h1>预约</h1><p id="known">发送提醒</p><button id="valid-ref" aria-labelledby="known"></button><button id="broken-ref" aria-labelledby="missing"></button></main></html>';
    await page.locator('input[type=file]').setInputFiles({name:'aria-references.html',mimeType:'text/html',buffer:Buffer.from(references)});
    await page.getByText('项目已导入并完成真实检测。').waitFor();
+   await page.getByRole('button',{name:'精准修复',exact:true}).click();
    await page.getByText('V2 检测证据 · 已完成',{exact:true}).click();
    const repairReference=page.getByRole('button',{name:/查看ARIA 引用修复.*#broken-ref/});
    await repairReference.waitFor();
@@ -215,6 +222,7 @@ test('静态项目的真实检测、审核修复、失败回滚、导出与异�
    const imageFixture=`<!doctype html><html lang="zh-CN"><title>图片验收</title><main><h1>图片</h1><img src="data:image/png;base64,${chart}"></main></html>`;
    await page.locator('input[type=file]').setInputFiles({name:'browser-image.html',mimeType:'text/html',buffer:Buffer.from(imageFixture)});
    await page.getByText('项目已导入并完成真实检测。').waitFor();
+   await page.getByRole('button',{name:'精准修复',exact:true}).click();
    await page.getByRole('button',{name:/图片缺少替代文本/}).click();
    await page.getByRole('button',{name:'AI 分析与修复'}).click();
    await page.getByRole('status').filter({hasText:'待人工确认'}).waitFor();

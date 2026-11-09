@@ -445,3 +445,40 @@ footer { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 8p
 .comparison-summary details { margin-block: 6px; }
 .shot figcaption { overflow-wrap: anywhere; }
 .semantic-table th { overflow-wrap: anywhere; }
+
+/* Panorama uses the same workspace panels and version controls as precise repair. */
+.panorama, .panorama-readonly { padding: 16px; margin-bottom: 14px; }
+.panorama-heading, .panorama-bar { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; }
+.panorama-heading { justify-content: space-between; }
+.panorama-heading h2, .panorama-heading p { margin: 0 0 5px; }
+.workbench-modes { margin: 12px 0; }
+.panorama-bar [aria-pressed="true"] { color: var(--ink); background: #dce8ff; border-color: #95aee5; }
+.panorama-bar label, .panorama-tree label { display: flex; align-items: center; gap: 5px; font-size: 13px; }
+.panorama-bar select, .panorama-bar input, .panorama-tree select { max-width: 100%; }
+.panorama-grid { display: grid; grid-template-columns: minmax(150px, .24fr) minmax(0, 1fr); gap: 16px; margin-top: 14px; }
+.panorama-tree { padding: 10px; border: 1px solid var(--line); border-radius: 8px; min-width: 0; overflow-wrap: anywhere; }
+.panorama-tree label { display: grid; }
+.panorama-tree ul { padding-inline-start: 16px; margin: 7px 0; }
+.panorama-tree li { margin-block: 6px; }
+.panorama-tree small { display: block; }
+.panorama-tree [aria-current] { font-weight: 750; text-decoration: underline; }
+.panorama-main, .panorama-pair > section { min-width: 0; }
+.panorama-pair { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; margin-top: 8px; }
+.panorama-pair > section { padding: 10px; border: 1px solid var(--line); border-radius: 8px; overflow-wrap: anywhere; }
+.panorama-pair h3, .panorama-caption { margin: 0 0 8px; }
+.panorama-shot { max-height: 420px; overflow: auto; background: #edf1f5; }
+.panorama-image { position: relative; }
+.panorama-image img { width: 100%; display: block; }
+.panorama-highlight { position: absolute; border: 2px solid #d33819; background: #f34b1d2a; pointer-events: none; }
+.panorama-pair pre { padding: 8px; max-height: 280px; overflow: auto; white-space: pre-wrap; background: #f1f4f8; }
+.panorama-actions { margin: 12px 0; border: 1px solid var(--line); border-radius: 8px; }
+.panorama-actions .panorama-bar + .panorama-bar { margin-top: 8px; }
+.panorama-actions input[type="number"] { width: 75px; }
+.panorama-findings li { margin-block: 6px; }
+.panorama-steps { margin-block: 8px; }
+@media (max-width: 850px) {
+  .panorama-grid { grid-template-columns: minmax(0, 1fr); }
+}
+@media (max-width: 580px) {
+  .panorama-pair { grid-template-columns: minmax(0, 1fr); }
+}

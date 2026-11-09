@@ -9,7 +9,7 @@ import { PatchReview } from './PatchReview';
 
 export type EvidenceView = 'visual' | 'diff' | 'semantics';
 type EvidenceProps = {
-  state: State; issue?: Issue; history?: HistoryItem; proposal: Proposal | null;
+  state: State; stateScoped?: boolean; issue?: Issue; history?: HistoryItem; proposal: Proposal | null;
   view: EvidenceView; onView: (view: EvidenceView) => void;
   problem: string; impact: string;
   busy: boolean; applying: boolean; archivedEvidence: boolean; patchReady: boolean; onConfirm: () => void; onReject: () => void;
@@ -29,11 +29,15 @@ function ProjectEvidence(props: EvidenceProps) {
   if (proposal || (historyKey && freeFor !== historyKey)) {
     return <RepairEvidence {...props} onCompare={proposal ? undefined : () => setFreeFor(historyKey)} />;
   }
+  if (props.stateScoped) return <section className="preview panel" aria-label="交互状态预览">
+    <div className="panel-head"><h2>交互状态预览</h2></div>
+    <p className="preview-tip">采集证据可在全景视图查看。生成补丁后，此处显示同一交互状态的修复前后证据。</p>
+  </section>;
   return <VersionComparison state={state} target={history?.issue ?? issue} pair={pair} onPair={setPair}
     view={view} onView={onView} onHistory={historyKey ? () => setFreeFor(undefined) : undefined} />;
 }
 
-function RepairEvidence({ state, issue, history, proposal, view, onView, busy, applying, archivedEvidence, patchReady, onConfirm, onReject, problem, impact, onCompare }: EvidenceProps & { onCompare?: () => void }) {
+function RepairEvidence({ state, stateScoped, issue, history, proposal, view, onView, busy, applying, archivedEvidence, patchReady, onConfirm, onReject, problem, impact, onCompare }: EvidenceProps & { onCompare?: () => void }) {
   const verification = history?.verification;
   const target = history?.issue ?? issue;
   const selector = target?.selector;
@@ -90,7 +94,7 @@ function RepairEvidence({ state, issue, history, proposal, view, onView, busy, a
   const beforeScan = matchingScan(beforeId);
   const afterScan = verification ? matchingScan(afterId) : activeScan;
   const oldIssue = target;
-  const beforeSrc = previewData?.before.screenshot ?? (verification?.baselineAudit ? `/api/audits/${verification.baselineAudit}/screenshot` : beforeScan?.screenshot);
+  const beforeSrc = previewData?.before.screenshot ?? (stateScoped ? undefined : verification?.baselineAudit ? `/api/audits/${verification.baselineAudit}/screenshot` : beforeScan?.screenshot);
   const afterSrc = proposal ? previewData?.after.screenshot ?? undefined : verification ? (afterId ? `/api/audits/${afterId}/screenshot` : undefined) : afterScan?.screenshot;
   const beforeBounds = previewData?.before.semantics.bounds ?? oldIssue?.bounds ?? computed?.result?.before.bounds;
   const afterBounds = proposal ? previewData?.after.semantics.bounds : verification ? computed?.result?.after?.bounds : issue?.bounds;

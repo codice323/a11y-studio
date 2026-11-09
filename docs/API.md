@@ -82,3 +82,12 @@ V2 扫描在原有结果上增加 `detection` 字段，旧扫描可没有此字�
 - React 扫描结果的 `issues[].source` 在唯一映射时包含 `file`、`line`、`tag` 和定位键。标记只注入扫描用 bundle。动态展开属性、重复渲染导致的非唯一映射和无法验证的样式变更会安全停止。
 - 工程补丁继续走现有 proposal、preview 和 verification API。React 补丁使用 `sourceRepair:true`。应用时需传 `sourceReviewed:true`。React 图片补丁还要求明确 `imagePurpose`，应用时传 `semanticReviewed:true`。扫描报告的 `build` 记录隔离编译结果及耗时。
 - ZIP 导出保留原始目录结构，源码工程在 `source/`，网页快照在 `website/`，报告均在 `report/`。导出的 React 文件不包含扫描标记或生成 bundle。
+
+## 全景工作台 V1
+
+- `GET /api/projects/:id/panorama?left=<snapshotId>&right=<snapshotId>` 列出版本中已有的本地 HTML、项目保存的交互状态、步骤及两侧已采集问题数。
+- `POST /api/projects/:id/panorama` 创建可取消的 `panorama` 任务。请求提供 `left`、`right`，并传 `start`（已导入的 HTML 文件）或 `stateId`。延伸状态时附加 `step` 与 `from: "left" | "right"`。操作支持 `click`、`fill`、`validate`、`tab`、`shift-tab`、`escape` 和 `scroll`。带控件的步骤只接受角色及精确可访问名称。输入使用固定测试值，校验只触发原生约束检查。
+- 任务在 `/api/jobs/:id` 提供阶段进度和取消。成功采集的一侧按项目、版本和状态缓存，重试可复用。无法重放的一侧返回 `unmatched`、错误与步骤编号，禁止拿其他截图替代。
+- `GET /api/projects/:id/panorama/captures/:captureId/:kind` 返回该项目的 `viewport` 或 `full` 截图。状态还包含精简 DOM、Chromium 无障碍树、焦点顺序、axe 问题和可用源码定位。
+- `POST /api/projects/:id/panorama/proposals` 接受 `stateId`、当前 `snapshotId`、`issueId` 与人工提供的 `value`，生成原生按钮名称的源码补丁。沿用现有预览、审核与应用接口。应用任何补丁时，已采集状态会在候选副本中重放。新增违规、无法可靠重放、键盘回归和其他路由中未获审核的布局或语义变化会阻止应用。
+- 每个版本列出至多 12 个本地 HTML 文件。每项目可保存 12 个状态，每个序列最多 6 步。不会自动枚举全站。URL 快照仅能浏览本地证据。React 路由由隔离后的客户端脚本重放，静态工程仅执行浏览器原生行为。截图遮盖普通文本输入区域，仍应只导入有权限且去除真实个人数据的工程。

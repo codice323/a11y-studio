@@ -1,7 +1,8 @@
 import express from 'express';import multer from 'multer';import fs from 'node:fs';import path from 'node:path';import {zipSync,strToU8} from 'fflate';import 'dotenv/config';
-import {db,id,now,ROOT,DATA,project,proposal,audit,snapshotDir,walk,safePath} from './storage';import {createProject} from './import';import {captureUrlSnapshot} from './url-snapshot';import {runAudit,inspectAuditElement} from './scan';import {createProposal,createSourceProposal,previewProposal,previewIssueImage,applyProposal,rejectProposal,rollback,getKnowledge} from './repair';
+import {db,id,now,ROOT,DATA,project,proposal,audit,snapshotDir,walk,safePath} from './storage';import {createProject} from './import';import {captureUrlSnapshot} from './url-snapshot';import {runAudit,inspectAuditElement} from './scan';import {createProposal,createSourceProposal,createPanoramaProposal,previewProposal,previewIssueImage,applyProposal,rejectProposal,rollback,getKnowledge} from './repair';
 import { projectState as state, renameSnapshot } from './version-state';
 import { compareSnapshots } from './version-compare';
+import { collectPanorama, panoramaInventory, panoramaScreenshot } from './panorama';
 import { imageVisionConfigured } from './ai/vision';
 import { decideAiFinding, requestAiAudit } from './audit-ai';
 const app=express();app.disable('x-powered-by');app.use((req,res,next)=>{const origin=req.get('origin');if(origin){try{const o=new URL(origin);if(!['127.0.0.1','localhost'].includes(o.hostname)||!['http:'].includes(o.protocol)||![String(process.env.PORT||4173),'5173'].includes(o.port))return res.status(403).json({error:'请求来源无效。'});}catch{return res.status(403).json({error:'请求来源无效。'});}}next()});app.use((req,res,next)=>{
@@ -11,7 +12,7 @@ const app=express();app.disable('x-powered-by');app.use((req,res,next)=>{const o
 });app.use(express.json({limit:'64kb'}));const upload=multer({storage:multer.memoryStorage(),limits:{fileSize:8*1024*1024,files:1}});const port=Number(process.env.PORT||4173);
 db.exec("CREATE TABLE IF NOT EXISTS jobs(id TEXT PRIMARY KEY,type TEXT,status TEXT,result TEXT,error TEXT,created_at TEXT); UPDATE jobs SET status='failed',error='服务重启，任务已中断。' WHERE status IN ('queued','running'); UPDATE audits SET status='failed',error='服务重启，扫描已中断。' WHERE status='running';");
 const controllers=new Map<string,AbortController>();
-function job(type:string,run:(signal:AbortSignal)=>Promise<any>){const jid=id(),controller=new AbortController();controllers.set(jid,controller);db.prepare('INSERT INTO jobs VALUES(?,?,?,?,?,?)').run(jid,type,'queued',null,null,now());setImmediate(async()=>{if(controller.signal.aborted){controllers.delete(jid);return;}db.prepare('UPDATE jobs SET status=? WHERE id=?').run('running',jid);try{const result=await run(controller.signal);db.prepare('UPDATE jobs SET status=?,result=? WHERE id=?').run(controller.signal.aborted?'cancelled':'completed',JSON.stringify(result),jid)}catch(error){db.prepare('UPDATE jobs SET status=?,error=? WHERE id=?').run(controller.signal.aborted?'cancelled':'failed',(error as Error).message,jid)}finally{controllers.delete(jid)}});return {id:jid,kind:'job',type,status:'queued'};}
+function job(type:string,run:(signal:AbortSignal,progress:(message:string)=>void)=>Promise<any>){const jid=id(),controller=new AbortController();controllers.set(jid,controller);db.prepare('INSERT INTO jobs VALUES(?,?,?,?,?,?)').run(jid,type,'queued',null,null,now());setImmediate(async()=>{if(controller.signal.aborted){controllers.delete(jid);return;}db.prepare('UPDATE jobs SET status=? WHERE id=?').run('running',jid);try{const result=await run(controller.signal,message=>db.prepare("UPDATE jobs SET result=? WHERE id=? AND status='running'").run(JSON.stringify({progress:message}),jid));db.prepare('UPDATE jobs SET status=?,result=? WHERE id=?').run(controller.signal.aborted?'cancelled':'completed',JSON.stringify(result),jid)}catch(error){db.prepare('UPDATE jobs SET status=?,error=? WHERE id=?').run(controller.signal.aborted?'cancelled':'failed',(error as Error).message,jid)}finally{controllers.delete(jid)}});return {id:jid,kind:'job',type,status:'queued'};}
 app.get('/api/status',(_req,res)=>res.json({configured:!!process.env.AI_API_KEY,visionConfigured:imageVisionConfigured()}));
 app.get('/api/fixtures',(_req,res)=>res.json([{id:'demo-mixed',name:'慢绿生活',description:'图片、按钮、表单与对比度综合示例'},{id:'demo-form',name:'课程报名',description:'表单可访问名称示例'},{id:'demo-contrast',name:'自然笔记',description:'文字对比度示例'}]));
 app.get('/api/projects',(_req,res)=>res.json(db.prepare('SELECT id,name,entry,mode,current_snapshot AS currentSnapshot,created_at AS createdAt FROM projects ORDER BY rowid DESC').all()));
@@ -44,6 +45,24 @@ app.get('/api/projects/:id/compare', (req, res, next) => {
  }
  try { res.set('Cache-Control', 'no-store').json(compareSnapshots(req.params.id, left, right, issueId, selector)); }
  catch (error) { next(error); }
+});
+app.get('/api/projects/:id/panorama', (req,res,next) => {
+ try {
+  const {left,right} = req.query;
+  if(typeof left!=='string'||typeof right!=='string')throw new Error('缺少对比版本。');
+  res.set('Cache-Control','no-store').json(panoramaInventory(req.params.id,left,right));
+ } catch(error) { next(error); }
+});
+app.post('/api/projects/:id/panorama', (req,res) => {
+ res.status(202).json(job('panorama',(signal,progress)=>collectPanorama(req.params.id,req.body,signal,progress)));
+});
+app.post('/api/projects/:id/panorama/proposals', (req,res) => {
+ res.status(202).json(job('source-repair',signal=>createPanoramaProposal(req.params.id,req.body,signal)));
+});
+app.get('/api/projects/:id/panorama/captures/:captureId/:kind', (req,res,next) => {
+ try {
+  res.set('Cache-Control','no-store').sendFile(panoramaScreenshot(req.params.id,req.params.captureId,req.params.kind));
+ } catch(error) { next(error); }
 });
 app.post('/api/projects/:id/audits',(req,res,next)=>{try{const p=project(req.params.id);res.status(202).json(job('audit',signal=>runAudit(p.id,p.current_snapshot,signal)));}catch(e){next(e)}});
 app.get('/api/jobs/:id',(req,res)=>{res.set('Cache-Control','no-store');const row:any=db.prepare('SELECT * FROM jobs WHERE id=?').get(req.params.id);if(!row)return res.status(404).json({code:'JOB_NOT_FOUND',error:'任务不存在。'});res.json({id:row.id,type:row.type,status:row.status,result:row.result?JSON.parse(row.result):null,error:row.error,

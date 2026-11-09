@@ -11,6 +11,8 @@ import { reviewRepairIssue, sourceRepairKinds } from '../../../packages/shared/s
 import { DetectionReview } from './DetectionReview';
 import type { AiAuditFinding } from '../../../packages/shared/types';
 import { Evidence, type EvidenceView } from './Evidence';
+import { Panorama, type PanoramaJump } from './Panorama';
+import type { PanoramaIssue } from '../../../packages/shared/panorama';
 import { versionName, type HistoryItem, type Issue, type Proposal, type State, type Verification } from './types';
 import './style.css';
 
@@ -73,6 +75,9 @@ function App() {
   const [recovery, setRecovery] = useState<{ label: string; run: () => void }>();
   const [notice, setNotice] = useState('');
   const [filter, setFilter] = useState('all');
+  const [workbench, setWorkbench] = useState<'panorama' | 'precise'>('panorama');
+  const [panoramaJump, setPanoramaJump] = useState<PanoramaJump>();
+  const [panoramaIssue, setPanoramaIssue] = useState<{item: PanoramaIssue; stateId: string; version: string}>();
   const [view, setView] = useState<EvidenceView>('visual');
   const [list, setList] = useState<'open' | 'history'>('open');
   const [controlTab, setControlTab] = useState<ControlTab>('issues');
@@ -93,10 +98,14 @@ function App() {
   const selectedId = selection && 'issueId' in selection ? selection.issueId : undefined;
   const reviewIssue = selectedId && state?.current?.detection?.behavior.findings
     .map(reviewRepairIssue).find(item => item?.id === selectedId);
-  const issue = reviewIssue ? { ...reviewIssue, source: state?.current?.sourceLocations?.[reviewIssue.selector] }
+  const panoramaContext = panoramaIssue && panoramaIssue.version === state?.project.currentSnapshot &&
+    state.project.mode !== 'snapshot' && panoramaIssue.item.ruleId === 'button-name' && panoramaIssue.item.source ? panoramaIssue : undefined;
+  const issue: Issue | undefined = panoramaContext ? {
+    ...panoramaContext.item, impact: 'unknown', html: '', helpUrl: 'https://www.w3.org/WAI/WCAG22/Understanding/name-role-value.html',
+  } : reviewIssue ? { ...reviewIssue, source: state?.current?.sourceLocations?.[reviewIssue.selector] }
     : state?.current?.issues.find(item => item.id === selectedId);
   const history = selection && 'history' in selection ? selection.history : undefined;
-  const draftKey = issue && state ? `${state.project.currentSnapshot}:${issue.id}` : '';
+  const draftKey = issue && state ? `${state.project.currentSnapshot}:${panoramaContext?.stateId ?? ''}:${issue.id}` : '';
   const draft = drafts[draftKey];
   const proposal = draft?.proposal ?? null;
   const input = draft?.purpose === 'decorative' ? '' : draft?.value ?? (issue?.ruleId === 'color-contrast' ? '#1c2731' : '');
@@ -195,6 +204,9 @@ function App() {
   }
 
   function resetSelection() {
+    setWorkbench('panorama');
+    setPanoramaJump(undefined);
+    setPanoramaIssue(undefined);
     setRecovery(undefined);
     setSelection(null);
     setControlTab('issues');
@@ -273,6 +285,8 @@ function App() {
   }
 
   function chooseIssue(item: Issue) {
+    setWorkbench('precise');
+    setPanoramaIssue(undefined);
     setRecovery(undefined);
     setSelection({ issueId: item.id });
     if (selectedId !== item.id) setView('visual');
@@ -333,6 +347,16 @@ function App() {
   }
 
   function chooseHistory(item: HistoryItem, nextView: EvidenceView = view, moveFocus = false, archived = false) {
+    if (item.verification.panoramaState) {
+      setPanoramaIssue(undefined);
+      setPanoramaJump({stateId: item.verification.panoramaState, left: item.verification.fromSnapshot,
+        right: item.verification.toSnapshot, key: item.verification.id});
+      setWorkbench('panorama');
+      setPage('workspace');
+      return;
+    }
+    setWorkbench('precise');
+    setPanoramaIssue(undefined);
     setList('history');
     setSelection({ history: item, archived });
     setView(nextView);
@@ -348,14 +372,17 @@ function App() {
     const manualRules = ['label','select-name','link-name'];
     if (mode === 'react-source' || mode === 'static-source') manualRules.push('button-name','color-contrast');
     if (mode === 'react-source') manualRules.push('image-alt');
-    const sourceRepair = source === 'manual' ? manualRules.includes(issue.ruleId) :
-      Object.hasOwn(sourceRepairKinds, issue.ruleId);
+    const sourceRepair = Boolean(panoramaContext) || (source === 'manual' ? manualRules.includes(issue.ruleId) :
+      Object.hasOwn(sourceRepairKinds, issue.ruleId));
     run(sourceRepair ? `Agent 正在分析「${issueTitle(issue)}」并验证隔离副本…` :
       source === 'agent' ? 'AI 正在分析问题…' : '正在生成补丁预览…', async () => {
       const endpoint = route + '/issues/' + encodeURIComponent(issue.id) + '/proposals';
       const data = { source, value: input, imagePurpose: draft?.purpose };
-      const next = sourceRepair
-        ? await runJob<Proposal | RepairAnalysis>('source-repair', endpoint, { ...data, sourceRepair: true, snapshotId: state?.project.currentSnapshot, intent: source === 'manual' || draft?.edited ? input : undefined })
+      const next = panoramaContext
+        ? await runJob<Proposal>('source-repair', route + '/panorama/proposals', {
+          stateId: panoramaContext.stateId, snapshotId: state?.project.currentSnapshot, issueId: issue.id, value: input,
+        })
+        : sourceRepair ? await runJob<Proposal | RepairAnalysis>('source-repair', endpoint, { ...data, sourceRepair: true, snapshotId: state?.project.currentSnapshot, intent: source === 'manual' || draft?.edited ? input : undefined })
         : await post<Proposal | ImageAltAnalysis | RepairAnalysis>(endpoint, data);
       if (!('patch' in next)) {
         const suggested = 'contentAlt' in next ? next.contentAlt : next.suggestedValue;
@@ -380,7 +407,11 @@ function App() {
       await refresh(state.project.id);
       updateDraft({proposal: null});
       const target = result.resolved.find(item => item.id === result.patch?.issueId) ?? result.reviewedTarget ?? result.resolved[0];
-      if (result.status === 'passed' && target) {
+      if (result.status === 'passed' && panoramaContext) {
+        setPanoramaIssue(undefined);
+        setWorkbench('panorama');
+        setNotice('已在同一交互状态中验证按钮名称，当前版本已更新。');
+      } else if (result.status === 'passed' && target) {
         chooseHistory({ verification: result, issue: target }, ['image-alt', 'aria-broken-idref', 'aria-valid-attr-value'].includes(target.ruleId) ? 'semantics' : 'visual', true);
         setNotice(result.reason);
       } else {
@@ -516,6 +547,31 @@ function App() {
                 </form>}
               </div>
             </div>
+            <div className="panorama-bar workbench-modes" role="group" aria-label="工作台视图">
+              <button className="secondary" type="button" disabled={working} aria-pressed={workbench === 'panorama'} onClick={() => setWorkbench('panorama')}>全景交互浏览</button>
+              <button className="secondary" type="button" disabled={working} aria-pressed={workbench === 'precise'} onClick={() => setWorkbench('precise')}>精准修复</button>
+            </div>
+            <div hidden={workbench !== 'panorama'}>
+              <Panorama key={state.project.id + (panoramaJump?.key ?? '')} jump={panoramaJump} state={state} activeView={workbench === 'panorama'} disabled={working} onRepair={(item, stateId, version) => {
+                // Match only when an entry audit contains the same source target.
+                const entryIssue = unresolved.find(issue => issue.id === item.id && issue.selector === item.selector &&
+                  (!item.source || item.source.file === (issue.source?.file ?? state.project.entry)));
+                if (version === state.project.currentSnapshot && state.project.mode !== 'snapshot' &&
+                    item.ruleId === 'button-name' && item.source) {
+                  setPanoramaIssue({item, stateId, version});
+                  setWorkbench('precise');
+                  setSelection(null);
+                  openAssistant();
+                } else if (version === state.project.currentSnapshot && entryIssue) chooseIssue(entryIssue);
+                else {setPanoramaIssue({item, stateId, version}); setWorkbench('precise'); setSelection(null); openAssistant();}
+              }} />
+            </div>
+            {workbench === 'precise' && <>
+            {panoramaIssue && <section className="panel panorama-readonly" aria-label="状态问题详情">
+              <h2>{panoramaIssue.item.help}</h2><p>{panoramaIssue.item.description}</p>
+              <p><code>{panoramaIssue.item.selector}</code> {panoramaIssue.item.source && <>· <code>{panoramaIssue.item.source.file}{panoramaIssue.item.source.line ? ':' + panoramaIssue.item.source.line : ''}</code></>}</p>
+              <p>{panoramaContext ? '填写按钮用途，补丁将在该交互状态中预检和复测。' : '该状态证据可供定位和复核。直接修复仅支持当前工程版本中可定位源码的原生按钮名称。'}</p>
+            </section>}
             <div className="workbench">
               <div className="workbench-controls panel">
                 <div className="evidence-tabs control-tabs" role="tablist" aria-label="诊断工作台操作">
@@ -556,19 +612,20 @@ function App() {
                 </div>
                 <div className="control-panel" role="tabpanel" id="control-panel-assistant"
                   aria-labelledby="control-tab-assistant" tabIndex={0} ref={assistantPanel} hidden={controlTab !== 'assistant'}>
-                  <Assistant issue={issue} history={history} knowledge={knowledge} ai={ai.configured} engineering={state.project.mode === 'react-source' || state.project.mode === 'static-source'} visionReady={ai.visionConfigured} busy={working} proposal={proposal} analysis={draft?.analysis} purpose={draft?.purpose} onPurpose={chooseImagePurpose}
+                  <Assistant issue={issue} stateScoped={Boolean(panoramaContext)} history={history} knowledge={knowledge} ai={ai.configured} engineering={state.project.mode === 'react-source' || state.project.mode === 'static-source'} visionReady={ai.visionConfigured} busy={working} proposal={proposal} analysis={draft?.analysis} purpose={draft?.purpose} onPurpose={chooseImagePurpose}
                     previewUrl={issue?.ruleId === 'image-alt' ? route + '/issues/' + encodeURIComponent(issue.id) +
                       '/image-preview?snapshot=' + encodeURIComponent(state.project.currentSnapshot) : undefined}
                     input={input} onInput={value => updateDraft({ value, edited: true })} onPropose={propose} onShowPatch={showPatch} onShowPreview={showRepairPreview} />
                 </div>
               </div>
               <div className="evidence-column" role="group" tabIndex={-1} ref={evidenceFocus} aria-label="修复效果对比">
-                <Evidence state={state} issue={issue} history={history} proposal={proposal} view={view} onView={setView} problem={(history?.issue ?? issue) ? issueTitle((history?.issue ?? issue)!) : '当前问题'}
+                <Evidence state={state} stateScoped={Boolean(panoramaIssue)} issue={issue} history={history} proposal={proposal} view={view} onView={setView} problem={(history?.issue ?? issue) ? issueTitle((history?.issue ?? issue)!) : '当前问题'}
                   impact={issueNames[(history?.issue ?? issue)?.ruleId ?? '']?.[1] ?? (history?.issue ?? issue)?.description ?? '需核对目标元素。'}
                   busy={working} applying={busy === applyingLabel} archivedEvidence={archivedEvidence}
                   patchReady={patchReady} onConfirm={() => setConfirmApply(true)} onReject={reject} />
               </div>
             </div>
+            </>}
             <div className="bottom-note"><ShieldCheck size={16} /><span>修复应用于本地副本。自动复测结果和人工检查项见报告。</span><button onClick={() => openPage('report')}>查看完整报告 <ArrowRight size={14} /></button></div>
           </>}
         <footer><span>A11y Studio · 网页无障碍工作区</span><span>基于 Chromium 和 axe-core</span></footer>
@@ -679,8 +736,8 @@ function ImagePreview({ url }: { url: string }) {
   </div>;
 }
 
-function Assistant({ issue, history, knowledge, ai, engineering, visionReady, busy, proposal, analysis, purpose, onPurpose, previewUrl, input, onInput, onPropose, onShowPatch, onShowPreview }: {
-  issue?: Issue; history?: HistoryItem; knowledge: Knowledge | null; ai: boolean; engineering: boolean; visionReady: boolean; busy: boolean;
+function Assistant({ issue, stateScoped, history, knowledge, ai, engineering, visionReady, busy, proposal, analysis, purpose, onPurpose, previewUrl, input, onInput, onPropose, onShowPatch, onShowPreview }: {
+  issue?: Issue; stateScoped: boolean; history?: HistoryItem; knowledge: Knowledge | null; ai: boolean; engineering: boolean; visionReady: boolean; busy: boolean;
   proposal: Proposal | null; analysis?: ImageAltAnalysis | RepairAnalysis; purpose?: ImagePurpose;
   onPurpose: (purpose: ImagePurpose) => void; previewUrl?: string; input: string; onInput: (value: string) => void;
   onPropose: (source: 'agent' | 'manual') => void;
@@ -779,8 +836,8 @@ function Assistant({ issue, history, knowledge, ai, engineering, visionReady, bu
           : (ai ? (Object.hasOwn(sourceRepairKinds, target.ruleId) ? 'Agent 会检查局部源码并验证隔离副本。若需指定文案，填写后重新分析。' : 'AI 按需使用局部代码和视觉证据。') : '可手动填写内容并生成补丁。配置模型服务后可使用 AI 建议。')}</p>
         <p id="repair-preview-hint" className="note" role="status">{previewHint || (isImageAlt && purpose === 'decorative' ? '预览将添加空 alt（alt=""），请确认该图片只用于装饰。' : null)}</p>
         <div className="repair-actions">
-          <button className="button dark" disabled={busy || Boolean(previewHint) || (['label','select-name','link-name'].includes(target.ruleId) && !input.trim()) || (agentOnly && !proposal?.sourceReview)} aria-describedby={isImageAlt ? 'repair-preview-hint' : undefined} onClick={() => onPropose('manual')}><Code2 size={15} />生成补丁预览</button>
-          <button className="secondary" disabled={busy || (!ai && !localAnalysis)} onClick={() => onPropose('agent')}><Sparkles size={15} />AI 分析与修复</button>
+          <button className="button dark" disabled={busy || Boolean(previewHint) || (stateScoped && !input.trim()) || (['label','select-name','link-name'].includes(target.ruleId) && !input.trim()) || (agentOnly && !proposal?.sourceReview)} aria-describedby={isImageAlt ? 'repair-preview-hint' : undefined} onClick={() => onPropose('manual')}><Code2 size={15} />生成补丁预览</button>
+          {!stateScoped && <button className="secondary" disabled={busy || (!ai && !localAnalysis)} onClick={() => onPropose('agent')}><Sparkles size={15} />AI 分析与修复</button>}
         </div>
         {proposal && <div className="proposal">
           <div className="proposal-head"><b>{proposal.source === 'manual' ? '人工修复建议' : 'AI 修复建议'}</b><span>{proposal.imagePurpose ? '待人工确认' : '待审核'}</span></div>

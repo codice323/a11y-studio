@@ -7,6 +7,7 @@ import { suggestImageAlt, suggestIconLabel } from './ai/visual-repair';
 import { searchWcag } from './knowledge-search';
 import { runRepairAgent, type AgentTrace } from './repair-agent';
 import { reviewRepairIssue, sourceRepairKinds, type SourceReview } from '../../packages/shared/source-repair';
+import { panoramaRepairScope, previewPanorama, verifyPanorama } from './panorama';
 import { checkSourceCandidate, compileSourcePlan, proposeSourceRepair, writeSourceCandidate } from './source-repair';
 import type { Issue } from '../../packages/shared/types';
 const knowledge:Record<string,any>=JSON.parse(fs.readFileSync(path.join(ROOT,'knowledge/wcag/rules.json'),'utf8'));
@@ -113,12 +114,50 @@ export async function createProposal(pid:string,issueId:string,input:{source?:st
  const patch=Patch.parse({issueId,ruleId:issue.ruleId,targetFile:snap.entry,selector:issue.selector,fileHash:hash(before),operation,value});const after=applySource(before,patch);
  const data={id:id(),projectId:pid,snapshotId:sid,issueId,patch,reason,impact:issue.description,wcag:guide.refs||[],wcagTitle:guide.title||'',wcagUrl:guide.url||issue.helpUrl,guidance:guide.guidance||'',risk:'请核对名称、图片语义与视觉效果；自动检测不能代替人工复核。',source,analysis,agentTrace,sources,before,after,status:'pending',imagePurpose:operation==='set-alt'?imagePurpose:undefined};
  db.prepare('INSERT INTO proposals VALUES(?,?,?,?,?,?,?)').run(data.id,pid,sid,issueId,'pending',JSON.stringify(data),now());return data;}
+export async function createPanoramaProposal(pid: string, input: unknown, signal: AbortSignal) {
+ const {stateId, snapshotId, issueId, value} = z.object({
+  stateId: z.uuid(), snapshotId: z.uuid(), issueId: z.string().regex(/^[a-f0-9]{20}$/),
+  value: z.string().trim().min(1).max(120),
+ }).parse(input);
+ if (project(pid).current_snapshot !== snapshotId) throw new Error('请选择当前项目版本的状态问题。');
+ const {entry, issue, site} = panoramaRepairScope(pid, snapshotId, stateId, issueId);
+ const reason = '为已采集状态中的原生按钮添加人工确认的可访问名称。';
+ const baseHash = treeHash(site.dir);
+ const started = performance.now();
+ const candidate = compileSourcePlan({dir: site.dir, entry, issue, engineering: true}, {kind: 'button', mode: 'aria', value}, reason);
+ const temporary = fs.mkdtempSync(path.join(os.tmpdir(), 'a11y-panorama-proposal-'));
+ const copy = path.join(temporary, 'candidate');
+ try {
+  fs.cpSync(site.dir, copy, {recursive: true});
+  writeSourceCandidate(copy, candidate);
+  const check = await verifyPanorama(pid, snapshotId, copy, signal, {stateId, issueId, value, target: candidate.target});
+  signal.throwIfAborted();
+  if (project(pid).current_snapshot !== snapshotId || treeHash(site.dir) !== baseHash) throw new Error('项目版本已变化，请重新预览。');
+  const guide = knowledge[issue.ruleId] ?? {};
+  const sourceReview: SourceReview = {
+   changes: candidate.changes, checks: check ? [check] : [], attempts: 1, elapsedMs: Math.round(performance.now() - started),
+   usage: {requests: 0, inputTokens: 0, outputTokens: 0, cachedInputTokens: 0, complete: true},
+  };
+  const data = {
+   id: id(), projectId: pid, snapshotId, issueId, status: 'pending', source: 'manual',
+   panoramaState: stateId, sourcePatch: {plan: candidate.plan, baseHash}, sourceReview,
+   patch: {issueId, ruleId: issue.ruleId, targetFile: entry, selector: issue.selector, operation: 'source', value},
+   reason, impact: issue.description, wcag: guide.refs ?? issue.wcag, wcagUrl: guide.url,
+   risk: '请人工确认按钮的实际用途。',
+   before: candidate.changes[0].before, after: candidate.changes[0].after,
+  };
+  db.prepare('INSERT INTO proposals VALUES(?,?,?,?,?,?,?)').run(data.id, pid, snapshotId, issueId, 'pending', JSON.stringify(data), now());
+  return data;
+ } finally { fs.rmSync(temporary, {recursive: true, force: true}); }
+}
+
 export async function previewProposal(proposalId: string, signal?: AbortSignal) {
  const pr=proposal(proposalId);
  const p=project(pr.project_id);
  if(pr.status!=='pending'||p.current_snapshot!==pr.snapshot_id)throw new Error('补丁已处理或版本已变化。');
  const dir=snapshotDir(p.id,p.current_snapshot);
- const issue=findIssue(p.id,p.current_snapshot,pr.issue_id);
+ const scoped=pr.data.panoramaState ? panoramaRepairScope(p.id,p.current_snapshot,pr.data.panoramaState,pr.issue_id) : undefined;
+ const issue=scoped?.issue ?? findIssue(p.id,p.current_snapshot,pr.issue_id);
  const source=pr.data.sourcePatch;
  const temporary=fs.mkdtempSync(path.join(os.tmpdir(),'a11y-patch-preview-'));
  const copy=path.join(temporary,'snapshot');
@@ -127,7 +166,7 @@ export async function previewProposal(proposalId: string, signal?: AbortSignal) 
   fs.cpSync(dir,copy,{recursive:true});
   if(source){
    if(treeHash(dir)!==source.baseHash)throw new Error('源文件已变化。');
-   const candidate=compileSourcePlan({dir,entry:p.entry,issue,engineering:p.mode!=='snapshot'},source.plan,pr.data.reason);
+   const candidate=compileSourcePlan({dir,entry:scoped?.entry ?? p.entry,issue,engineering:p.mode!=='snapshot'},source.plan,pr.data.reason);
    if(JSON.stringify(candidate.changes)!==JSON.stringify(pr.data.sourceReview.changes))throw new Error('补丁与预览不一致。');
    writeSourceCandidate(copy,candidate);
    target=candidate.target;
@@ -153,7 +192,10 @@ export async function previewProposal(proposalId: string, signal?: AbortSignal) 
     ? 'data:image/jpeg;base64,'+(await page.screenshot({fullPage:true,type:'jpeg',quality:75,timeout:8000})).toString('base64') : null;
    return {semantics,contrast,screenshot};
   });
-  const before=await read(dir,issue.selector),after=await read(copy,target);
+  const readVersion=(directory:string,selector:string)=>scoped
+   ? previewPanorama(p.id,p.current_snapshot,pr.data.panoramaState,directory,selector,signal)
+   : read(directory,selector);
+  const before=await readVersion(dir,issue.selector),after=await readVersion(copy,target);
   return {proposalId,before,after};
  }finally{fs.rmSync(temporary,{recursive:true,force:true});}
 }
@@ -172,11 +214,13 @@ export async function applyProposal(proposalId:string,signal?:AbortSignal,semant
  if(sourcePatch&&!sourceReviewed)throw new Error('请先人工确认源码补丁及其页面语义。');
  const patch=sourcePatch ? pr.data.patch : Patch.parse(pr.data.patch);
  if(patch.issueId!==pr.issue_id||(sourcePatch ? patch.operation!=='source' : rules[patch.ruleId]!==patch.operation))throw new Error('补丁规则无效。');
- const issue=findIssue(pid,p.current_snapshot,patch.issueId);
- if(issue.ruleId!==patch.ruleId||issue.selector!==patch.selector||patch.targetFile!==p.entry)throw new Error('补丁目标与问题不匹配。');
+ const scoped=pr.data.panoramaState ? panoramaRepairScope(pid,p.current_snapshot,pr.data.panoramaState,patch.issueId) : undefined;
+ const issue=scoped?.issue ?? findIssue(pid,p.current_snapshot,patch.issueId);
+ const entry=scoped?.entry ?? p.entry;
+ if(issue.ruleId!==patch.ruleId||issue.selector!==patch.selector||patch.targetFile!==entry)throw new Error('补丁目标与问题不匹配。');
  const sourceDir=snapshotDir(pid,p.current_snapshot),file=safePath(sourceDir,patch.targetFile),before=fs.readFileSync(file,'utf8');
  const baseline=latestAudit(pid,p.current_snapshot);
- const ctx={projectId:pid,snapshotId:p.current_snapshot,dir:sourceDir,entry:p.entry,issue,engineering:p.mode!=='snapshot',baseline};
+ const ctx={projectId:pid,snapshotId:p.current_snapshot,dir:sourceDir,entry,issue,engineering:p.mode!=='snapshot',baseline};
  let candidate:ReturnType<typeof compileSourcePlan>|undefined;
  let after=before;
  if(sourcePatch){
@@ -197,8 +241,8 @@ export async function applyProposal(proposalId:string,signal?:AbortSignal,semant
  }catch(error){fs.rmSync(dest,{recursive:true,force:true});throw error;}
  const diff=candidate ? candidate.changes.map(change=>createTwoFilesPatch(change.file,change.file,change.before,change.after,'修复前','修复后')).join('\n') :
   createTwoFilesPatch(patch.targetFile,patch.targetFile,before,after,'修复前','修复后');
- const reviewedTarget=issue.ruleId==='focus-style-unchanged'||issue.ruleId==='aria-broken-idref'?issue:undefined;
- const reviewDetails=candidate ? { sourceReview:pr.data.sourceReview, sourceTarget:candidate.target, reviewedTarget } :
+ const reviewedTarget=scoped||issue.ruleId==='focus-style-unchanged'||issue.ruleId==='aria-broken-idref'?issue:undefined;
+ const reviewDetails=candidate ? { sourceReview:pr.data.sourceReview, sourceTarget:candidate.target, reviewedTarget, panoramaState:pr.data.panoramaState } :
   { reviewFiles:[{file:p.entry,selector:patch.selector,before,after}] };
  const beforeHash=candidate?sourcePatch.baseHash:hash(before),afterHash=candidate?treeHash(dest):hash(after);
  db.prepare('INSERT INTO snapshots(id,project_id,parent_id,entry,hash,created_at,description) VALUES(?,?,?,?,?,?,?)').run(candidateId,pid,p.current_snapshot,p.entry,treeHash(dest),now(),'待验证修复');
@@ -209,7 +253,10 @@ export async function applyProposal(proposalId:string,signal?:AbortSignal,semant
   const contrastSelector=candidate?.plan.kind==='contrast'?candidate.target:patch.operation==='set-color'?patch.selector:undefined;
   if(contrastSelector)contrastBefore=await withRepairPage(sourceDir,p.entry,signal,page=>measurePageContrast(page,issue.selector));
   scanned=await runAudit(pid,candidateId,signal,contrastSelector);
-  if(candidate)sourceChecks=await checkSourceCandidate(ctx,candidate,dest,scanned,signal);
+  if(candidate&&!scoped)sourceChecks=await checkSourceCandidate(ctx,candidate,dest,scanned,signal);
+  const panoramaCheck=await verifyPanorama(pid,p.current_snapshot,dest,signal,scoped&&candidate
+   ? {stateId:scoped.recipe.id,issueId:issue.id,target:candidate.target,value:patch.value} : undefined);
+  if(panoramaCheck)sourceChecks=[...(sourceChecks??[]),panoramaCheck];
   signal?.throwIfAborted();
  }catch(error){
  const failure={...reviewDetails,sourceChecks:null,imageReview,id:id(),projectId:pid,proposalId,fromSnapshot:p.current_snapshot,toSnapshot:candidateId,baselineAudit:baseline.id,audit:scanned?.id??null,resolved:[],remaining:baseline.issues,added:[],targetFixed:false,structurePassed:true,patch,proposalReason:pr.data.reason,analysis:pr.data.analysis,agentTrace:pr.data.agentTrace,sources:pr.data.sources,wcag:pr.data.wcag,wcagUrl:pr.data.wcagUrl,diff,status:'failed',reason:`复测无法完成，已保留原版本：${(error as Error).message}`,createdAt:now(),beforeHash,afterHash};

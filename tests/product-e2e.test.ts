@@ -1,5 +1,7 @@
 import assert from 'node:assert/strict';
-import { spawn } from 'node:child_process';
+import { spawn, type ChildProcess } from 'node:child_process';
+import { once } from 'node:events';
+import { setTimeout as delay } from 'node:timers/promises';
 import fs from 'node:fs';
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -21,6 +23,16 @@ function listen(server: http.Server) {
 }
 function close(server: http.Server) {
   return new Promise<void>(resolve => server.close(() => resolve()));
+}
+
+async function stopService(service: ChildProcess) {
+  if (service.exitCode !== null || service.signalCode !== null) return;
+  const exited = once(service, 'exit');
+  service.kill();
+  if (!await Promise.race([exited.then(() => true), delay(3000, false, {ref: false})])) {
+    service.kill('SIGKILL');
+    await exited;
+  }
 }
 
 test('URL 快照从首页导入，经真实扫描、修复和三视图复测后导出', { timeout: 120000 }, async () => {
@@ -93,6 +105,7 @@ test('URL 快照从首页导入，经真实扫描、修复和三视图复测后�
       await page.getByLabel('公开网页地址').fill('http://93.184.216.34/page');
       await page.getByRole('button', { name: '导入 URL 并检测' }).click();
       await page.getByText(/URL 快照已导入并完成检测/).waitFor({ timeout: 15000 });
+      await page.getByRole('button', {name: '精准修复', exact: true}).click();
       assert.deepEqual(hits.slice(1).sort(), ['/page', '/sample.png', '/theme.css']);
       await page.setViewportSize({ width: 1440, height: 900 });
       const [controls, evidence] = await page.locator('.workbench > div').evaluateAll(columns =>
@@ -261,7 +274,7 @@ test('URL 快照从首页导入，经真实扫描、修复和三视图复测后�
       await browser.close();
     }
   } finally {
-    service.kill('SIGTERM');
+    await stopService(service);
     await close(upstream);
     fs.rmSync(dataDir, { recursive: true, force: true });
   }
@@ -332,11 +345,14 @@ test('真实快照可双向对比，分叉及切换项目后仍使用正确的�
       const page = await browser.newPage({ viewport: { width: 1440, height: 1140 } });
       page.setDefaultTimeout(12000);
       const evidence = page.getByRole('region', { name: '修复效果对比' });
-      const left = page.getByLabel('左侧版本');
-      const right = page.getByLabel('右侧版本');
+      const left = evidence.getByLabel('左侧版本');
+      const right = evidence.getByLabel('右侧版本');
       const images = page.locator('.shots img');
       const summary = page.getByRole('region', { name: '版本差异摘要' });
-      const open = (name: string) => page.locator('.recent-list').getByRole('button', { name }).click();
+      const open = async (name: string) => {
+        await page.locator('.recent-list').getByRole('button', { name }).click();
+        await page.getByRole('button', {name: '精准修复', exact: true}).click();
+      };
       const show = async (name: string) => {
         if (name === '代码变更' && !await evidence.locator('.developer-options').evaluate(element => (element as HTMLDetailsElement).open)) {
           await evidence.getByText('开发者选项', { exact: true }).click();
@@ -430,8 +446,7 @@ test('真实快照可双向对比，分叉及切换项目后仍使用正确的�
       await browser.close();
     }
   } finally {
-    service.kill();
-    await new Promise<void>(resolve => service.once('exit', () => resolve()));
+    await stopService(service);
     fs.rmSync(dataDir, { recursive: true, force: true });
   }
 });

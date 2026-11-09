@@ -1,4 +1,4 @@
-export type JobType = 'audit' | 'source-repair' | 'verification';
+export type JobType = 'audit' | 'source-repair' | 'verification' | 'panorama';
 
 export class JobRecoveryError extends Error {
   constructor(message: string) {
@@ -26,7 +26,7 @@ export async function startJob(url: string, type: JobType, data: unknown, signal
   return job.id as string;
 }
 
-export async function waitJob<T>(id: string, type: JobType, signal: AbortSignal): Promise<T> {
+export async function waitJob<T>(id: string, type: JobType, signal: AbortSignal, onProgress?: (message: string) => void): Promise<T> {
   const deadline = Date.now() + 180_000;
   let connectionFailures = 0;
   while (Date.now() < deadline) {
@@ -47,6 +47,7 @@ export async function waitJob<T>(id: string, type: JobType, signal: AbortSignal)
       signal.throwIfAborted();
       if (job?.id !== id || job?.type !== type) throw new JobRecoveryError('任务响应与当前操作不匹配。请重新同步项目。');
       if (job.status === 'completed' && job.result != null) return job.result as T;
+      if (job.status === 'running' && typeof job.result?.progress === 'string') onProgress?.(job.result.progress);
       if (job.status === 'cancelled') throw new Error('任务已取消。');
       if (job.status === 'failed') {
         if (job.code === 'JOB_INTERRUPTED') throw new JobRecoveryError('后端已重启，此任务已中断。请重试或重新同步项目。');

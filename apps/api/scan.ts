@@ -15,12 +15,12 @@ export function withSnapshotPage<T>(projectId: string, snapshotId: string, signa
  return withRepairPage(snapshotDir(projectId, snapshotId), snap.entry, signal, inspect, waitForSlotMs);
 }
 
-export async function withRepairPage<T>(dir: string, entry: string, signal: AbortSignal | undefined, inspect: (page: Page, product?: Awaited<ReturnType<typeof buildReactProject>>) => Promise<T>, waitForSlotMs = 6000) {
+export async function withRepairPage<T>(dir: string, entry: string, signal: AbortSignal | undefined, inspect: (page: Page, product?: Awaited<ReturnType<typeof buildReactProject>>) => Promise<T>, waitForSlotMs = 6000, isolated = false) {
  let browser: Browser | undefined;
  const closeBrowser = () => { void browser?.close().catch(() => {}); };
  const engineering = isReactProject(dir);
  const deadline = Date.now() + waitForSlotMs;
- const localSignal = engineering ? AbortSignal.any([...(signal?[signal]:[]),AbortSignal.timeout(35000)]) : signal;
+ const localSignal = (engineering || isolated) ? AbortSignal.any([...(signal?[signal]:[]),AbortSignal.timeout(35000)]) : signal;
  // Preview and evidence requests can briefly occupy both browsers during patch review.
  while (activeScans >= MAX_SCANS && Date.now() < deadline) await delay(100, undefined, {signal});
  if (activeScans >= MAX_SCANS) throw new Error('扫描任务过多，请稍后再试。');
@@ -31,20 +31,24 @@ export async function withRepairPage<T>(dir: string, entry: string, signal: Abor
   localSignal?.throwIfAborted();
   const exe=executable();if(!exe)throw new Error('未找到 Chromium 或 Chrome，请设置 CHROME_PATH。');
   browser=await chromium.launch({executablePath:exe,headless:true,
-    ...(engineering?{chromiumSandbox:true,args:['--disable-quic','--no-proxy-server','--force-webrtc-ip-handling-policy=disable_non_proxied_udp','--host-resolver-rules=MAP * ~NOTFOUND']}:{}),
+    ...((engineering || isolated)?{chromiumSandbox:true,args:['--disable-quic','--no-proxy-server','--force-webrtc-ip-handling-policy=disable_non_proxied_udp','--host-resolver-rules=MAP * ~NOTFOUND']}:{}),
   });localSignal?.throwIfAborted();localSignal?.addEventListener('abort', closeBrowser, { once:true });const context=await browser.newContext({viewport:{width:900,height:700},deviceScaleFactor:1,serviceWorkers:'block',acceptDownloads:false});
-  if(product){
+  if(product || isolated){
     await context.routeWebSocket('**/*',socket=>socket.close());
     await context.addInitScript(()=>{
       for(const name of ['RTCPeerConnection','webkitRTCPeerConnection'])Object.defineProperty(window,name,{value:undefined});
     });
     context.on('page',page=>page.on('popup',popup=>{void popup.close();}));
+    if (isolated) await context.addInitScript(() => {
+      document.addEventListener('submit', event => event.preventDefault(), true);
+    });
   }
   await context.route('**/*',async(route)=>{
     const req=route.request(),u=new URL(req.url());
     if(u.origin!=='http://a11y.local'||req.method()!=='GET')return route.abort();
     try {
-      const relative=decodeURIComponent(u.pathname).replace(/^\/+/, '');
+      const requested=decodeURIComponent(u.pathname).replace(/^\/+/, '');
+      const relative=isolated && !requested ? entry : requested;
       const output=product?.files.get(relative);
       const headers={'Cache-Control':'no-store','X-DNS-Prefetch-Control':'off','X-Content-Type-Options':'nosniff',
         'Content-Security-Policy':`default-src 'none'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'none'; script-src ${product?"'self'":"'none'"}; frame-src 'none'; worker-src 'none'; connect-src 'none'; form-action 'none'; base-uri 'none'`};

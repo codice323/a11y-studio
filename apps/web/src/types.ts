@@ -49,6 +49,7 @@ export type Verification = {
   audit?: string | null;
   targetFixed?: boolean;
   reviewedTarget?: Issue;
+  panoramaState?: string;
   sourceTarget?: string;
   sourceReview?: SourceReview;
   reviewFiles?: PatchFile[];
