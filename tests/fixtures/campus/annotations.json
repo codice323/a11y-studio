@@ -1,0 +1,24 @@
+{
+  "baseline": "故意保留缺陷的合成回归站，标注先于断言。模式差异使用适用范围，不合并为跨站准确率。",
+  "entryAutomatic": [
+    {"id":"CAMP-01","page":"首页","state":"初始","selector":"#campus-hero","rule":"image-alt","wcag":"1.1.1","repair":"提供与横幅语境一致的替代文本","human":"检查图片是否传达信息及文字是否描述实际内容"},
+    {"id":"CAMP-02","page":"首页","state":"初始","selector":"#quick-search","rule":"label","wcag":"1.3.1 / 3.3.2 / 4.1.2","repair":"使用可见 label 与搜索字段关联","human":"确认标签写明搜索对象"},
+    {"id":"CAMP-03","page":"首页","state":"初始","selector":"#hero-help","rule":"button-name","wcag":"4.1.2","repair":"补充按钮名称，例如打开校园导航帮助","human":"确认名称准确反映打开帮助弹窗"},
+    {"id":"CAMP-04","page":"首页","state":"初始","selector":"#registration-note","rule":"color-contrast","wcag":"1.4.3","repair":"加深文本并复测颜色组合，普通文本至少 4.5:1","human":"检查共享样式及其他主题状态"}
+  ],
+  "other": [
+    {"id":"CAMP-05","page":"首页","state":"初始","selector":"#save-reminder","wcag":"1.3.1 / 4.1.2","expected":"辅助复核 aria-broken-idref，axe 规则与引用类型有关","repair":"提供实际说明并正确引用，或移除无意义引用","human":"检查说明与提醒操作有关"},
+    {"id":"CAMP-06","page":"首页","state":"Tab 至校历提醒","selector":"#focusless","wcag":"2.4.7","expected":"辅助复核 focus-style-unchanged，人工以可见焦点为准","repair":"恢复清晰焦点指示","human":"键盘运行时可见，不被裁切或覆盖"},
+    {"id":"CAMP-07","page":"首页","state":"从页面开头按 Tab","selector":"#priority-link","wcag":"2.4.3","expected":"辅助复核正 tabindex 和实际焦点顺序，不能仅凭属性判定违反","repair":"移除正 tabindex，保持有意义的 DOM 顺序","human":"连续 Tab 与 Shift+Tab 核对次序"},
+    {"id":"CAMP-08","page":"首页","state":"公告操作区","selector":"#tiny-target","wcag":"2.5.8","expected":"人工核对尺寸、间距或其他例外，axe 可有条件报告 target-size","repair":"增大目标或足够间距","human":"触屏实际可操作，按 WCAG 例外判断"},
+    {"id":"CAMP-09","page":"个人中心","state":"编辑资料弹窗打开和关闭","selector":"#profile-editor","wcag":"2.1.1 / 2.4.3","expected":"人工与键盘辅助复核，浏览器原生 dialog 为正向控制","repair":"如失败则聚焦到弹窗内、限制模态范围并恢复触发按钮焦点","human":"核对 Tab、Shift+Tab、Escape 和返回焦点，源码工程或离线 ZIP 可验证"},
+    {"id":"CAMP-10","page":"课程报名","state":"填入非校园域邮箱后提交","selector":"#enrollment-result","wcag":"3.3.1 / 3.3.3 / 4.1.3","expected":"只有 React 动态态，提示可见但未与邮箱关联也未作为状态播报，需人工复核","repair":"建立字段和错误的语义关联，并播报错误","human":"屏幕阅读器用户能知道哪个字段错、如何更正"},
+    {"id":"CAMP-11","page":"学习资源","state":"视频或音频播放","selector":"video, audio","wcag":"1.2.1 / 1.2.2 / 2.1.1","expected":"字幕、说明和播放器操作需人工复核，示例视频为无声动画","repair":"有语音时补齐同步字幕，说明有意义的非语音内容，保障键盘操作","human":"确认实际播放、字幕与内容一致，不将无声片的字幕视为通用合规证明"},
+    {"id":"CAMP-12","page":"首页及所有子页","state":"共享样式补丁后","selector":".muted","wcag":"1.4.3","expected":"复测范围标注，预期修复首页对比度时不破坏其他已采集页面","repair":"按需收敛选择器并重测相关路由","human":"未采集路由需独立检查"}
+  ],
+  "negative": [
+    {"id":"CAMP-N01","page":"课程报名","state":"初始","selector":"#student-name, #student-email, #course-choice","wcag":"1.3.1 / 3.3.2 / 4.1.2","expected":"相关字段在实际扫描该页时不报 label/select-name","repair":"保持现有原生 label","human":"核对标签可见且与用途一致"},
+    {"id":"CAMP-N02","page":"学习资源","state":"初始","selector":"article img[alt]","wcag":"1.1.1","expected":"不报 image-alt","repair":"保留有意义 alt","human":"比对校园插图"},
+    {"id":"CAMP-N03","page":"首页","state":"初始","selector":"#focusless","wcag":"4.1.2","expected":"按钮名已提供，不报 button-name。焦点缺陷单独记录","repair":"保留可见名称","human":"名称与用途匹配"}
+  ]
+}

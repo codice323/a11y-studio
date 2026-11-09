@@ -649,8 +649,10 @@ function Home({ fixtures, projects, busy, onCreate, onOpen, onError }: {
   const fileInput = useRef<HTMLInputElement>(null);
   function chooseFile(file: File) {
     if (busy) return;
-    if (source==='source'&&!/\.zip$/i.test(file.name)) return onError('请选择源码工程 ZIP。');
-    if (!/\.(?:html?|zip)$/i.test(file.name)) return onError('请选择 HTML 或 ZIP 文件。');
+    if (source === 'html' && !/\.html?$/i.test(file.name)) return onError('请选择 HTML 文件，或切换到对应导入入口。');
+    if ((source === 'zip' || source === 'source') && !/\.zip$/i.test(file.name)) {
+      return onError(source === 'source' ? '请选择源码工程 ZIP。' : '请选择网页 ZIP 文件。');
+    }
     if (file.size > 8 * 1024 * 1024) return onError('文件不能超过 8 MB。');
     const data = new FormData();
     data.set('file', file);

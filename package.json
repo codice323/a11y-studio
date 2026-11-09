@@ -9,6 +9,7 @@
     "build": "vite build",
     "typecheck": "tsc --noEmit",
     "test": "tsx --test tests/*.test.ts",
+    "test:campus": "tsx --test tests/campus-journey.e2e.ts",
     "eval:wcag": "tsx scripts/evaluate-wcag-rag.ts"
   },
   "dependencies": {
