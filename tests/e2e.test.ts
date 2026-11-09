@@ -154,16 +154,29 @@ test('静态项目的真实检测、审核修复、失败回滚、导出与异�
    await page.getByText('AI 修复建议',{exact:true}).waitFor();
    await page.getByText('建议人工确认',{exact:true}).waitFor();
    const labelValue=page.getByLabel('建议的文本内容');
+   const showDeveloperCode=async()=>{
+    await page.getByRole('region',{name:'修复内容摘要'}).waitFor({timeout:20000});
+    const dev=page.locator('.developer-options');
+    if(!await dev.evaluate(element=>(element as HTMLDetailsElement).open))await dev.locator('summary').click();
+    await dev.getByRole('button',{name:'代码变更'}).click();
+   };
    assert.equal(await labelValue.inputValue(),'电子邮箱');
+   await page.getByRole('region',{name:'修复内容摘要'}).waitFor();
+   await page.getByRole('button',{name:'确认应用修复'}).click();
+   await page.getByRole('checkbox',{name:/我已核对修复内容/}).waitFor();
+   await page.keyboard.press('Escape');
+   await showDeveloperCode();
    assert.ok((await page.getByLabel('index.html 源码差异').innerText()).includes('<label for="email">电子邮箱</label>'));
    await labelValue.fill('联系邮箱');
    assert.ok(await page.getByRole('button',{name:'确认应用修复'}).isDisabled());
    await page.getByRole('button',{name:'生成补丁预览'}).click();
+   await showDeveloperCode();
    await page.getByLabel('index.html 源码差异').filter({hasText:'联系邮箱'}).waitFor();
    assert.ok((await page.getByLabel('index.html 源码差异').innerText()).includes('<label for="email">联系邮箱</label>'));
    await page.getByRole('button',{name:'确认应用修复'}).click();
-   await page.getByRole('checkbox',{name:/我已审核源码差异/}).check();
+   await page.getByRole('checkbox',{name:/我已核对修复内容/}).check();
    await page.getByRole('button',{name:'确认应用并复测'}).click();
+   await page.getByRole('button',{name:'无障碍语义',exact:true}).click();
    await page.getByRole('table').getByRole('cell',{name:/联系邮箱/}).waitFor();
    await page.getByRole('button',{name:'切换项目'}).click();
    await page.getByRole('button',{name:'ZIP',exact:true}).click();
@@ -185,6 +198,7 @@ test('静态项目的真实检测、审核修复、失败回滚、导出与异�
    assert.equal(await page.getByRole('button',{name:'确认应用修复'}).count(),0);
    await labelValue.fill('登记编号');
    await page.getByRole('button',{name:'生成补丁预览'}).click();
+   await showDeveloperCode();
    await page.getByLabel('index.html 源码差异').filter({hasText:'登记编号'}).waitFor();
    await page.getByRole('button',{name:'切换项目'}).click();
    const references='<!doctype html><html lang="zh-CN"><title>ARIA 引用</title><main><h1>预约</h1><p id="known">发送提醒</p><button id="valid-ref" aria-labelledby="known"></button><button id="broken-ref" aria-labelledby="missing"></button></main></html>';

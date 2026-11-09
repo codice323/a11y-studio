@@ -164,10 +164,13 @@ test('静态与 React 源码工程经真实工作台审核、复测和独立 Vit
             await page.locator('#repair-value').fill(repair.value);
             await page.getByRole('button', { name: '生成补丁预览' }).click();
           }
+          await page.getByRole('region', { name: '修复内容摘要' }).waitFor();
+          await page.getByText('开发者选项', { exact: true }).click();
+          await page.getByRole('button', { name: '代码变更', exact: true }).click();
           await page.getByRole('region', { name: repair.file + ' 源码差异', exact: true }).waitFor()
             .catch(async error => { throw new Error(await page.locator('.error, .proposal').allTextContents().then(lines => lines.join(' | ')), { cause: error }); });
           await page.getByRole('button', { name: '确认应用修复' }).click();
-          await page.getByLabel('我已审核源码差异并确认符合页面用途').check();
+          await page.getByLabel('我已核对修复内容和页面用途，确认适合应用').check();
           await page.getByRole('button', { name: '确认应用并复测' }).click();
           await page.getByText(new RegExp('当前版本 V' + (index + 1))).waitFor();
           const verified = (await get(route)).verifications.find((entry: any) => entry.patch.ruleId === repair.rule);

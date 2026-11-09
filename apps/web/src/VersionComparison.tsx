@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import type { compareSnapshots } from '../../api/version-compare';
 import type { EvidenceView } from './Evidence';
-import { Screenshot, SemanticTable } from './EvidenceDetails';
+import { EnlargedComparison, Screenshot, SemanticTable, type ScreenshotData } from './EvidenceDetails';
 import { diffFile, PatchReview } from './PatchReview';
 import { inspectAudit, type Semantics } from './semantics';
 import { versionName, type Issue, type State } from './types';
@@ -10,7 +10,7 @@ export type VersionPair = { left: string; right: string };
 type Comparison = ReturnType<typeof compareSnapshots>;
 type Evidence = { semantics: Semantics | null; status?: string };
 
-const views: [EvidenceView, string][] = [['visual', '页面对照'], ['diff', '代码变更'], ['semantics', '无障碍语义']];
+const views: [EvidenceView, string][] = [['visual', '页面对照'], ['semantics', '无障碍语义']];
 const sides = ['left', 'right'] as const;
 const layouts = [['both', '并排对比'], ['left', '仅左侧版本'], ['right', '仅右侧版本']] as const;
 
@@ -21,10 +21,10 @@ function ComparisonSummary({ comparison, diffs }: { comparison: Comparison; diff
   const removals = changes.filter(change => change.kind === 'removed').length;
   return <section className="repair-summary comparison-summary" aria-label="版本差异摘要">
     <h3>版本差异摘要</h3>
-    <p>{files.length} 个文件有变更 · 已显示 {additions} 处新增、{changes.length - additions - removals} 处修改、{removals} 处删除
-      {files.length > diffs.length && ` · ${files.length - diffs.length} 个二进制或超出展示上限的文件未展开`}</p>
     {findings ? <p>右侧不再报告 {findings.resolved.length} 个问题 · 右侧新增 {findings.added.length} 个问题</p>
       : <p>至少一侧缺少扫描结果，无法统计问题增减。</p>}
+    <details><summary>查看文件变更摘要</summary><p>{files.length} 个文件有变更 · 已显示 {additions} 处新增、{changes.length - additions - removals} 处修改、{removals} 处删除
+      {files.length > diffs.length && ` · ${files.length - diffs.length} 个二进制或超出展示上限的文件未展开`}</p></details>
     {findings && Boolean(findings.resolved.length || findings.added.length) && <details>
       <summary>查看问题增减</summary>
       <ul>{(['resolved', 'added'] as const).flatMap(kind => findings[kind].map(item =>
@@ -103,12 +103,26 @@ export function VersionComparison({ state, target, pair, onPair, view, onView, o
     !data.findings.resolved.length && !data.findings.added.length &&
     JSON.stringify(data.review.left) === JSON.stringify(data.review.right);
 
+  function screenshot(side: 'left' | 'right'): ScreenshotData {
+    const id = pair[side];
+    const scan = [state.baseline, state.current].find(item => item?.snapshotId === id);
+    const found = evidence?.[side];
+    return {
+      title: `${side === 'left' ? '左侧' : '右侧'} · ${id ? name(id) : '未选择版本'}`,
+      src: data ? data[side].screenshot : scan?.screenshot,
+      bounds: found?.semantics?.bounds, size: found?.semantics?.size, location: data?.[side].selector,
+      locationStatus: !selector ? '请选择可定位的问题' : found ? found.status ?? '无法在截图上标记该元素。' : request?.error ? '元素位置不可用。' : '正在定位元素…',
+      emptyText: !data && !request && id ? '正在加载此版本截图…' : '此版本暂无截图。',
+    };
+  }
+
   return <section className="preview panel" aria-labelledby="evidence-title">
     <div className="panel-head"><h2 id="evidence-title">修复效果对比</h2>
       {onHistory && <button type="button" className="secondary comparison-switch" onClick={onHistory}>返回本次修复证据</button>}
     </div>
     <div className="evidence-tabs" role="group" aria-label="修复效果视图">
       {views.map(([id, label]) => <button key={id} type="button" aria-pressed={view === id} onClick={() => onView(id)}>{label}</button>)}
+      <details className="developer-options"><summary>开发者选项</summary><button type="button" aria-pressed={view === 'diff'} onClick={() => onView('diff')}>代码变更</button></details>
     </div>
     <div className="version-comparison-toolbar" role="group" aria-label="只读版本对比">
       <label>左侧版本<select value={left} title={name(left)} onChange={event => onPair({ ...pair, left: event.target.value })}>
@@ -120,7 +134,7 @@ export function VersionComparison({ state, target, pair, onPair, view, onView, o
         {state.snapshots.map(snapshot => <option key={snapshot.id} value={snapshot.id}>{name(snapshot.id)}</option>)}
       </select></label>
     </div>
-    {target && <div className="evidence-target"><span>{target.ruleId}</span><code>{selector || '页面级问题'}</code></div>}
+    {target && <details className="evidence-target"><summary>查看定位详情</summary><span>{target.ruleId}</span><code>{selector || '页面级问题'}</code></details>}
     {!left ? <p className="comparison-status" role="status">找不到原始快照。请选择要对比的左侧版本。</p>
       : !request ? <p className="comparison-status" role="status">正在加载所选版本的对比证据…</p>
       : request.error ? <p className="comparison-status" role="status">{request.error} <button type="button" className="secondary" onClick={() => setRetry(retry + 1)}>重试对比</button></p>
@@ -129,18 +143,12 @@ export function VersionComparison({ state, target, pair, onPair, view, onView, o
     {view === 'visual' && <>
       <div className="shot-options" role="group" aria-label="截图排列">
         {layouts.map(([id, label]) => <button key={id} type="button" aria-pressed={layout === id} onClick={() => setLayout(id)}>{label}</button>)}
+        <EnlargedComparison left={screenshot('left')} right={screenshot('right')} />
       </div>
       <div className={layout === 'both' ? 'shots' : 'shots single-shot'}>
         {sides.filter(side => layout === 'both' || layout === side).map(side => {
-          const id = pair[side];
-          const scan = [state.baseline, state.current].find(scan => scan?.snapshotId === id);
-          const src = data ? data[side].screenshot : scan?.screenshot;
-          const found = evidence?.[side];
-          const location = found?.semantics;
-          return <Screenshot key={`${side}:${id}:${src}`} title={`${side === 'left' ? '左侧' : '右侧'} · ${id ? name(id) : '未选择版本'}`}
-            src={src} bounds={location?.bounds} size={location?.size} location={data?.[side].selector}
-            locationStatus={!selector ? '请选择可定位的问题' : found ? found.status ?? '无法在截图上标记该元素。' : request?.error ? '元素位置不可用。' : '正在定位元素…'}
-            emptyText={!data && !request && id ? '正在加载此版本截图…' : '此版本暂无截图。'} />;
+          const shot = screenshot(side);
+          return <Screenshot key={`${side}:${pair[side]}:${shot.src}`} {...shot} />;
         })}
       </div>
     </>}

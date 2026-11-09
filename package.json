@@ -8,7 +8,8 @@
     "dev": "vite",
     "build": "vite build",
     "typecheck": "tsc --noEmit",
-    "test": "tsx --test tests/*.test.ts"
+    "test": "tsx --test tests/*.test.ts",
+    "eval:wcag": "tsx scripts/evaluate-wcag-rag.ts"
   },
   "dependencies": {
     "@axe-core/playwright": "^4.13.0",

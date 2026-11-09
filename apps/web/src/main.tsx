@@ -327,6 +327,11 @@ function App() {
     });
   }
 
+  function showRepairPreview() {
+    setView('visual');
+    requestAnimationFrame(() => evidenceFocus.current?.focus());
+  }
+
   function chooseHistory(item: HistoryItem, nextView: EvidenceView = view, moveFocus = false, archived = false) {
     setList('history');
     setSelection({ history: item, archived });
@@ -338,7 +343,7 @@ function App() {
 
   function propose(source: 'agent' | 'manual') {
     if (!issue) return;
-    if (source === 'manual' && proposal?.sourceReview && patchReady) { showPatch(); return; }
+    if (source === 'manual' && proposal?.sourceReview && patchReady) { showRepairPreview(); return; }
     const mode = state?.project.mode;
     const manualRules = ['label','select-name','link-name'];
     if (mode === 'react-source' || mode === 'static-source') manualRules.push('button-name','color-contrast');
@@ -362,8 +367,8 @@ function App() {
         ...(next.imagePurpose !== 'decorative' ? { value: next.patch.value } : {}),
         ...(source === 'agent' || sourceRepair ? { analysis: next.analysis, edited: false } : {}),
       });
-      showPatch();
-      setNotice(next.sourceReview ? 'Agent 已在隔离副本完成复测，请审核实际源码差异。' : '补丁预览已生成，请在右侧审核源码差异并确认应用。');
+      showRepairPreview();
+      setNotice(next.sourceReview ? '已在隔离副本完成预检，请核对修复内容和页面效果。' : '修复预览已生成，请核对页面效果并确认。');
     }, sourceRepair ? { label: source === 'agent' ? '重试 AI 分析' : '重试生成预览', run: () => propose(source) } : undefined);
   }
 
@@ -376,7 +381,7 @@ function App() {
       updateDraft({proposal: null});
       const target = result.resolved.find(item => item.id === result.patch?.issueId) ?? result.reviewedTarget ?? result.resolved[0];
       if (result.status === 'passed' && target) {
-        chooseHistory({ verification: result, issue: target }, 'semantics', true);
+        chooseHistory({ verification: result, issue: target }, ['image-alt', 'aria-broken-idref', 'aria-valid-attr-value'].includes(target.ruleId) ? 'semantics' : 'visual', true);
         setNotice(result.reason);
       } else {
         setView('visual');
@@ -554,7 +559,7 @@ function App() {
                   <Assistant issue={issue} history={history} knowledge={knowledge} ai={ai.configured} engineering={state.project.mode === 'react-source' || state.project.mode === 'static-source'} visionReady={ai.visionConfigured} busy={working} proposal={proposal} analysis={draft?.analysis} purpose={draft?.purpose} onPurpose={chooseImagePurpose}
                     previewUrl={issue?.ruleId === 'image-alt' ? route + '/issues/' + encodeURIComponent(issue.id) +
                       '/image-preview?snapshot=' + encodeURIComponent(state.project.currentSnapshot) : undefined}
-                    input={input} onInput={value => updateDraft({ value, edited: true })} onPropose={propose} onShowPatch={showPatch} />
+                    input={input} onInput={value => updateDraft({ value, edited: true })} onPropose={propose} onShowPatch={showPatch} onShowPreview={showRepairPreview} />
                 </div>
               </div>
               <div className="evidence-column" role="group" tabIndex={-1} ref={evidenceFocus} aria-label="修复效果对比">
@@ -674,12 +679,12 @@ function ImagePreview({ url }: { url: string }) {
   </div>;
 }
 
-function Assistant({ issue, history, knowledge, ai, engineering, visionReady, busy, proposal, analysis, purpose, onPurpose, previewUrl, input, onInput, onPropose, onShowPatch }: {
+function Assistant({ issue, history, knowledge, ai, engineering, visionReady, busy, proposal, analysis, purpose, onPurpose, previewUrl, input, onInput, onPropose, onShowPatch, onShowPreview }: {
   issue?: Issue; history?: HistoryItem; knowledge: Knowledge | null; ai: boolean; engineering: boolean; visionReady: boolean; busy: boolean;
   proposal: Proposal | null; analysis?: ImageAltAnalysis | RepairAnalysis; purpose?: ImagePurpose;
   onPurpose: (purpose: ImagePurpose) => void; previewUrl?: string; input: string; onInput: (value: string) => void;
   onPropose: (source: 'agent' | 'manual') => void;
-  onShowPatch: () => void;
+  onShowPatch: () => void; onShowPreview: () => void;
 }) {
   const target = history?.issue ?? issue;
   const verification = history?.verification;
@@ -694,6 +699,7 @@ function Assistant({ issue, history, knowledge, ai, engineering, visionReady, bu
   const trace = proposal?.agentTrace ?? (analysis && 'agentTrace' in analysis ? analysis.agentTrace : undefined);
   const refs = verification?.wcag ?? proposal?.wcag ?? knowledge?.refs ?? target?.wcag ?? [];
   const imageAnalysis = analysis && 'purpose' in analysis ? analysis : undefined;
+  const agentRun = analysis && 'agentRun' in analysis ? analysis.agentRun : undefined;
   const sources = analysis?.sources ?? proposal?.sources;
   const labelDecision = analysis && 'labelDecision' in analysis ? analysis.labelDecision : undefined;
   const linkDecision = analysis && 'linkDecision' in analysis ? analysis.linkDecision : undefined;
@@ -715,10 +721,11 @@ function Assistant({ issue, history, knowledge, ai, engineering, visionReady, bu
           ? '若确认纯装饰，可用空 alt。' + (suggested ? ' 内容性候选：' + suggested : '')
           : suggested ? (linkDecision ? '链接名称：' : labelDecision ? '添加可见标签：' : isImageAlt ? '替代文本候选：' : '建议值：') + suggested : nameDecision === 'needs-input' ? (linkDecision ? '在下方填写链接实际用途，再生成补丁。' : '请填写字段用途。') : '请人工确定合适的修复值。'}</p>
         <p><b>{nameDecision === 'confirm' ? '建议人工确认' : nameDecision === 'needs-input' ? '需要补充信息' : analysis.status === 'needs-manual-review' || !suggested ? '待人工确认' : '理由'}</b> · {analysis.reason}</p>
+        {agentRun && <p><b>分析方式</b> · {agentRun.usage.requests > 0 ? `模型请求 ${agentRun.usage.requests} 次，候选验证 ${agentRun.attempts} 次` : '依据规则与浏览器证据生成，本次未调用语言模型'}。</p>}
       </div>}
       <details className="detail-block">
         <summary>查看详细依据</summary>
-        {imageAnalysis && <p><b>AI 图片用途判断：</b>{imagePurposeLabel[imageAnalysis.purpose]}</p>}
+        {imageAnalysis && <p><b>{imageAnalysis.media ? 'AI 图片用途判断' : '图片用途'}：</b>{imagePurposeLabel[imageAnalysis.purpose]}</p>}
         {analysis?.description && <p><b>AI 视觉观察：</b>{analysis.description}</p>}
         {analysis?.detail && <p>{analysis.detail}</p>}
         {analysis?.media && <p>视觉证据：{analysis.media.source} · {analysis.media.format} · {analysis.media.bytes} 字节</p>}
@@ -727,8 +734,8 @@ function Assistant({ issue, history, knowledge, ai, engineering, visionReady, bu
         {refs.length > 0 && <div className="rule-tags">{refs.map(ref => <span key={ref}>{ref}</span>)}</div>}
         <a href={verification?.wcagUrl || proposal?.wcagUrl || knowledge?.url || target.helpUrl} target="_blank" rel="noreferrer">{proposal?.wcagTitle || knowledge?.title || '查看规则与规范说明'} <ArrowUpRight size={12} /></a>
         {(proposal?.guidance || knowledge?.guidance) && <p>{proposal?.guidance || knowledge?.guidance}</p>}
-        {sources?.length ? <div><h4>检索到的规范依据</h4><ul>{sources.map(source => <li key={source.id}><a href={source.url} target="_blank" rel="noreferrer">{source.title} · {source.refs.join('、')}</a><p>{source.text}</p></li>)}</ul></div> : null}
-        {trace && <div><h4>AI 工具调用</h4><ol>{trace.map((step, index) => <li key={index}>{step.summary} <code>{step.tool}</code></li>)}</ol></div>}
+        {sources?.length ? <div><h4>检索到的规范依据</h4><p>以下为规范摘要，请结合原文及实际页面确认适用性。</p><ul>{sources.map(source => <li key={source.id}><a href={source.url} target="_blank" rel="noreferrer">{source.title} · {source.refs.join('、')}</a><p>{source.text}</p></li>)}</ul></div> : null}
+        {trace && <div><h4>{agentRun?.usage.requests === 0 ? '证据与验证过程' : 'AI 工具与验证过程'}</h4><ol>{trace.map((step, index) => <li key={index}>{step.summary} <code>{step.tool}</code></li>)}</ol></div>}
         {proposal?.risk && <p>{proposal.risk}</p>}
         {proposal && <button type="button" className="secondary" onClick={onShowPatch}>查看完整代码差异</button>}
       </details>
@@ -777,7 +784,7 @@ function Assistant({ issue, history, knowledge, ai, engineering, visionReady, bu
         </div>
         {proposal && <div className="proposal">
           <div className="proposal-head"><b>{proposal.source === 'manual' ? '人工修复建议' : 'AI 修复建议'}</b><span>{proposal.imagePurpose ? '待人工确认' : '待审核'}</span></div>
-          <button type="button" className="secondary" onClick={onShowPatch}>前往右侧审核补丁</button>
+          <button type="button" className="secondary" onClick={onShowPreview}>查看修复预览</button>
         </div>}
       </> : <p className="manual-only">{target.ruleId === 'target-size'
         ? '当前需要人工处理。检查可点击区域是否达到 24 × 24 CSS 像素，或是否满足目标间距等例外。调整内边距或相邻控件布局后，重新扫描桌面和窄屏。'
@@ -863,7 +870,7 @@ function ConfirmDialog({ imagePurpose, sourceReview, onClose, onConfirm }: {
     <h2 id="confirm-title">确认应用修复？</h2>
     <p id="confirm-description">系统会修改当前版本的副本，并重新扫描、检查页面结构与控件聚焦。复测失败时继续使用上一个有效版本。</p>
     {(imagePurpose || sourceReview) && <p><label><input type="checkbox" checked={semanticReviewed}
-      onChange={event => setSemanticReviewed(event.target.checked)} /> {sourceReview ? '我已审核源码差异并确认符合页面用途' : '我已确认图片用途和替代文本符合页面语境'}
+      onChange={event => setSemanticReviewed(event.target.checked)} /> {sourceReview ? '我已核对修复内容和页面用途，确认适合应用' : '我已确认图片用途和替代文本符合页面语境'}
       {imagePurpose && <>（{imagePurposeLabel[imagePurpose]}，已核对替代文本）</>}</label></p>}
     <div className="confirm-actions">
       <button ref={cancel} className="secondary" onClick={onClose}>取消</button>

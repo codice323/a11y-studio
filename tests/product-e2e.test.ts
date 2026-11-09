@@ -8,6 +8,7 @@ import path from 'node:path';
 import { test } from 'node:test';
 import { strFromU8, unzipSync } from 'fflate';
 import { chromium } from 'playwright-core';
+import AxeBuilder from '@axe-core/playwright';
 
 function listen(server: http.Server) {
   return new Promise<number>((resolve, reject) => {
@@ -84,7 +85,8 @@ test('URL 快照从首页导入，经真实扫描、修复和三视图复测后�
       headless: true,
     });
     try {
-      const page = await browser.newPage({ viewport: { width: 375, height: 780 } });
+      const context = await browser.newContext({ viewport: { width: 375, height: 780 } });
+      const page = await context.newPage();
       await page.goto(base);
       await page.getByRole('button', { name: 'URL', exact: true }).click();
       await page.getByLabel('仅采集静态 HTML').check();
@@ -146,6 +148,27 @@ test('URL 快照从首页导入，经真实扫描、修复和三视图复测后�
       assert.deepEqual(proposalRequests, []);
       await page.getByLabel('建议的文本内容').fill('打开导航');
       await page.getByRole('button', { name: '生成补丁预览' }).click();
+      await page.getByRole('region', { name: '修复内容摘要' }).waitFor();
+      const enlarge = page.getByRole('button', { name: '放大对比' });
+      await enlarge.click();
+      const large = page.getByRole('dialog', { name: '放大查看页面对比' });
+      await large.waitFor();
+      await large.locator('.shots img').nth(1).waitFor({ timeout: 30000 });
+      assert.equal(await large.locator('.shots img').count(), 2);
+      assert.equal(await large.getByRole('checkbox', { name: '同步滚动' }).isChecked(), true);
+      await large.getByRole('button', { name: '200%', exact: true }).click();
+      assert.equal(await large.getByRole('button', { name: '200%', exact: true }).getAttribute('aria-pressed'), 'true');
+      await large.locator('.screen-wrap').first().evaluate(element => { element.scrollLeft = 120; });
+      await page.waitForFunction(() => (document.querySelectorAll<HTMLDivElement>('dialog[open] .screen-wrap')[1]?.scrollLeft ?? 0) > 0);
+      await large.getByRole('button', { name: '只看右侧' }).click();
+      assert.equal(await large.locator('.shots img').count(), 1);
+      const dialogAudit = await new AxeBuilder({ page }).withTags(['wcag2a', 'wcag2aa', 'wcag21a', 'wcag21aa']).analyze();
+      assert.deepEqual(dialogAudit.violations.filter(item => item.impact === 'critical' || item.impact === 'serious').map(item => item.id), []);
+      await page.keyboard.press('Escape');
+      assert.equal(await page.getByRole('dialog', { name: '放大查看页面对比' }).count(), 0);
+      assert.ok(await enlarge.evaluate(button => button === document.activeElement));
+      await page.getByText('开发者选项', { exact: true }).click();
+      await page.getByRole('button', { name: '代码变更', exact: true }).click();
       const pendingDiff = page.getByLabel('待审核的源码差异');
       await pendingDiff.waitFor();
       await page.getByRole('button', { name: '确认应用修复' }).click();
@@ -166,6 +189,7 @@ test('URL 快照从首页导入，经真实扫描、修复和三视图复测后�
       assert.deepEqual(currentHeights, [controls.height, evidence.height]);
       await page.getByRole('button', { name: '确认应用修复' }).click();
       await page.getByRole('button', { name: '确认应用并复测' }).click();
+      await page.getByRole('button', { name: '无障碍语义', exact: true }).click();
       const semantics = page.getByRole('table');
       await semantics.getByText('打开导航', { exact: false }).waitFor({ timeout: 25000 });
       assert.match(await semantics.innerText(), /可访问名称\s+（空）\s+打开导航/);
@@ -313,7 +337,12 @@ test('真实快照可双向对比，分叉及切换项目后仍使用正确的�
       const images = page.locator('.shots img');
       const summary = page.getByRole('region', { name: '版本差异摘要' });
       const open = (name: string) => page.locator('.recent-list').getByRole('button', { name }).click();
-      const show = (name: string) => evidence.getByRole('button', { name, exact: true }).click();
+      const show = async (name: string) => {
+        if (name === '代码变更' && !await evidence.locator('.developer-options').evaluate(element => (element as HTMLDetailsElement).open)) {
+          await evidence.getByText('开发者选项', { exact: true }).click();
+        }
+        await evidence.getByRole('button', { name, exact: true }).click();
+      };
       const waitForImages = async () => {
         await page.waitForFunction(() => {
           const images = [...document.querySelectorAll<HTMLImageElement>('.shots img')];

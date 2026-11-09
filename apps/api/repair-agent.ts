@@ -41,12 +41,21 @@ async function runAgent<T>(input: AgentInput, extension?: SourceTools<T>) {
   let calls = 0;
   let attempts = 0;
   let lastFailure = '';
+  let formatRetries = 0;
   const usage: AgentUsage = { requests: 0, inputTokens: 0, outputTokens: 0, cachedInputTokens: 0, complete: true };
   const readers = new Map(Object.entries(extension?.readers ?? {}));
   const available = [...tools, ...[...readers].map(([name, tool]) => ({
     type: 'function', function: { name, description: tool.description, parameters: { type: 'object', properties: {}, additionalProperties: false } },
   }))];
   const readerResults = new Map<string, unknown>();
+  function retryFormat(content: string) {
+    if (++formatRetries > 2) throw new Error('AI 返回格式无效，请重试或人工处理。');
+    trace.push({ tool: 'validate_model_output', summary: `模型输出格式不符合要求，正在进行第 ${formatRetries} 次纠正` });
+    messages.push({ role: 'assistant', content });
+    messages.push({ role: 'user', content: extension
+      ? '返回内容不是有效的指定 JSON。请只返回 JSON 对象，包含 plan 和 reason 两个字段；不能确定时 plan 为 null。'
+      : '返回内容不是有效的指定 JSON。请只返回 JSON 对象，包含 value、reason 和 needsReview；不能确定时 value 为 null。' });
+  }
   for (let round = 0; round < (extension ? 8 : 5); round++) {
     extension?.signal?.throwIfAborted();
     const timeout = AbortSignal.timeout(30000);
@@ -102,13 +111,22 @@ async function runAgent<T>(input: AgentInput, extension?: SourceTools<T>) {
     if (!completed.has('inspect_issue') || !completed.has('search_wcag') || !sources.length) throw new Error('AI 未完成问题读取和规范检索，请重试。');
     if (typeof message.content !== 'string' || message.content.length > 10000) throw new Error('AI 返回格式无效。');
     let parsed: unknown;
-    try { parsed = JSON.parse(message.content.replace(/^\s*```(?:json)?\s*|\s*```\s*$/g, '')); } catch { throw new Error('AI 返回格式无效，请重试。'); }
+    try { parsed = JSON.parse(message.content.replace(/^\s*```(?:json)?\s*|\s*```\s*$/g, '')); }
+    catch { retryFormat(message.content); continue; }
     if (extension) {
-      const result = sourceResult.parse(parsed);
+      const checked = sourceResult.safeParse(parsed);
+      if (!checked.success) { retryFormat(message.content); continue; }
+      const result = checked.data;
       if (result.plan == null) return {
         value: null, reason: result.reason, needsReview: true, trace, attempts, usage, candidate: undefined,
         sources: sources.map(({ keywords: _keywords, ...source }) => source),
       };
+      const missingReaders = ['read_source', 'inspect_browser'].filter(name => readers.has(name) && !completed.has(name));
+      if (missingReaders.length) {
+        messages.push({ role: 'assistant', content: message.content });
+        messages.push({ role: 'user', content: `修复前还必须调用这些工具获取证据：${missingReaders.join('、')}。请先调用工具；无法确认时返回 plan:null。` });
+        continue;
+      }
       attempts++;
       try {
         const candidate = await extension.validate(result.plan);
@@ -128,7 +146,9 @@ async function runAgent<T>(input: AgentInput, extension?: SourceTools<T>) {
         continue;
       }
     }
-    const result = resultSchema.parse(parsed);
+    const checked = resultSchema.safeParse(parsed);
+    if (!checked.success) { retryFormat(message.content); continue; }
+    const result = checked.data;
     return { ...result, trace, attempts, usage, candidate: undefined, sources: sources.map(({ keywords: _keywords, ...source }) => source) };
   }
   throw new Error('AI 未能在限定步骤内完成分析，请重试。');

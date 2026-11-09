@@ -3,7 +3,7 @@ import { Info, ListChecks, LoaderCircle } from 'lucide-react';
 import { inspectAudit, inspectProposal, type ProposalPreview } from './semantics';
 import { versionName, type HistoryItem, type Issue, type Proposal, type State } from './types';
 
-import { Screenshot, SemanticTable, type SemanticResult } from './EvidenceDetails';
+import { EnlargedComparison, Screenshot, SemanticTable, type ScreenshotData, type SemanticResult } from './EvidenceDetails';
 import { VersionComparison, type VersionPair } from './VersionComparison';
 import { PatchReview } from './PatchReview';
 
@@ -96,21 +96,40 @@ function RepairEvidence({ state, issue, history, proposal, view, onView, busy, a
   const afterBounds = proposal ? previewData?.after.semantics.bounds : verification ? computed?.result?.after?.bounds : issue?.bounds;
   const tabs = [
     { id: 'visual', name: '页面对照' },
-    { id: 'diff', name: '代码变更' },
     { id: 'semantics', name: '无障碍语义' },
   ] as const;
+  const leftShot: ScreenshotData = {
+    title: proposal ? '修复前 · ' + versionName(state, state.project.currentSnapshot) : verification ? `修复前 · ${versionName(state, verification.fromSnapshot)}` : versionName(state, state.project.currentSnapshot),
+    src: beforeSrc, bounds: beforeBounds, size: previewData?.before.semantics.size ?? beforeScan?.size ?? computed?.result?.before.size,
+    location: oldIssue?.bounds ? '扫描定位' : '按扫描版本定位',
+  };
+  const rightShot: ScreenshotData = {
+    title: proposal ? '隔离候选 · 尚未应用' : `${afterLabel} · ${versionName(state, afterVersion)}`,
+    src: afterSrc, bounds: afterBounds, size: previewData?.after.semantics.size ?? afterScan?.size ?? computed?.result?.after?.size,
+    location: verification ? '按同一选择器复算位置' : '扫描定位',
+  };
 
   const reviewing = view === 'diff' && Boolean(proposal);
+  const reviewEvidenceReady = view === 'diff' || (view === 'visual' ? Boolean(previewData && beforeSrc && afterSrc) : Boolean(displaySemantics));
   return <section className={'preview panel' + (reviewing ? ' preview-reviewing' : '')} aria-labelledby="evidence-title">
     <div className="panel-head"><h2 id="evidence-title">修复效果对比</h2>{onCompare && <button type="button" className="secondary comparison-switch" onClick={onCompare}>自由版本对比</button>}</div>
     <div className="evidence-tabs" role="group" aria-label="修复效果视图">
       {tabs.map(({ id, name }) => <button key={id} aria-pressed={view === id} onClick={() => onView(id)}>{name}</button>)}
+      <details className="developer-options"><summary>开发者选项</summary><button type="button" aria-pressed={view === 'diff'} onClick={() => onView('diff')}>代码变更</button></details>
     </div>
-    {target && <div className="evidence-target"><span>{target.ruleId}</span><code>{selector || '页面级问题'}</code></div>}
+    {target && <details className="evidence-target"><summary>查看定位详情</summary><span>{target.ruleId}</span><code>{selector || '页面级问题'}</code></details>}
     {verification && <p className="comparison-status">{archivedEvidence ? '正在查看历史证据' : '已应用 · 本次修复版本'} · {versionName(state, verification.fromSnapshot)} → {versionName(state, verification.toSnapshot)}
       {view !== 'diff' && verification.diff && <> · <button type="button" className="secondary" onClick={() => onView('diff')}>查看已验证补丁</button></>}
     </p>}
     {proposal && <p className="comparison-status">待应用预览 · {versionName(state, state.project.currentSnapshot)} → 隔离候选{!patchReady && ' · 已编辑，需重新生成'}</p>}
+    {proposal && view === 'visual' && <section className="repair-summary visual-repair-summary" aria-label="修复内容摘要">
+      <h3>本次修复</h3><p>{problem}</p><p><b>建议：</b>{proposal.reason}</p>
+      {proposal.patch.value && <p><b>修复内容：</b>{proposal.patch.value}</p>}
+      {proposal.imagePurpose === 'decorative' && <p>图片将标记为装饰图片，屏幕阅读器会忽略它。</p>}
+      {proposal.sourceReview && <p>修复涉及 {proposal.sourceReview.changes.length} 个文件，已在隔离副本完成预检。</p>}
+      {previewData?.before.contrast && previewData.after.contrast && <p>对比度：{previewData.before.contrast.ratio.toFixed(2)}:1 → {previewData.after.contrast.ratio.toFixed(2)}:1</p>}
+      <p>请结合页面效果和实际用途核对，确认后系统会再次检测。</p>
+    </section>}
     {proposal && view !== 'diff' && !previewData && <p className="comparison-status" role="status">{preview?.error
       ? <>候选证据不可用。<button type="button" className="secondary" onClick={() => setAttempt(attempt + 1)}>重试预览</button></>
       : '正在读取候选页面与浏览器语义…'}</p>}
@@ -119,13 +138,12 @@ function RepairEvidence({ state, issue, history, proposal, view, onView, busy, a
         <button aria-pressed={layout === 'both'} onClick={() => setLayoutChoice({ key: layoutKey, mode: 'both' })}>并排对比</button>
         <button aria-pressed={layout === 'before'} onClick={() => setLayoutChoice({ key: layoutKey, mode: 'before' })}>仅修复前</button>
         <button aria-pressed={layout === 'after'} onClick={() => setLayoutChoice({ key: layoutKey, mode: 'after' })}>{verification ? '仅修复后' : proposal ? '仅候选页面' : '仅当前版本'}</button>
+        <EnlargedComparison left={leftShot} right={rightShot} />
       </div>
       {nonVisual && (proposal || verification) && <p className="comparison-status">此修改主要影响辅助技术读取。<button type="button" className="secondary" onClick={() => onView('semantics')}>查看语义变化</button></p>}
       <div className={layout === 'both' ? 'shots' : 'shots single-shot'}>
-        {layout !== 'after' && <Screenshot key={`before:${beforeSrc}`} title={proposal ? '修复前 · ' + versionName(state, state.project.currentSnapshot) : verification ? `修复前 · ${versionName(state, verification.fromSnapshot)}` : versionName(state, state.project.currentSnapshot)}
-          src={beforeSrc} bounds={beforeBounds} size={previewData?.before.semantics.size ?? beforeScan?.size ?? computed?.result?.before.size} location={oldIssue?.bounds ? '扫描定位' : '按扫描版本定位'} />}
-        {layout !== 'before' && <Screenshot key={`after:${afterSrc}`} title={proposal ? '隔离候选 · 尚未应用' : verification ? `${afterLabel} · ${versionName(state, afterVersion)}` : `${afterLabel} · ${versionName(state, afterVersion)}`}
-          src={afterSrc} bounds={afterBounds} size={previewData?.after.semantics.size ?? afterScan?.size ?? computed?.result?.after?.size} location={verification ? '按同一选择器复算位置' : '扫描定位'} />}
+        {layout !== 'after' && <Screenshot key={`before:${beforeSrc}`} {...leftShot} />}
+        {layout !== 'before' && <Screenshot key={`after:${afterSrc}`} {...rightShot} />}
       </div>
       {verification && computed?.error && <p className="shot-location-error">无法复算元素位置。可打开完整截图查看扫描证据。</p>}
       <p className="preview-tip"><Info size={15} />{proposal ? '候选截图来自隔离副本。' : '截图来自真实扫描。'} 名称和角色的变化可在「无障碍语义」中查看。</p>
@@ -135,13 +153,15 @@ function RepairEvidence({ state, issue, history, proposal, view, onView, busy, a
         problem={problem} impact={impact} rule={target?.ruleId} contrast={previewData && {before:previewData.before.contrast,after:previewData.after.contrast}} />
         : <p className="blank">生成补丁预览，或选择一条修复记录。</p>}
     </div>}
-    {reviewing && <footer className="patch-review">
+    {proposal && (view === 'diff' || view === 'visual' || view === 'semantics') && <footer className="patch-review">
       <p id="patch-review-status" role="status">{applying
         ? '正在应用补丁并重新检测。'
-        : patchReady ? '请核对源码差异。确认后将修改副本并自动复测。' : '修复内容或图片用途已更改。请重新生成补丁预览。'}</p>
+        : !patchReady ? '修复内容或图片用途已更改。请重新生成修复预览。'
+        : !reviewEvidenceReady ? '预览证据尚未就绪；如截图不可用，请查看无障碍语义或开发者代码。'
+        : '请核对修复内容和页面效果。确认后将修改副本并自动复测。'}</p>
       <div className="repair-actions">
         <button type="button" className="secondary" disabled={busy} onClick={onReject}>取消</button>
-        <button type="button" className="button dark" disabled={busy || !patchReady} aria-describedby="patch-review-status" onClick={onConfirm}>
+        <button type="button" className="button dark" disabled={busy || !patchReady || !reviewEvidenceReady} aria-describedby="patch-review-status" onClick={onConfirm}>
           {applying ? <><LoaderCircle size={15} className="spin" />应用并复测中…</> : '确认应用修复'}
         </button>
       </div>
