@@ -6,7 +6,7 @@ import { collectPanorama, collectSite, panoramaInput, panoramaInventory, panoram
 import { imageVisionConfigured } from './ai/vision';
 import { missingImageEvidence } from './ai/visual-context';
 import { decideAiFinding, requestAiAudit } from './audit-ai';
-import {closeAccountSession,closeLive,hasLiveProject,operateLive,scanLive,startLive} from './live-comparison';
+import {closeAccountSession,closeLive,hasLiveProject,openLiveRepair,operateLive,scanLive,startLive} from './live-comparison';
 import {accountFor,authEndpoints,initializeAccounts,requireSession,verifyRequest} from './auth';
 import {cleanExpiredGuests,releaseGuestProject,useGuestBudget} from './guests';
 import {eraseProjectRecords,flushProjectFiles,migrateProjectDeletion} from './project-deletion';
@@ -188,8 +188,12 @@ app.post('/api/projects/:id/live/:session/scan/:side',async(req,res,next)=>{
   res.set('Cache-Control','no-store').json(await projectWork(req.params.id,res,()=>scanLive(req.params.id,req.params.session,side,accountFor(res).session.id)));
  }catch(error){next(error);}
 });
-app.delete('/api/projects/:id/live/:session',(req,res)=>{
- closeLive(req.params.id,req.params.session,accountFor(res).session.id);
+app.post('/api/projects/:id/live/:session/repair-state',async(req,res,next)=>{
+ try{res.set('Cache-Control','no-store').json(await projectWork(req.params.id,res,()=>openLiveRepair(req.params.id,req.params.session,req.body,accountFor(res).session.id)));}
+ catch(error){next(error);}
+});
+app.delete('/api/projects/:id/live/:session',async(req,res)=>{
+ await closeLive(req.params.id,req.params.session,accountFor(res).session.id);
  res.sendStatus(204);
 });
 app.get('/api/projects/:id/panorama', (req,res,next) => {

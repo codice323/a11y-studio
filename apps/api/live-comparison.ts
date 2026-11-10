@@ -1,12 +1,13 @@
 import { once } from 'node:events';
 import { z } from 'zod';
 import type { Locator, Page } from 'playwright-core';
-import type { Control } from '../../packages/shared/panorama';
-import type { LiveComparison, LiveFinding, LiveFrame, LiveSide } from '../../packages/shared/live-comparison';
-import { act, controlsFor } from './panorama';
+import type { Control, PanoramaStep } from '../../packages/shared/panorama';
+import type { LiveComparison, LiveFrame, LiveSide } from '../../packages/shared/live-comparison';
+import { act, adoptLiveRecipe, controlsFor } from './panorama';
 import { withRepairPage, type BrowserRequestEvidence, type ResourceFailure } from './scan';
+import { createInteractionAudit, readInteractionState } from './interaction-audit';
 import { scanRules } from './scan-rules';
-import { db, hash, id, now, snapshot, snapshotDir, walk } from './storage';
+import { db, hash, id, now, project as storedProject, snapshot, snapshotDir, walk } from './storage';
 import { validSnapshots } from './version-state';
 
 const localOrigin = 'http://a11y.local';
@@ -18,40 +19,46 @@ const actionInput = z.object({side:z.enum(sides),sync:z.boolean(),revision:z.num
   z.object({action:z.enum(['click','fill','validate']),target:control}),
   z.object({action:z.enum(['activate','tab','shift-tab','escape','refresh'])}),
   z.object({action:z.literal('scroll'),delta:z.number().int().min(-1600).max(1600)}),
+  z.object({action:z.literal('zoom'),percent:z.union([z.literal(75),z.literal(100),z.literal(125),z.literal(150)])}),
 ])});
 const pathFor = (file:string) => '/' + file.split('/').map(encodeURIComponent).join('/');
-const redact = (text:string) => text.replace(/[\w.+-]+@[\w.-]+\.[a-z]{2,}|\b\d(?:[\d -]{7,})\d\b/gi,'[已隐藏]');
+const redact = (text:string) => text.replace(/[\w.+-]+@[\w.-]+\.[a-z]{2,}|\b\d(?:[\d -]{7,})\d\b/gi,'[已隐藏]').replace(/a11y-test-invalid/g,'[测试输入]');
 const risky = /支付|删除|发送|购买|付款|注销|下单|转账|提交订单|\b(?:pay|buy|delete|send|purchase|checkout|logout|transfer|order|unsubscribe)\b/i;
 type Target = Control | {role:'summary';name:string};
-type PageLease = {page:Page; resources:ResourceFailure[]; network:BrowserRequestEvidence[]};
+type PageLease = {page:Page; start:string; mode:'source'|'snapshot'; resources:ResourceFailure[]; network:BrowserRequestEvidence[]};
 type Session = {
-  id:string; project:string; accountId:string; authSessionId:string; controller:AbortController; ready:Promise<void>[];
+  id:string; project:string; accountId:string; authSessionId:string; controller:AbortController; finished:Promise<unknown>[];
   pages:Partial<Record<LiveSide,PageLease>>; pending:boolean; revision:number;
-  observations:LiveComparison['observations']; dialogOpener:Partial<Record<LiveSide,string>>;
+  observations:LiveComparison['observations'];
+  auditors:Record<LiveSide,ReturnType<typeof createInteractionAudit>>;
+  journals:Record<LiveSide,PanoramaStep[]|null>;
+  sequences:Record<LiveSide,string|null>;
+  scans:Partial<Record<LiveSide,{id:string; revision:number; frame:string; selectors:Map<string,string>}>>;
   versions:Record<LiveSide,string>;
   frameKeys:Partial<Record<LiveSide,string>>;
   actions:NonNullable<LiveComparison['outcome']>[];
-  tabStreak:Record<LiveSide,number>;
 };
 const sessions = new Map<string,Session>();
 
 function lease(session:Session, side:LiveSide, dir:string, entry:string, start?:string) {
   const signal = session.controller.signal;
   return new Promise<void>((resolve,reject) => {
-    void withRepairPage(dir,entry,signal,async (page,_product,resources,network) => {
+    const finished = withRepairPage(dir,entry,signal,async (page,_product,resources,network) => {
       page.setDefaultTimeout(2500);
       if (start && start !== entry) {
         if (!/\.html?$/i.test(start) || !walk(dir).includes(start)) throw new Error('该版本缺少所选 HTML 页面。');
         const response = await page.goto(localOrigin + pathFor(start),{waitUntil:'load',timeout:5000});
         if (!response?.ok()) throw new Error('所选页面加载失败。');
       }
-      session.pages[side] = {page,resources,network};
+      session.pages[side] = {page,resources,network,start:start ?? entry,mode:_product?'source':'snapshot'};
+      session.sequences[side] = hash(start ?? entry);
       resolve();
       if (!signal.aborted) await once(signal,'abort');
     },3000,true,true).catch(error => {
       reject(error);
       if (!signal.aborted) session.controller.abort();
     });
+    session.finished.push(finished);
   });
 }
 
@@ -63,17 +70,17 @@ export async function startLive(project:string, input:unknown, accountId:string,
   if (!before || !after) throw new Error('只能对比本项目的有效版本。');
   if (sessions.size >= 2 || [...sessions.values()].some(session=>session.accountId===accountId)) throw new Error('当前已有实时对比，请先关闭另一处预览。');
   const controller = new AbortController();
-  const session:Session = {id:id(),project,accountId,authSessionId,controller,ready:[],pages:{},pending:true,revision:0,versions:{left,right},frameKeys:{},actions:[],
-    observations:{left:[],right:[]},dialogOpener:{},tabStreak:{left:0,right:0}};
+  const session:Session = {id:id(),project,accountId,authSessionId,controller,finished:[],pages:{},pending:true,revision:0,versions:{left,right},frameKeys:{},actions:[],
+    observations:{left:[],right:[]},auditors:{left:createInteractionAudit(),right:createInteractionAudit()},journals:{left:[],right:[]},sequences:{left:null,right:null},scans:{}};
   sessions.set(session.id,session);
   const expiration = setTimeout(() => controller.abort(),5 * 60 * 1000);
   controller.signal.addEventListener('abort',() => {
     clearTimeout(expiration);
     sessions.delete(session.id);
   },{once:true});
-  session.ready = [lease(session,'left',snapshotDir(project,left),snapshot(project,left).entry,start),lease(session,'right',snapshotDir(project,right),snapshot(project,right).entry,start)];
+  const ready = [lease(session,'left',snapshotDir(project,left),snapshot(project,left).entry,start),lease(session,'right',snapshotDir(project,right),snapshot(project,right).entry,start)];
   try {
-    await Promise.all(session.ready);
+    await Promise.all(ready);
     return await inspect(session);
   } catch (error) {
     controller.abort();
@@ -87,9 +94,12 @@ function getSession(project:string, key:string, authSessionId:string) {
   return session;
 }
 
-export function closeLive(project:string,key:string,authSessionId:string) {
+export async function closeLive(project:string,key:string,authSessionId:string) {
   const session = sessions.get(key);
-  if (session?.project === project && session.authSessionId === authSessionId) session.controller.abort();
+  if (session?.project === project && session.authSessionId === authSessionId) {
+    session.controller.abort();
+    await Promise.allSettled(session.finished);
+  }
 }
 
 export function hasLiveProject(projectId:string) {
@@ -110,16 +120,12 @@ async function pageState(page:Page) {
       dom:visible('body *').slice(0,240).map(el => [el.localName,el.id,el.getAttribute('role'),
         el.getAttribute('aria-expanded'),el.getAttribute('aria-selected'),el.getAttribute('aria-invalid'),el.getAttribute('aria-controls'),
         el.childElementCount || el.matches('input,textarea,[contenteditable]') ? null : el.textContent?.trim().slice(0,120) ?? null]),
-      title:document.title,
-      heading:document.querySelector('h1')?.textContent?.trim().slice(0,160) ?? '',
+      title:document.title.slice(0,160),
       focus:focused && focused !== document.body ? focused.id ? '#'+focused.id : focused.localName+' @'+Array.from(document.getElementsByTagName(focused.localName)).indexOf(focused) : '',
-      focusInsideDialog:Boolean(focused?.closest('dialog[open], [aria-modal=true]')),
       dialogs:visible('dialog[open], [aria-modal=true]').length,
       interaction:['details[open]','[aria-expanded=true]','[role=tab][aria-selected=true]','[popover]:popover-open']
-        .map(selector=>visible(selector).length),
-      invalid:visible(':user-invalid').map(el => ({id:el.id,referenced:['aria-describedby','aria-errormessage'].some(attr =>
-        (el.getAttribute(attr) ?? '').split(/\s+/).some(value => Boolean(document.getElementById(value))))})),
-      status:visible('[role=status], [role=alert], [aria-live]:not([aria-live=off])').slice(0,24).map(el => el.textContent?.trim().slice(0,200)),
+        .map(selector=>visible(selector).map(el=>el.id || el.getAttribute('aria-controls') || el.textContent?.trim().slice(0,100))),
+      zoom:Math.round((Number(getComputedStyle(document.documentElement).zoom)||1)*100),
       scroll:window.scrollY,
     };
   });
@@ -129,7 +135,14 @@ async function pageState(page:Page) {
 type PageState = Awaited<ReturnType<typeof pageState>>;
 
 function frameKey(state:PageState) {
-  return JSON.stringify([state.path,state.dom,state.scroll]);
+  return JSON.stringify([state.path,state.dom,state.scroll,state.zoom]);
+}
+
+function interactionChanges(before:PageState, after:PageState) {
+  return after.interaction.map((next,index)=>[
+    next.filter(item=>!before.interaction[index].includes(item)),
+    before.interaction[index].filter(item=>!next.includes(item)),
+  ]);
 }
 
 async function settledState(page:Page) {
@@ -143,18 +156,23 @@ async function settledState(page:Page) {
   throw new Error('页面仍在变化，请刷新画面后再试。');
 }
 
+async function liveImage(page:Page) {
+  return 'data:image/jpeg;base64,' + (await page.screenshot({type:'jpeg',quality:70,timeout:4000,caret:'hide',
+    mask:[page.locator('input:not([type=button],[type=submit],[type=checkbox],[type=radio]),textarea,[contenteditable]')]})).toString('base64');
+}
+
 async function inspect(session:Session, outcome?:LiveComparison['outcome']):Promise<LiveComparison> {
   const [left,right] = await Promise.all(sides.map(async side => {
     const page = session.pages[side]!.page;
     const state = await pageState(page);
     session.frameKeys[side] = frameKey(state);
     const ax = redact(await page.locator('body').ariaSnapshot({timeout:2500})).slice(0,16000);
-    const image = 'data:image/jpeg;base64,' + (await page.screenshot({type:'jpeg',quality:70,timeout:4000,
-      mask:[page.locator('input[type=password],input[type=email],input[type=tel],input[type=file]')]})).toString('base64');
-    const frame:LiveFrame = {image,path:state.path,focus:state.focus,scroll:state.scroll,controls:await controlsFor(page)};
+    const image = await liveImage(page);
+    const frame:LiveFrame = {image,path:redact(state.path),title:redact(state.title),focus:state.focus,scroll:state.scroll,zoom:state.zoom,controls:await controlsFor(page)};
     return {frame,dom:JSON.stringify(state.dom),ax};
   }));
   return {id:session.id,revision:session.revision,left:left.frame,right:right.frame,outcome,observations:session.observations,
+    modes:{left:session.pages.left!.mode,right:session.pages.right!.mode},
     differences:{route:left.frame.path !== right.frame.path,dom:left.dom !== right.dom,semantics:left.ax !== right.ax,
       focus:left.frame.focus !== right.frame.focus,visual:left.frame.image !== right.frame.image}};
 }
@@ -205,51 +223,14 @@ async function describeTarget(page:Page, target:Target) {
     const path = link && link.origin === location.origin && !link.search &&
       !el.hasAttribute('download') && (!el.getAttribute('target') || el.getAttribute('target') === '_self') ? link.pathname + link.hash : null;
     const input = el instanceof HTMLInputElement ? el : null;
-    return {link:Boolean(link),path,submit:el instanceof HTMLButtonElement && el.type==='submit' && Boolean(el.form),
+    return {tag:el.localName,stableId:el.id && document.querySelectorAll('#'+CSS.escape(el.id)).length===1 ? el.id : '',
+      link:Boolean(link),path,submit:el instanceof HTMLButtonElement && el.type==='submit' && Boolean(el.form),
       sensitive:Boolean(input && !['text','search','number'].includes(input.type))};
   });
   if ((descriptor.link && (!descriptor.path || risky.test(descriptor.path))) || descriptor.sensitive) {
     throw new Error('外部链接、业务操作和敏感字段已阻止。');
   }
   return {locator,...descriptor};
-}
-
-async function observe(session:Session, side:LiveSide, before:Awaited<ReturnType<typeof pageState>>, after:typeof before,
-  operation:string, target?:Locator) {
-  const observations = session.observations[side];
-  function add(rule:string,evidence:string) {
-    if (observations.length < 32 && !observations.some(item=>item.rule===rule && item.evidence===evidence)) observations.push({rule,evidence,status:'needs-review'});
-  }
-  if (after.dialogs > before.dialogs) {
-    session.dialogOpener[side] = await target?.evaluate(el => el.id ? '#'+el.id : el.localName+' @'+Array.from(document.getElementsByTagName(el.localName)).indexOf(el)).catch(()=>undefined) ?? before.focus;
-    if (!after.focusInsideDialog) add('dialog-focus-entry',after.path+' · 打开弹窗后焦点仍在 '+(after.focus || '文档'));
-  }
-  if (after.dialogs < before.dialogs && session.dialogOpener[side] && session.dialogOpener[side] !== after.focus) {
-    add('dialog-focus-return',after.path+' · 关闭后焦点为 '+(after.focus || '文档')+'，打开前为 '+session.dialogOpener[side]);
-  }
-  if (operation === 'tab' || operation === 'shift-tab') {
-    session.tabStreak[side] = before.focus && before.focus === after.focus && !after.dialogs ? session.tabStreak[side]+1 : 0;
-    if (session.tabStreak[side] >= 3) add('possible-keyboard-trap',after.path+' · 连续 Tab 操作后焦点停留在 '+after.focus);
-  } else if (operation !== 'refresh') session.tabStreak[side] = 0;
-  if (before.path !== after.path && before.title === after.title && before.heading === after.heading && before.focus === after.focus) {
-    add('route-context-unchanged',after.path+' · 路由变化后标题、主标题和焦点均未改变，需确认导航反馈。');
-  }
-  if (JSON.stringify(before.status) !== JSON.stringify(after.status)) {
-    const text = after.status.filter(Boolean).join(' · ');
-    if (text) add('status-message-changed',after.path+' · 页面实时区域更新：'+redact(text).slice(0,220)+'。请通过辅助技术确认播报。');
-  }
-  if (operation === 'validate') for (const field of after.invalid) {
-    if (!field.referenced) add('form-error-context',after.path+' · '+(field.id ? '#'+redact(field.id) : '无 ID 字段')+' · 原生校验失败，未找到关联的额外错误文本；检查浏览器提示是否充分。');
-  }
-  if (target && await target.count().catch(()=>0) === 1) {
-    const expanded = await target.evaluate(el => {
-      const state = el.getAttribute('aria-expanded');
-      const ids = (el.getAttribute('aria-controls') ?? '').split(/\s+/).filter(Boolean);
-      const panel = ids.length === 1 ? document.getElementById(ids[0]) : null;
-      return panel && state !== null && (state === 'true') !== (panel.getClientRects().length > 0 && getComputedStyle(panel).visibility === 'visible');
-    }).catch(()=>false);
-    if (expanded) add('expanded-visibility-mismatch',after.path+' · 点击后 aria-expanded 与控制区域可见性不一致。');
-  }
 }
 
 export async function operateLive(project:string,key:string,input:unknown,authSessionId:string) {
@@ -261,7 +242,7 @@ export async function operateLive(project:string,key:string,input:unknown,authSe
   const page = session.pages[side]!.page;
   const opposite = session.pages[other]!.page;
   session.pending = true;
-  const outcome:NonNullable<LiveComparison['outcome']> = {action:operation.action,side,matched:null};
+  const outcome:NonNullable<LiveComparison['outcome']> = {action:operation.action,side,matched:null,executions:{}};
   try {
     if (operation.action !== 'refresh') {
       const before = await pageState(page);
@@ -273,45 +254,94 @@ export async function operateLive(project:string,key:string,input:unknown,authSe
       const descriptor = target ? await describeTarget(page,target) : undefined;
       if (target) {outcome.target = target.name; outcome.role = target.role;}
       if ('delta' in operation) outcome.delta = operation.delta;
-      const execute = async (current:Page, isOther:boolean) => {
+      if ('percent' in operation) outcome.percent = operation.percent;
+      const execute = async (current:Page, isOther:boolean, scrollTarget?:number) => {
         const currentTarget = target ? (isOther ? await describeTarget(current,target) : descriptor) : undefined;
-        if (isOther && currentTarget && (currentTarget.path !== descriptor?.path || currentTarget.submit !== descriptor?.submit)) {
+        if (isOther && currentTarget && (currentTarget.path !== descriptor?.path || currentTarget.submit !== descriptor?.submit ||
+            currentTarget.tag !== descriptor?.tag || Boolean(currentTarget.stableId && descriptor?.stableId && currentTarget.stableId !== descriptor.stableId))) {
           throw new Error('控件目的地或表单行为不同。');
         }
-        let invalid: typeof before.invalid | undefined;
+        const targetSide = isOther ? other : side;
+        const prior = await readInteractionState(current);
+        let selected = '';
+        let step:PanoramaStep | undefined;
+        let invalid;
         if (target && currentTarget && (action === 'click' || action === 'fill' || action === 'validate')) {
           if (target.role === 'summary') {
             if (action !== 'click') throw new Error('此操作仅支持命名表单控件。');
             await currentTarget.locator.click({timeout:2500});
           } else {
-            invalid = await act(current,{action:currentTarget.submit && action==='click' ? 'validate' : action,target},signal);
+            step = {action:currentTarget.submit && action==='click' ? 'validate' : action,target};
+            invalid = await act(current,step,signal,selector=>{selected=selector;});
           }
-        } else if (action === 'tab' || action === 'shift-tab' || action === 'escape') await act(current,{action},signal);
-        else if ('delta' in operation) await current.evaluate(delta => window.scrollBy({top:delta,behavior:'instant'}),operation.delta);
-        const result = await settledState(current);
-        if (invalid) result.invalid = invalid;
-        await observe(session,isOther ? other : side,isOther ? oppositeBefore! : before,result,
-          currentTarget?.submit ? 'validate' : action,currentTarget?.locator);
-        return result;
-      };
-      const actual = await execute(page,false);
-      if (sync) {
-        try {
-          if ('delta' in operation) await opposite.evaluate(y=>window.scrollTo({top:y,behavior:'instant'}),actual.scroll);
-          else if (before.path !== oppositeBefore?.path) throw new Error('两侧当前页面不同，请独立导航或重新打开对比。');
-          const replay = 'delta' in operation ? await settledState(opposite) : await execute(opposite,true);
-          outcome.matched = replay.path===actual.path && replay.dialogs===actual.dialogs && replay.invalid.length===actual.invalid.length &&
-            replay.interaction.every((value,index)=>value-oppositeBefore!.interaction[index] === actual.interaction[index]-before.interaction[index]) &&
-            (!('delta' in operation) || Math.abs(replay.scroll-actual.scroll)<=3);
-          if (!outcome.matched) outcome.reason = '操作后路由、弹窗、校验状态或可滚动范围不同。';
-        } catch (error) {
-          outcome.matched = false;
-          outcome.reason = redact((error as Error).message.split('\n')[0]);
+        } else if (action === 'tab' || action === 'shift-tab' || action === 'escape') {
+          step = {action};
+          await act(current,step,signal);
+        } else if ('delta' in operation) {
+          await current.evaluate(({delta,y}) => window.scrollTo({top:y ?? window.scrollY+delta,behavior:'instant'}),
+            {delta:operation.delta,y:scrollTarget});
+        } else if ('percent' in operation) {
+          await current.evaluate(percent=>{document.documentElement.style.zoom=String(percent/100);},operation.percent);
         }
+        const result = await settledState(current);
+        if ('delta' in operation && result.scroll <= 6000) step = {action:'scroll',y:result.scroll};
+        const previousSequence = session.sequences[targetSide];
+        if (previousSequence) session.sequences[targetSide] = hash(JSON.stringify([previousSequence,
+          step ?? {action,target,zoom:'percent' in operation ? operation.percent : undefined}]));
+        const journal = session.journals[targetSide];
+        if (!step || !journal || journal.length >= 6) session.journals[targetSide] = null;
+        else journal.push(step);
+        const after = await readInteractionState(current);
+        const observations = session.observations[targetSide];
+        for (const item of session.auditors[targetSide](prior,after,step?.action ?? action,session.revision+1,selected,invalid)) {
+          if (observations.length >= 32) break;
+          const selector = redact(item.selector);
+          observations.push({rule:item.ruleId,status:item.status,selector,step:item.step,
+            evidence:redact(result.path)+' · '+item.explanation});
+        }
+        if (observations.length < 32 && after.modal?.focusInside && prior.modal?.selector!==after.modal.selector) {
+          observations.push({rule:'modal-focus-entered',status:'observed',step:session.revision+1,
+            selector:redact(after.focus),evidence:'已观测到焦点进入模态弹窗。'});
+        }
+        if (observations.length < 32 && prior.modal && !after.modal) {
+          observations.push({rule:'modal-closed',status:'observed',step:session.revision+1,selector:redact(after.focus),
+            evidence:'模态弹窗已关闭，当前焦点：'+(redact(after.focus)||'文档')});
+        }
+        outcome.executions![targetSide] = {status:'executed',path:redact(result.path),focus:result.focus};
+        return {result,invalid:after.invalid.map(field=>field.selector),modal:after.modal?.selector};
+      };
+      try {
+        const actual = await execute(page,false);
+        if (sync) {
+          try {
+            if (before.path !== oppositeBefore?.path) throw new Error('两侧当前页面不同，请独立导航或重新打开对比。');
+            const replay = await execute(opposite,true,actual.result.scroll);
+            outcome.matched = replay.result.path===actual.result.path && replay.modal===actual.modal &&
+              JSON.stringify(replay.invalid)===JSON.stringify(actual.invalid) &&
+              JSON.stringify(interactionChanges(oppositeBefore!,replay.result))===JSON.stringify(interactionChanges(before,actual.result)) &&
+              (!(action==='tab' || action==='shift-tab') || replay.result.focus===actual.result.focus) &&
+              (!('delta' in operation) || Math.abs(replay.result.scroll-actual.result.scroll)<=3) &&
+              (!('percent' in operation) || replay.result.zoom===actual.result.zoom);
+            if (!outcome.matched) outcome.reason = '操作后路由、弹窗、校验状态或可滚动范围不同。';
+          } catch (error) {
+            outcome.matched = false;
+            outcome.executions![other] = {status:'unmatched'};
+            session.journals[other] = null;
+            session.sequences[other] = null;
+            outcome.reason = redact((error as Error).message.split('\n')[0]);
+          }
+        }
+      } catch (error) {
+        session.journals[side] = null;
+        session.sequences[side] = null;
+        outcome.executions![side] = {status:'failed'};
+        outcome.matched = false;
+        outcome.reason = redact((error as Error).message.split('\n')[0]);
       }
     }
     if (operation.action !== 'refresh' && session.actions.length < 100) session.actions.push(outcome);
     session.revision++;
+    session.scans = {};
     return await inspect(session,outcome);
   } finally { session.pending = false; }
 }
@@ -325,24 +355,58 @@ export async function scanLive(project:string,key:string,side:LiveSide,authSessi
     const state = await pageState(page);
     const result = await scanRules(page);
     const ax = redact(await page.locator('body').ariaSnapshot()).slice(0,16000);
-    state.dom = state.dom.map(row=>row.map(value=>typeof value === 'string' ? redact(value) : value));
     const version = session.versions[side];
-    const stateId = hash(JSON.stringify([state.path,state.dom,state.focus,ax,state.invalid])).slice(0,24);
-    const report = {id:stateId,version,createdAt:now(),path:state.path, focus:state.focus, scroll:state.scroll, dom:state.dom, ax, engine:result.engine, rules:result.rules,
+    const screenshot = await liveImage(page);
+    const styles = await page.evaluate(() => Array.from(document.querySelectorAll('body *')).filter(el=>el.getClientRects().length).slice(0,240)
+      .map(el=>{const css=getComputedStyle(el);return [el.localName,el.id,css.color,css.backgroundColor,css.outlineStyle,css.outlineWidth,css.visibility];}));
+    if (frameKey(state) !== frameKey(await pageState(page))) throw new Error('页面在检测过程中发生变化，请在稳定状态重试。');
+    const stateId = hash(JSON.stringify([state.path,state.dom,state.focus,ax,state.scroll,state.zoom,session.sequences[side],session.actions])).slice(0,24);
+    const selectors = new Map<string,string>();
+    const repairable = session.pages[side]!.mode==='source' && !!session.journals[side]?.length;
+    const report = {id:stateId,version,createdAt:now(),path:redact(state.path),title:redact(state.title),
+      focus:state.focus,scroll:state.scroll,dom:state.dom.map(row=>row.map(value=>typeof value === 'string' ? redact(value) : value)),
+      ax,screenshot,sequenceKey:session.sequences[side],
+      project,owner:session.accountId,zoom:state.zoom,
+      styles:styles.map(row=>row.map(redact)),
+      engine:result.engine, rules:result.rules,
       violations:result.violations.map(rule=>({id:rule.id,targets:rule.nodes.map(node=>redact(JSON.stringify(node.target)))})),
       findings:result.violations.flatMap(rule=>rule.nodes.map(node=>{
         const selector=redact(JSON.stringify(node.target));
-        return {id:hash(rule.id+'|'+selector).slice(0,20),ruleId:rule.id,selector,help:rule.help,description:rule.description,
+        const findingId = hash(rule.id+'|'+selector).slice(0,20);
+        if (repairable && rule.id==='button-name' && node.target.length===1 && typeof node.target[0]==='string' && redact(node.target[0])===node.target[0]) {
+          selectors.set(findingId,node.target[0]);
+        }
+        return {id:findingId,ruleId:rule.id,selector,help:rule.help,description:rule.description,
           impact:node.impact ?? 'unknown',bounds:null};
       })),
       incomplete:result.incomplete.map(rule=>({id:rule.id,count:rule.nodes.length})), observations:session.observations[side],
-      resources, network:network.map(item=>({...item,path:redact(item.path)})), actions:session.actions,
-      coverage:{ axe:'completed',behavior:'observed-user-actions', unsupported:['完整键盘路径','辅助技术播报','触屏实测','媒体内容质量'] },
+      resources:resources.map(item=>({...item,path:redact(item.path)})), network:network.map(item=>({...item,path:redact(item.path)})), actions:session.actions,
+      coverage:{ axe:'completed',behavior:'observed-user-actions',
+        reason:session.actions.some(action=>action.executions?.[side]?.status==='executed') ? '仅检测已执行操作；未执行的步骤没有证据。' : '尚无已执行的交互步骤。', unsupported:['完整键盘路径','辅助技术播报','触屏实测','媒体内容质量'] },
       media:await page.locator('video,audio').evaluateAll(elements=>elements.map(el=>({type:el.localName,
         tracks:Array.from(el.querySelectorAll('track'),track=>({kind:track.kind,language:track.srclang}))})))};
     db.prepare(`INSERT INTO live_state_audits VALUES (?,?,?,?,?)
       ON CONFLICT(project_id,snapshot_id,state_id) DO UPDATE SET data=excluded.data,created_at=excluded.created_at`)
       .run(project,version,stateId,JSON.stringify(report),report.createdAt);
-    return report;
+    session.scans[side] = {id:stateId,revision:session.revision,frame:frameKey(state),selectors};
+    return {...report,repairable:[...selectors.keys()]};
   } finally { session.pending = false; }
+}
+
+export async function openLiveRepair(project:string,key:string,input:unknown,authSessionId:string) {
+  const {side,stateId,issueId} = z.object({side:z.enum(sides),stateId:z.string().length(24),issueId:z.string().length(20)}).parse(input);
+  const session = getSession(project,key,authSessionId);
+  const saved = session.scans[side];
+  const selector = saved?.selectors.get(issueId);
+  const steps = session.journals[side];
+  if (session.pending || saved?.id!==stateId || saved.revision!==session.revision || !selector || !steps?.length ||
+      storedProject(project).current_snapshot!==session.versions[side]) throw new Error('实时证据已过期或不支持自动修复，请重新检测。');
+  session.pending = true;
+  try {
+    const lease = session.pages[side]!;
+    const state = await pageState(lease.page);
+    if (frameKey(state)!==saved.frame) throw new Error('网页状态已变化，请重新检测。');
+    return await adoptLiveRecipe(project,session.versions[side],lease.start,steps,state.path,selector,
+      AbortSignal.any([session.controller.signal,AbortSignal.timeout(45000)]));
+  } finally {session.pending = false;}
 }

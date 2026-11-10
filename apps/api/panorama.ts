@@ -1,5 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import { setTimeout as delay } from 'node:timers/promises';
 import type { Page } from 'playwright-core';
 import { z } from 'zod';
 import type { Control, PanoramaCapture, PanoramaComparison, PanoramaIssue, PanoramaSide, PanoramaStep } from '../../packages/shared/panorama';
@@ -461,7 +462,7 @@ export const panoramaInput = z.object({
 const running = new Set<string>();
 
 export async function collectPanorama(projectId: string, input: unknown, signal: AbortSignal,
-  progress: (message: string) => void = () => {}) {
+  progress: (message: string) => void = () => {}, live?: {steps:PanoramaStep[]; path:string; selector:string}) {
   if (running.has(projectId) || running.size >= 2) throw new Error('已有全景采集任务，请稍后重试。');
   running.add(projectId);
   try {
@@ -478,10 +479,14 @@ export async function collectPanorama(projectId: string, input: unknown, signal:
     const matching = step && parent && existing.find(item => item.start === parent.start &&
       JSON.stringify(item.steps) === JSON.stringify([...parent.steps, step]) &&
       JSON.stringify(item.checkpoints.slice(0, -1)) === JSON.stringify(parent.checkpoints));
-    const recipe: Recipe = matching || (step && parent ? {
+    const liveRecipe = live && existing.find(item => item.start === start && item.path === live.path &&
+      JSON.stringify(item.steps) === JSON.stringify(live.steps));
+    const recipe: Recipe = live ? liveRecipe || {id:id(),start:start!,path:live.path,checkpoints:[],
+      steps:live.steps.map(item=>stepSchema.parse(item)),label:'实时交互复测'} : matching || (step && parent ? {
       id: id(), start: parent.start, path: parent.path, checkpoints: parent.checkpoints.slice(),
       steps: [...parent.steps, step], label: ('target' in step ? step.target.name + ' · ' : '') + step.action,
     } : parent ?? {id: id(), start: start!, path: '', label: '初始页面', steps: [], checkpoints: []});
+    if (live && project(projectId).mode === 'snapshot') throw new Error('静态快照不支持实时源码修复。');
     if (recipe.steps.length > maxSteps) throw new Error('此操作序列已达 6 步上限，请从较早状态继续。');
     const isRouteDiscovery = step && 'target' in step && Boolean(step.navigationPath);
     const interactiveCount = existing.filter(item => item.steps.length && !item.steps.every(action => 'target' in action && action.navigationPath)).length;
@@ -523,6 +528,10 @@ export async function collectPanorama(projectId: string, input: unknown, signal:
       try {
         const evidence = await capture(versions[side], recipe, signal, shot);
         signal.throwIfAborted();
+        if (live && (evidence.capture.path !== live.path || !evidence.capture.issues.some(item =>
+          item.ruleId === 'button-name' && item.selector === live.selector && item.source))) {
+          throw new Error('隔离重放未能复现同一路由中的问题或定位源码。');
+        }
         if (recipe.checkpoints.length < evidence.checkpoints.length) {
           recipe.checkpoints = evidence.checkpoints;
           recipe.path = evidence.capture.path;
@@ -615,6 +624,23 @@ export function panoramaScreenshot(projectId: string, captureId: string, kind: s
   return file;
 }
 
+export async function adoptLiveRecipe(projectId:string, version:string, start:string, steps:PanoramaStep[],
+  path:string, selector:string, signal:AbortSignal) {
+  // The diagnostic view can be preloading this project's first capture while live is open.
+  const deadline = Date.now()+12000;
+  while (running.has(projectId) || running.size >= 2) {
+    if (Date.now() >= deadline) throw new Error('检测资源繁忙，请稍后重新打开此实时问题。');
+    await delay(100,undefined,{signal});
+  }
+  const comparison = await collectPanorama(projectId,{left:version,right:version,start,refresh:true},signal,undefined,{steps,path,selector});
+  if (!comparison.stateId || comparison.left.status !== 'captured') {
+    throw new Error(comparison.left.status === 'captured' ? '实时状态未保存。' : comparison.left.error);
+  }
+  const issue = comparison.left.capture.issues.find(item=>item.ruleId==='button-name' && item.selector===selector && item.source);
+  if (!issue) throw new Error('隔离重放未确认该问题。');
+  return {stateId:comparison.stateId,version,path,issue};
+}
+
 export function panoramaRepairScope(projectId: string, version: string, stateId: string, issueId: string) {
   const recipe = recipes(projectId).find(item => item.id === stateId);
   const evidence = recipe && cached(projectId, version, stateId)?.capture;
@@ -629,7 +655,7 @@ export function panoramaRepairScope(projectId: string, version: string, stateId:
   const original = site(projectId, version);
   const entry = issue.source.key ? original.entry : issue.source.file;
   if (!documents(original).includes(entry)) throw new Error('目标页面不是可用的项目源码。');
-  return { recipe, site: original, entry, issue: {
+  return { recipe, site: original, entry, evidence, issue: {
     ...issue, source: issue.source.key ? {...issue.source, key: issue.source.key} : undefined,
     impact: issue.impact ?? 'unknown', html: issue.html ?? '', helpUrl: '', wcag: ['4.1.2'],
   } };

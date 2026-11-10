@@ -4,6 +4,7 @@ import { spawn } from 'node:child_process';
 import { once } from 'node:events';
 import { cp, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import net from 'node:net';
+import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
 import { test } from 'node:test';
@@ -28,7 +29,7 @@ function App(){
       <div role="tablist" aria-label="Booking view"><button role="tab" aria-selected={!active} onClick={()=>setActive(false)}>Overview</button><button role="tab" aria-selected={active} onClick={()=>setActive(true)}>Details</button></div>
       {active && <p role="status">Details available</p>}
       <button id="opener" type="button" ref={opener} onClick={()=>setModal(true)}>Booking details</button>
-      {modal && <section id="dialog" role="dialog" aria-modal="true" aria-label="Booking details"><button id="modal-bad" type="button"><span aria-hidden="true">!</span></button><button type="button" onClick={()=>{setModal(false); opener.current.focus()}}>Close details</button></section>}
+      {modal && <section id="dialog" role="dialog" aria-modal="true" aria-label="Booking details"><button id="modal-bad" type="button"><span aria-hidden="true">!</span></button><button id="modal-schedule" type="button">View schedule</button><button type="button" onClick={()=>{setModal(false); opener.current.focus()}}>Close details</button></section>}
       <form><label htmlFor="slot">Slot code</label><input id="slot" required pattern="[0-9]+"/><button>Validate booking</button></form>
       {['A','B','C','D'].map(letter=><button type="button" key={letter}>Station {letter}</button>)}
       <button type="button" id="trap" onKeyDown={e=>{if(e.key==='Tab')e.preventDefault()}}>Locked control</button>
@@ -38,7 +39,29 @@ function App(){
 createRoot(document.querySelector('#root')).render(<App/>);`,
 };
 
-test('Chrome 实时双侧比较：校园 ZIP 导航及 React 独立状态、动态检查与语义失配', {timeout:120_000}, async()=>{
+const repairFixture = {
+  'package.json':fixture['package.json'],
+  'index.html':fixture['index.html'].replace('Field station','Museum reservations'),
+  'src/app.tsx':`import React,{useState,useRef,useEffect} from 'react';
+import {createRoot} from 'react-dom/client';
+function Museum(){
+  const [open,setOpen]=useState(false);
+  const dialog=useRef(null);
+  const opener=useRef(null);
+  useEffect(()=>{if(open)dialog.current.showModal()},[open]);
+  return <main style={{minHeight:1700}}><h1>Museum reservations</h1>
+    <button id="tickets" ref={opener} onClick={()=>setOpen(true)}>Review tickets</button>
+    {open && <dialog ref={dialog} aria-label="Ticket review">
+      <p>Print your ticket or return to reservations.</p>
+      <button id="print-ticket" type="button"><span aria-hidden="true">↧</span></button>
+      <button type="button" autoFocus onClick={()=>{dialog.current.close();setOpen(false);opener.current.focus()}}>Return to reservations</button>
+    </dialog>}
+  </main>
+}
+createRoot(document.querySelector('#root')).render(<Museum/>);`,
+};
+
+test('Chrome 实时双侧比较：校园 ZIP 导航及 React 独立状态、动态检查与语义失配', {timeout:210_000}, async()=>{
   const data = await mkdtemp(path.join(os.tmpdir(),'a11y-live-e2e-'));
   const output = process.env.A11Y_LIVE_EVIDENCE;
   if (output) await mkdir(output,{recursive:true});
@@ -47,7 +70,31 @@ test('Chrome 实时双侧比较：校园 ZIP 导航及 React 独立状态、动�
   const port = (portProbe.address() as net.AddressInfo).port;
   await new Promise<void>(resolve=>portProbe.close(()=>resolve()));
   const origin = 'http://127.0.0.1:'+port;
-  const service = spawn(process.execPath,['--import','tsx','apps/api/server.ts'],{env:{...process.env,PORT:String(port),A11Y_DATA_DIR:data},stdio:['ignore','pipe','pipe']});
+  let agentEvidence = false;
+  const model = http.createServer(async (req,res)=>{
+    try {
+      let body = '';
+      for await (const part of req) body += part;
+      const {messages} = JSON.parse(body);
+      const inspected = messages.find((item:{role:string;tool_call_id?:string})=>item.role==='tool' && item.tool_call_id==='inspect');
+      const message = inspected ? {
+        content:JSON.stringify({value:'Print ticket',reason:'The replay shows a print control in Ticket review.',needsReview:true})
+      } : {tool_calls:[
+        {id:'inspect',type:'function',function:{name:'inspect_issue',arguments:'{}'}},
+        {id:'wcag',type:'function',function:{name:'search_wcag',arguments:JSON.stringify({query:'WCAG button accessible name 4.1.2'})}},
+      ]};
+      if (inspected) {
+        const {context} = JSON.parse(inspected.content);
+        agentEvidence = context.route==='/index.html' && context.accessibilitySnapshot.includes('Ticket review') &&
+          context.interactions.some((step:{action:string})=>step.action==='click');
+      }
+      res.setHeader('Content-Type','application/json');
+      res.end(JSON.stringify({choices:[{message}]}));
+    } catch {res.writeHead(400).end();}
+  }).listen(0,'127.0.0.1');
+  await once(model,'listening');
+  const modelOrigin = 'http://127.0.0.1:'+(model.address() as net.AddressInfo).port;
+  const service = spawn(process.execPath,['--import','tsx','apps/api/server.ts'],{env:{...process.env,PORT:String(port),A11Y_DATA_DIR:data,AI_API_KEY:'local-fixture-only',AI_BASE_URL:modelOrigin},stdio:['ignore','pipe','pipe']});
   let serviceLog='';
   service.stderr.on('data',part=>{serviceLog+=part;});
   const save = async (file:string,content:unknown)=>{
@@ -101,7 +148,8 @@ test('Chrome 实时双侧比较：校园 ZIP 导航及 React 独立状态、动�
       const response=await waiting;
       const body=await response.json();
       assert.ok(response.ok(),JSON.stringify(body));
-      assert.ok(body.engine.version && body.ax && body.dom.length);
+      assert.ok(body.engine.version && body.ax && body.dom.length && body.styles.length);
+      assert.match(body.screenshot,/^data:image\/jpeg;base64,/);
       await save(name+'.json',body);
       return body;
     }
@@ -163,35 +211,42 @@ test('Chrome 实时双侧比较：校园 ZIP 导航及 React 独立状态、动�
       assert.equal(clicked.right.path,'/bookings');
       const menu=await control(left,'Filter by period (button)');
       assert.equal(menu.outcome.matched,false);
+      assert.equal(menu.outcome.executions.right.status,'executed');
       const menuAudit=await scan(left,'react-menu');
-      assert.ok(menuAudit.observations.some((r:{rule:string})=>r.rule==='expanded-visibility-mismatch'));
+      assert.ok(menuAudit.observations.some((r:{rule:string})=>r.rule==='expanded-state-mismatch'));
       assert.ok(menuAudit.violations.some((r:{id:string;targets:string[]})=>r.id==='button-name'&&r.targets.some(t=>t.includes('menu-bad'))));
       await control(left,'Details (tab)');
       await control(left,'Booking details (button)');
       const old=await scan(left,'react-modal-v0');
       const fixed=await scan(right,'react-modal-current');
-      assert.ok(old.observations.some((r:{rule:string})=>r.rule==='dialog-focus-entry'));
+      assert.ok(old.observations.some((r:{rule:string})=>r.rule==='modal-focus-entry'));
       assert.ok(old.violations.some((r:{id:string;targets:string[]})=>r.id==='button-name'&&r.targets.some(t=>t.includes('modal-bad'))));
       assert.ok(!fixed.violations.some((r:{id:string;targets:string[]})=>r.id==='button-name'&&r.targets.some(t=>t.includes('modal-bad'))));
-      assert.ok(!fixed.observations.some((r:{rule:string})=>r.rule==='expanded-visibility-mismatch'));
+      assert.ok(!fixed.observations.some((r:{rule:string})=>r.rule==='expanded-state-mismatch'));
+      await control(left,'View schedule (button)');
+      await action(()=>left.getByRole('button',{name:'Tab',exact:true}).click());
+      const escaped=await action(()=>left.getByRole('button',{name:'Tab',exact:true}).click());
+      assert.equal(escaped.left.focus,'#slot');
+      assert.ok(escaped.observations.left.some((item:{rule:string;status:string})=>item.rule==='modal-tab-escape' && item.status==='confirmed'));
+      await scan(left,'react-tab-escape');
       await control(left,'Close details (button)');
       await control(left,'Slot code (textbox)','填入测试值');
       const validation=await control(left,'Validate booking (button)');
       assert.equal(validation.outcome.matched,true);
       assert.equal(validation.left.focus,'#slot');
       const form=await scan(left,'react-form');
-      assert.ok(form.observations.some((r:{rule:string})=>r.rule==='form-error-context'));
-      assert.ok(form.observations.some((r:{rule:string})=>r.rule==='status-message-changed'));
+      assert.ok(form.observations.some((r:{rule:string})=>r.rule==='form-error-association'));
+      assert.ok(form.observations.some((r:{rule:string})=>r.rule==='live-region-changed'));
       await control(left,'Station A (button)');
       await left.getByLabel(/转发网页画面中的 Tab/).check();
       await liveScreen.focus();
       for(let i=0;i<3;i++) await action(()=>liveScreen.press('Tab'));
       assert.equal(await liveScreen.evaluate(node=>node===document.activeElement),true);
       await liveScreen.press('Shift+Escape');
-      assert.ok(!(await scan(left,'react-keyboard-negative')).observations.some((r:{rule:string})=>r.rule==='possible-keyboard-trap'));
+      assert.ok(!(await scan(left,'react-keyboard-negative')).observations.some((r:{rule:string})=>r.rule==='repeated-tab-focus'));
       await control(left,'Locked control (button)');
       for(let i=0;i<3;i++) await action(()=>left.getByRole('button',{name:'Tab',exact:true}).click());
-      assert.ok((await scan(left,'react-keyboard')).observations.some((r:{rule:string})=>r.rule==='possible-keyboard-trap'));
+      assert.ok((await scan(left,'react-keyboard')).observations.some((r:{rule:string})=>r.rule==='repeated-tab-focus'));
       await liveScreen.scrollIntoViewIfNeeded();
       const wheelBox=await liveScreen.boundingBox();
       assert.ok(wheelBox);
@@ -201,6 +256,8 @@ test('Chrome 实时双侧比较：校园 ZIP 导航及 React 独立状态、动�
       assert.equal(scroll.left.scroll,scroll.right.scroll);
       const miss=await control(left,'Refresh estimate (button)');
       assert.equal(miss.outcome.matched,false);
+      assert.equal(miss.outcome.executions.left.status,'executed');
+      assert.equal(miss.outcome.executions.right.status,'unmatched');
       await page.getByRole('alert').filter({hasText:'操作匹配失败'}).waitFor();
       await page.getByLabel('同步操作').uncheck();
       const independent=await action(()=>right.getByRole('button',{name:'向下滚动',exact:true}).click());
@@ -212,6 +269,64 @@ test('Chrome 实时双侧比较：校园 ZIP 导航及 React 独立状态、动�
       const report=await (await fetch(origin+'/api/projects/'+project.id+'/reports')).json();
       assert.ok(report.site.liveStates.some((row:{version:string;path:string})=>row.version===next&&row.path==='/bookings'));
       if(output) await page.screenshot({path:path.join(output,'live-comparison.png'),fullPage:true});
+      const repairZip=Buffer.from(zipSync(Object.fromEntries(Object.entries(repairFixture).map(([file,contents])=>[file,strToU8(contents)]))));
+      await upload('museum-reservations.zip',repairZip,'源码工程');
+      await openLive();
+      if (!(await page.getByLabel('同步操作').isChecked())) await page.getByLabel('同步操作').check();
+      const dialog=await control(right,'Review tickets (button)');
+      assert.equal(dialog.outcome.matched,true);
+      assert.equal(dialog.right.focus,dialog.left.focus);
+      const museumBefore=await scan(right,'museum-before');
+      assert.ok(museumBefore.repairable.length);
+      await right.getByText('定位可修复的问题',{exact:true}).click();
+      const adopting = page.waitForResponse(response=>response.url().endsWith('/repair-state'));
+      await right.getByRole('button',{name:/在诊断中修复.*print-ticket/}).click();
+      const adoption = await adopting;
+      assert.ok(adoption.ok(),await adoption.text());
+      await page.getByRole('button',{name:'AI 分析与修复'}).waitFor({timeout:55000});
+      await page.getByRole('button',{name:'AI 分析与修复'}).click();
+      await page.locator('#repair-value').waitFor();
+      await page.waitForFunction(()=>document.querySelector<HTMLInputElement>('#repair-value')?.value==='Print ticket');
+      assert.equal(agentEvidence,true);
+      await page.getByRole('button',{name:'生成补丁预览'}).click();
+      await page.getByRole('button',{name:'确认应用修复'}).click({timeout:65000});
+      await page.getByLabel('我已核对修复内容和页面用途，确认适合应用').check();
+      await page.getByRole('button',{name:'确认应用并复测'}).click();
+      await page.getByText('已在同一交互状态中验证按钮名称，当前版本已更新。').waitFor({timeout:65000});
+      await openLive();
+      await control(right,'Review tickets (button)');
+      const museumLeft=await scan(left,'museum-replayed-original');
+      const museumRight=await scan(right,'museum-replayed-repaired');
+      assert.notEqual(museumLeft.version,museumRight.version);
+      assert.equal(museumLeft.sequenceKey,museumRight.sequenceKey);
+      assert.ok(museumRight.observations.some((item:{rule:string})=>item.rule==='modal-focus-entered'));
+      await page.getByText('交互证据与差异',{exact:true}).click();
+      await page.getByText(/同一路由与操作序列的状态证据 · 消失 1 项/).waitFor();
+      assert.match(museumRight.ax,/button "Print ticket"/);
+      assert.doesNotMatch(museumLeft.ax,/button "Print ticket"/);
+      assert.ok(museumLeft.findings.some((item:{selector:string})=>item.selector.includes('print-ticket')));
+      assert.ok(!museumRight.findings.some((item:{selector:string})=>item.selector.includes('print-ticket')));
+      const closed=await control(right,'Return to reservations (button)');
+      assert.equal(closed.right.focus,'#tickets');
+      assert.ok(closed.observations.right.some((item:{rule:string;selector:string})=>item.rule==='modal-closed' && item.selector==='#tickets'));
+      const zoomed=await action(()=>right.getByLabel('缩放').selectOption('125'));
+      assert.equal(zoomed.outcome.matched,true);
+      assert.equal(zoomed.left.zoom,125);
+      const ownedSession=sessions.at(-1)!;
+      const stranger=await browser.newContext();
+      const creds={email:'other-live@example.test',password:'random-other-secret!',name:'Other workspace'};
+      for(const endpoint of ['sign-up/email','sign-in/email']) {
+        const response=await stranger.request.post(origin+'/api/auth/'+endpoint,{headers:{origin},data:creds});
+        assert.ok(response.ok(),await response.text());
+      }
+      const forbidden=await stranger.request.post(ownedSession+'/scan/right',{headers:{origin}});
+      assert.equal(forbidden.status(),404);
+      await stranger.close();
+      const removed=page.waitForResponse(response=>response.url()===ownedSession && response.request().method()==='DELETE');
+      await page.getByRole('button',{name:'关闭实时浏览器'}).click();
+      assert.equal((await removed).status(),204);
+      assert.ok(!(await fetch(ownedSession+'/scan/right',{method:'POST'})).ok);
+      if(output) await page.screenshot({path:path.join(output,'museum-repair-workbench.png'),fullPage:true});
     } finally {
       await Promise.allSettled(sessions.map(url=>fetch(url,{method:'DELETE'})));
       await save('actions.json',trace);
@@ -220,6 +335,8 @@ test('Chrome 实时双侧比较：校园 ZIP 导航及 React 独立状态、动�
       await browser.close();
     }
   } finally {
+    model.closeAllConnections();
+    await new Promise<void>(resolve=>model.close(()=>resolve()));
     if (service.exitCode === null && service.signalCode === null) {
       const exited=once(service,'exit');
       service.kill();

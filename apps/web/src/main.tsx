@@ -102,12 +102,16 @@ function App({account,signOut,openUpgrade,openVerification}:{account:Account;sig
   const [chosenPair, setChosenPair] = useState<{scope:string; pair:VersionPair}>();
   const [liveView, setLiveView] = useState<{scope:string; start?:string; diagnosticPath?:string}>();
   const [liveInspection, setLiveInspection] = useState<PageInspection>();
+  const [chosenLivePair, setChosenLivePair] = useState<{scope:string;pair:VersionPair}>();
   const [pageRequest, setPageRequest] = useState<{path:string}>();
   const projectScope = state ? state.project.id + ':' + state.project.currentSnapshot : '';
   const pairScope = projectScope + ':' + (panoramaJump?.key ?? '');
   const pair = chosenPair?.scope === pairScope ? chosenPair.pair : {
     left:panoramaJump?.left ?? state?.originalSnapshotId ?? '',
     right:panoramaJump?.right ?? state?.project.currentSnapshot ?? '',
+  };
+  const livePair = chosenLivePair?.scope === projectScope ? chosenLivePair.pair : {
+    left:state?.originalSnapshotId ?? '', right:state?.project.currentSnapshot ?? '',
   };
   const activeLabel = workspaceViews.find(item => item.id === page)?.label;
   function changePair(pair:VersionPair) { setChosenPair({scope:pairScope,pair}); }
@@ -264,6 +268,7 @@ function App({account,signOut,openUpgrade,openVerification}:{account:Account;sig
   function resetSelection() {
     setChosenPair(undefined);
     setLiveView(undefined);
+    setChosenLivePair(undefined);
     setLiveInspection(undefined);
     setPageRequest(undefined);
     setPanoramaJump(undefined);
@@ -660,10 +665,20 @@ function App({account,signOut,openUpgrade,openVerification}:{account:Account;sig
                   openPage('workspace');
                 }}>在诊断中查看当前页面</button>}
             </div>
-            {page === 'live' && <ComparisonVersions state={state} pair={pair} onPair={changePair} busy={working} />}
-            {pair.left && pair.right && <LiveComparison project={state.project.id} left={pair.left} right={pair.right}
-              names={{left:versionName(state,pair.left),right:versionName(state,pair.right)}} start={liveView.start}
-              current={state.project.currentSnapshot} onInspection={setLiveInspection} />}
+            {page === 'live' && <ComparisonVersions state={state} pair={livePair} onPair={next=>setChosenLivePair({scope:projectScope,pair:next})} busy={working} />}
+            {livePair.left && livePair.right && <LiveComparison project={state.project.id} left={livePair.left} right={livePair.right}
+              names={{left:versionName(state,livePair.left),right:versionName(state,livePair.right)}} start={liveView.start}
+              current={state.project.currentSnapshot} onInspection={setLiveInspection}
+              onClose={()=>{setLiveView(undefined);setLiveInspection(undefined);openPage('workspace');}}
+              onRepair={({issue:item,stateId,version,path})=>{
+                setSelection(null);
+                setInspection(undefined);
+                setPanoramaIssue({item,stateId,version,path});
+                setPanoramaJump({stateId,left:version,right:version,key:stateId});
+                setView('visual');
+                openPage('workspace');
+                openAssistant();
+              }} />}
           </section>}
           {page === 'live' && liveView?.scope !== projectScope && <button className="secondary" onClick={() => openPage('live')}>打开当前版本的实时浏览器</button>}
           <section className="workspace-view" hidden={page !== 'workspace'} aria-label="诊断工作区">
@@ -1132,7 +1147,7 @@ function Report({ state, onRollback, onOpen, onWorkspace, busy }: {
             <p>axe-core {item.engine.version} · {item.rules.length} 条规则记录 · {item.actions.length} 个实际操作 · 焦点 {item.focus || '文档'}</p>
             <ul>{item.findings.map(finding=><li key={finding.id}>{finding.ruleId} · <code>{finding.selector}</code></li>)}</ul>
             <ul>{item.incomplete.map(rule=><li key={rule.id}>{rule.id} · {rule.count} 项 axe 待复核</li>)}
-              {item.observations.map((item,index)=><li key={index}>{item.rule} · {item.evidence}</li>)}</ul>
+              {item.observations.map((item,index)=><li key={index}>{item.status==='confirmed'?'已确认行为异常':item.status==='observed'?'已观测':'待人工复核'} · {item.rule} · {item.evidence}</li>)}</ul>
             <p>媒体轨道记录：{item.media.length} 个播放器。实际播报、字幕内容及音频描述需人工确认。</p>
             {item.media.length > 0 && <ul>{item.media.map((medium,index)=><li key={index}>{medium.type} · {
               medium.tracks.map(track=>track.kind + (track.language ? ' '+track.language : '')).join('、') || '未声明轨道'

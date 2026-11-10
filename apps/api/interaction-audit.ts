@@ -27,8 +27,8 @@ export async function readInteractionState(page: Page) {
       const ids = (node.getAttribute('aria-controls') ?? '').trim().split(/\s+/);
       const panels = ids.length === 1 && ids[0] ? document.querySelectorAll('#' + CSS.escape(ids[0])) : [];
       const value = node.getAttribute('aria-expanded');
-      return panels.length === 1 && dom.visible(node) && (value === 'true' || value === 'false')
-        ? [{control:dom.key(node),panel:dom.key(panels[0]),expanded:value === 'true',visible:dom.visible(panels[0])}] : [];
+      return ids.length === 1 && ids[0] && panels.length <= 1 && dom.visible(node) && (value === 'true' || value === 'false')
+        ? [{control:dom.key(node),panel:'#' + CSS.escape(ids[0]),expanded:value === 'true',visible:panels.length === 1 && dom.visible(panels[0])}] : [];
     });
     const invalid = Array.from(document.querySelectorAll('[aria-invalid="true"],:user-invalid')).filter(dom.visible).slice(0,24).map(node => {
       const ids = ((node.getAttribute('aria-describedby') ?? '') + ' ' + (node.getAttribute('aria-errormessage') ?? '')).trim().split(/\s+/);
@@ -84,7 +84,10 @@ export function createInteractionAudit() {
         add('expanded-state-mismatch',panel.control,'操作改变了关联区域的可见性，但 aria-expanded 未反映变化。请核对折叠区域的实际用途。');
       }
     }
-    if (action === 'validate' || action === 'fill') for (const field of after.invalid) {
+    const native = nativeInvalid.filter(field => field.id).map(field => ({
+      selector:'#'+field.id.replace(/[^a-zA-Z0-9_-]/g, character=>'\\'+character),referenced:field.referenced,
+    })).filter(field => !after.invalid.some(item => item.selector === field.selector));
+    if (action === 'validate' || action === 'fill') for (const field of [...after.invalid,...native]) {
       if (!field.referenced && !before.invalid.some(item => item.selector === field.selector) &&
           (action !== 'validate' || nativeInvalid.length)) {
         add('form-error-association',field.selector,'操作后字段进入错误状态，未找到可解析的关联错误文本。需核实浏览器提示及实际播报。');

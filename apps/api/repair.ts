@@ -120,13 +120,14 @@ export async function createPanoramaProposal(pid: string, input: unknown, signal
   value: z.string().trim().max(120), source:z.enum(['agent','manual']).default('manual'),
  }).parse(input);
  if (project(pid).current_snapshot !== snapshotId) throw new Error('请选择当前项目版本的状态问题。');
- const {entry, issue, site} = panoramaRepairScope(pid, snapshotId, stateId, issueId);
+ const {entry, issue, site, evidence} = panoramaRepairScope(pid, snapshotId, stateId, issueId);
  if (source === 'agent') {
   const $ = cheerio.load(fs.readFileSync(safePath(site.dir,entry),'utf8'));
   const target = issue.source?.key ? $() : $(issue.selector);
   const surrounding = target.length === 1 ? target.parent().html()?.slice(0,2400) : undefined;
   const advice = await runRepairAgent({issue:{ruleId:issue.ruleId,html:issue.html,selector:issue.selector,help:issue.help},
-    operation:'set-name',context:{surrounding}});
+    operation:'set-name',context:{surrounding,route:evidence?.path,focus:evidence?.focus,
+      accessibilitySnapshot:evidence?.ax.slice(0,4000),interactions:evidence?.scan?.interaction?.transitions}});
   signal.throwIfAborted();
   if (project(pid).current_snapshot !== snapshotId) throw new Error('项目版本已变化，请重新分析。');
   return {status:'repair-review' as const,suggestedValue:advice.value?.trim().slice(0,120) || null,reason:advice.reason,sources:advice.sources};
