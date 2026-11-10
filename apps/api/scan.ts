@@ -48,7 +48,7 @@ export async function withRepairPage<T>(dir: string, entry: string, signal: Abor
   }
   let requests = 0;
   await context.route('**/*',async(route)=>{
-    if (live && ++requests > 1200) return route.abort();
+    if ((live || isolated) && ++requests > 1200) return route.abort();
     const req=route.request(),u=new URL(req.url());
     if(u.origin!=='http://a11y.local'||req.method()!=='GET')return route.abort();
     try {

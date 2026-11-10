@@ -2,7 +2,7 @@ import express from 'express';import multer from 'multer';import fs from 'node:f
 import {db,id,now,ROOT,DATA,project,proposal,audit,snapshotDir,walk,safePath} from './storage';import {createProject} from './import';import {captureUrlSnapshot} from './url-snapshot';import {runAudit,inspectAuditElement} from './scan';import {createProposal,createSourceProposal,createPanoramaProposal,previewProposal,previewIssueImage,applyProposal,rejectProposal,rollback,getKnowledge} from './repair';
 import { projectState as state, renameSnapshot } from './version-state';
 import { compareSnapshots } from './version-compare';
-import { collectPanorama, collectSite, panoramaInput, panoramaInventory, panoramaScreenshot, siteReport } from './panorama';
+import { collectPanorama, collectSite, exploreSite, panoramaInput, panoramaInventory, panoramaScreenshot, siteReport } from './panorama';
 import { imageVisionConfigured } from './ai/vision';
 import { missingImageEvidence } from './ai/visual-context';
 import { decideAiFinding, requestAiAudit } from './audit-ai';
@@ -104,10 +104,10 @@ async function projectWork<T>(projectId:string,res:express.Response,run:()=>Prom
  }
 }
 const controllers=new Map<string,AbortController>();
-function job(type:string,projectId:string,run:(signal:AbortSignal,progress:(message:string)=>void)=>Promise<any>){const owner=db.prepare(`SELECT u.id,u.isAnonymous FROM projects p
+function job(type:string,projectId:string,run:(signal:AbortSignal,progress:(message:string,payload?:object)=>void)=>Promise<any>){const owner=db.prepare(`SELECT u.id,u.isAnonymous FROM projects p
  JOIN user u ON u.id=p.owner_user_id WHERE p.id=?`).get(projectId) as {id:string;isAnonymous:number}|undefined;
  if (owner?.isAnonymous) ensureGuestCapacity(owner.id,type==='panorama'?'panorama':'foreground');
- const jid=id(),controller=new AbortController();controllers.set(jid,controller);db.prepare('INSERT INTO jobs(id,type,status,result,error,created_at,project_id) VALUES(?,?,?,?,?,?,?)').run(jid,type,'queued',null,null,now(),projectId);setImmediate(async()=>{if(controller.signal.aborted){controllers.delete(jid);return;}db.prepare('UPDATE jobs SET status=? WHERE id=?').run('running',jid);try{const result=await run(controller.signal,message=>db.prepare("UPDATE jobs SET result=? WHERE id=? AND status='running'").run(JSON.stringify({progress:message}),jid));db.prepare('UPDATE jobs SET status=?,result=? WHERE id=?').run(controller.signal.aborted?'cancelled':'completed',JSON.stringify(result),jid)}catch(error){db.prepare('UPDATE jobs SET status=?,error=? WHERE id=?').run(controller.signal.aborted?'cancelled':'failed',(error as Error).message,jid)}finally{controllers.delete(jid)}});return {id:jid,kind:'job',type,status:'queued'};}
+ const jid=id(),controller=new AbortController();controllers.set(jid,controller);db.prepare('INSERT INTO jobs(id,type,status,result,error,created_at,project_id) VALUES(?,?,?,?,?,?,?)').run(jid,type,'queued',null,null,now(),projectId);setImmediate(async()=>{if(controller.signal.aborted){controllers.delete(jid);return;}db.prepare('UPDATE jobs SET status=? WHERE id=?').run('running',jid);try{const result=await run(controller.signal,(message,payload)=>db.prepare("UPDATE jobs SET result=? WHERE id=? AND status='running'").run(JSON.stringify({progress:message,...payload}),jid));db.prepare('UPDATE jobs SET status=?,result=? WHERE id=?').run(controller.signal.aborted?'cancelled':'completed',JSON.stringify(result),jid)}catch(error){db.prepare('UPDATE jobs SET status=?,error=? WHERE id=?').run(controller.signal.aborted?'cancelled':'failed',(error as Error).message,jid)}finally{controllers.delete(jid)}});return {id:jid,kind:'job',type,status:'queued'};}
 app.get('/api/status',(_req,res)=>res.json({configured:!!process.env.AI_API_KEY,visionConfigured:imageVisionConfigured()}));
 app.get('/api/fixtures',(_req,res)=>res.json([{id:'demo-mixed',name:'慢绿生活',description:'图片、按钮、表单与对比度综合示例'},{id:'demo-form',name:'课程报名',description:'表单可访问名称示例'},{id:'demo-contrast',name:'自然笔记',description:'文字对比度示例'}]));
 app.get('/api/projects',(_req,res)=>res.json(db.prepare(`SELECT p.id,p.name,p.entry,p.mode,p.current_snapshot AS currentSnapshot,p.created_at AS createdAt,
@@ -221,6 +221,19 @@ app.post('/api/projects/:id/panorama', (req,res) => {
  panoramaJobs.set(key, ticket);
  res.status(202).json(ticket);
 });
+app.post('/api/projects/:id/explore',(req,res,next)=>{
+ try {
+  const projectId = req.params.id;
+  const active = db.prepare("SELECT project_id FROM jobs WHERE type='explorer' AND status IN ('queued','running')")
+    .all() as {project_id:string}[];
+  if (active.some(item=>item.project_id === projectId) || active.length >= 2) {
+   return res.status(409).json({error:'已有探索任务正在运行，请在结束后重试。'});
+  }
+  const version = project(projectId).current_snapshot;
+  const guest = Boolean(accountFor(res).user.isAnonymous);
+  res.status(202).json(job('explorer',projectId,(signal,progress)=>exploreSite(projectId,version,guest,signal,progress)));
+ } catch (error) { next(error); }
+});
 app.post('/api/projects/:id/panorama/proposals',(req,res,next)=>{
  if (['agent','ai'].includes(req.body?.source)) return guestAi(req,res,next);
  next();
@@ -233,7 +246,7 @@ app.get('/api/projects/:id/panorama/captures/:captureId/:kind', (req,res,next) =
  } catch(error) { next(error); }
 });
 app.post('/api/projects/:id/audits',(req,res,next)=>{try{const p=project(req.params.id);res.status(202).json(job('audit',p.id,signal=>runAudit(p.id,p.current_snapshot,signal)));}catch(e){next(e)}});
-app.get('/api/jobs/:id',(req,res)=>{res.set('Cache-Control','no-store');const row:any=db.prepare('SELECT * FROM jobs WHERE id=?').get(req.params.id);if(!row)return res.status(404).json({code:'JOB_NOT_FOUND',error:'任务不存在。'});res.json({id:row.id,type:row.type,status:row.status,result:row.result?JSON.parse(row.result):null,error:row.error,
+app.get('/api/jobs/:id',(req,res)=>{res.set('Cache-Control','no-store');const row:any=db.prepare('SELECT * FROM jobs WHERE id=?').get(req.params.id);if(!row)return res.status(404).json({code:'JOB_NOT_FOUND',error:'任务不存在。'});res.json({id:row.id,type:row.type,status:row.status,result:row.result?(row.type==='explorer'&&row.status==='running'?{progress:JSON.parse(row.result).progress}:JSON.parse(row.result)):null,error:row.error,
  ...(row.status==='failed'&&row.error==='服务重启，任务已中断。'?{code:'JOB_INTERRUPTED'}:{})})});
 app.post('/api/jobs/:id/cancel',(req,res)=>{const controller=controllers.get(req.params.id);if(!controller)return res.status(409).json({error:'任务已结束，无法取消。'});controller.abort();db.prepare("UPDATE jobs SET status='cancelled',error='任务已取消。' WHERE id=? AND status='queued'").run(req.params.id);res.json({status:'cancelling'});});
 app.get('/api/audits/:id/screenshot',(req,res,next)=>{try{audit(req.params.id);const f=path.join(DATA,'screenshots',req.params.id+'.png');res.sendFile(f);}catch(e){next(e)}});

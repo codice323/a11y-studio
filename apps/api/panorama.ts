@@ -3,13 +3,14 @@ import path from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import type { Page } from 'playwright-core';
 import { z } from 'zod';
-import type { Control, PanoramaCapture, PanoramaComparison, PanoramaIssue, PanoramaSide, PanoramaStep } from '../../packages/shared/panorama';
+import type { Control, ExplorerGraph, PanoramaCapture, PanoramaComparison, PanoramaIssue, PanoramaSide, PanoramaStep } from '../../packages/shared/panorama';
 import { createInteractionAudit, readInteractionState } from './interaction-audit';
 import { scanBehavior } from './scan-behavior';
 import { scanRules } from './scan-rules';
 import { inspectPageElement, withRepairPage, type ResourceFailure } from './scan';
 import { originAttribute, sourceSelector, type buildReactProject } from './project-build';
 import { DATA, db, hash, id, project, snapshot, snapshotDir, walk } from './storage';
+import { explorerBudget, explorerCandidates, explorerEligibility, explorerFingerprint } from './explorer';
 import { latestSnapshotAudit, validSnapshots } from './version-state';
 
 const maxStates = 12;
@@ -24,11 +25,12 @@ const control = z.object({
 const stepSchema = z.union([
   z.object({ action: z.enum(['click', 'validate', 'fill']), target: control, navigationPath: z.string().max(240).optional() }),
   z.object({ action: z.enum(['tab', 'shift-tab', 'escape']) }),
+  z.object({ action: z.literal('toggle-details'), name: z.string().min(1).max(100) }),
   z.object({ action: z.literal('scroll'), y: z.number().int().min(0).max(6000) }),
 ]);
 
 type Checkpoint = { path: string; landmarks: string; interaction: string; focus: string; scrollY: number };
-type Recipe = { id: string; start: string; path: string; label: string; steps: PanoramaStep[]; checkpoints: Checkpoint[] };
+type Recipe = { id: string; start: string; path: string; label: string; steps: PanoramaStep[]; checkpoints: Checkpoint[]; explorer?: true };
 type Captured = { capture: PanoramaCapture; checkpoints: Checkpoint[] };
 type Site = { dir: string; entry: string };
 
@@ -114,7 +116,7 @@ export function siteReport(projectId: string, snapshotId: string) {
   });
   const liveStates = db.prepare('SELECT data FROM live_state_audits WHERE project_id=? AND snapshot_id=? ORDER BY created_at DESC LIMIT 30')
     .all(projectId,snapshotId).map(row => JSON.parse((row as {data:string}).data) as Awaited<ReturnType<typeof import('./live-comparison').scanLive>>);
-  return {projectId,snapshotId,mode,pages,states,liveStates,
+  return {projectId,snapshotId,mode,pages,states,liveStates,exploration:latestExploration(projectId,snapshotId),
     attempts:attempts.filter(attempt => attempt.status !== 'completed'),
     confirmed:pages.reduce((sum, page) => sum + (page.issues ?? 0), 0),
     untested:pages.filter(page => page.status !== 'completed').map(page => page.path)};
@@ -194,6 +196,11 @@ export async function act(page: Page, step: PanoramaStep, signal: AbortSignal, r
     await page.keyboard.press({ tab: 'Tab', 'shift-tab': 'Shift+Tab', escape: 'Escape' }[step.action]);
   } else if (step.action === 'scroll') {
     await page.evaluate(y => window.scrollTo({ top: y, behavior: 'instant' }), step.y);
+  } else if (step.action === 'toggle-details') {
+    if (safeText(step.name) !== step.name) throw new Error('折叠控件名称无法安全保存。');
+    const details = page.getByText(step.name,{exact:true}).and(page.locator('details > summary:first-of-type'));
+    if (await details.count() !== 1 || !await details.isVisible()) throw new Error('折叠控件不存在、不唯一或不可见。');
+    await details.click({timeout:2500});
   } else if ('target' in step) {
     if (safeText(step.target.name) !== step.target.name) throw new Error('控件名称可能含个人数据，无法保存重放。');
     if (/(支付|删除|发送|购买|付款|注销|下单|\b(?:pay|buy|delete|send|purchase|checkout)\b)/i.test(step.target.name)) {
@@ -201,7 +208,12 @@ export async function act(page: Page, step: PanoramaStep, signal: AbortSignal, r
     }
     const navigationPath = step.navigationPath;
     if (navigationPath && (step.action !== 'click' || step.target.role !== 'link')) throw new Error('无效的导航步骤。');
-    const scope = navigationPath ? page.locator('nav, [role=navigation]') : page;
+    if (step.explorer) {
+      const allowed = await explorerEligibility(page,step.target);
+      const valid = navigationPath ? allowed.kind === 'navigation' && allowed.path === navigationPath : allowed.kind === step.action;
+      if (!valid) throw new Error('控件或目标地址已变化，无法安全重放。');
+    }
+    const scope = navigationPath && !step.explorer ? page.locator('nav, [role=navigation]') : page;
     const target = scope.getByRole(step.target.role, { name: step.target.name, exact: true });
     if (await target.count() !== 1 || !await target.isVisible() || !await target.isEnabled()) {
       throw new Error('目标控件不存在、不唯一或不可操作。');
@@ -215,7 +227,7 @@ export async function act(page: Page, step: PanoramaStep, signal: AbortSignal, r
       return 'body > ' + parts.join(' > ');
     });
     const eligibility = await target.evaluate((el, expectedPath) => {
-      if (expectedPath && (!(el instanceof HTMLAnchorElement) || new URL(el.href, location.href).pathname !== expectedPath)) return 'blocked';
+      if (expectedPath && (!(el instanceof HTMLAnchorElement) || new URL(el.href, location.href).pathname + new URL(el.href, location.href).hash !== expectedPath)) return 'blocked';
       if (el instanceof HTMLAnchorElement) {
         const link = new URL(el.href, location.href);
         if (link.origin !== location.origin || link.search || el.hasAttribute('download') ||
@@ -284,7 +296,7 @@ async function withReplay<T>(site: Site, recipe: Recipe, signal: AbortSignal, in
   page: Page, product: Awaited<ReturnType<typeof buildReactProject>> | undefined, checkpoints: Checkpoint[], resources: ResourceFailure[], interaction: InteractionScan
 ) => Promise<T>) {
   const start = recipe.start;
-  if (!documents(site).includes(start)) throw new ReplayError('此版本中没有起始页面。');
+  if (start !== site.entry && !documents(site).includes(start)) throw new ReplayError('此版本中没有起始页面。');
   return withRepairPage(site.dir, site.entry, signal, async (page, product, resources) => {
     page.setDefaultTimeout(3000);
     if (start !== site.entry) {
@@ -325,9 +337,11 @@ async function withReplay<T>(site: Site, recipe: Recipe, signal: AbortSignal, in
 
 const maskedFields = 'input:not([type=button],[type=submit],[type=checkbox],[type=radio]),textarea,[contenteditable=true]';
 
-async function capture(site: Site, recipe: Recipe, signal: AbortSignal, screenshotId?: string, target?: string) {
+async function capture(site: Site, recipe: Recipe, signal: AbortSignal, screenshotId?: string, target?: string,
+  beforeScan?: (page: Page, final: Checkpoint, interaction: InteractionScan) => Promise<void>) {
   return withReplay(site, recipe, signal, async (page, product, checkpoints, resourceFailures, interaction) => {
     const final = checkpoints[checkpoints.length - 1];
+    await beforeScan?.(page, final, interaction);
     const size = await page.evaluate(() => ({
       width: document.documentElement.scrollWidth, height: document.documentElement.scrollHeight,
     }));
@@ -678,9 +692,14 @@ export async function previewPanorama(projectId: string, version: string, stateI
 type RepairTarget = {stateId: string; issueId: string; target: string; value: string};
 
 export async function verifyPanorama(projectId: string, snapshotId: string, candidateDir: string, signal?: AbortSignal, repair?: RepairTarget, candidateSnapshot?: string) {
-  const tracked = recipes(projectId);
+  const graph = latestExploration(projectId,snapshotId);
+  const explorerIds = new Set(graph?.nodes.filter(node=>node.captureId).map(node=>node.id));
+  // A recipe selected from an earlier run still needs to be verified if it is the repair target.
+  const tracked = recipes(projectId).filter(recipe=>!recipe.explorer || explorerIds.has(recipe.id) ||
+    repair?.stateId === recipe.id || (!graph && cached(projectId,snapshotId,recipe.id)));
   if (!tracked.length) return null;
   const beforeSite = site(projectId, snapshotId);
+  const repairedSource = repair && cached(projectId,snapshotId,repair.stateId)?.capture.issues.find(issue=>issue.id === repair.issueId)?.source;
   const bounded = AbortSignal.any([...(signal ? [signal] : []), AbortSignal.timeout(110000)]);
   const verified: {recipe:Recipe; evidence:Captured}[] = [];
   const shots: string[] = [];
@@ -688,7 +707,9 @@ export async function verifyPanorama(projectId: string, snapshotId: string, cand
     try {
       const previous = cached(projectId, snapshotId, recipe.id)?.capture;
       const before = previous?.scan?.interaction ? previous : (await capture(beforeSite, recipe, bounded)).capture;
-      const scopedRepair = repair && repair.stateId === recipe.id ? repair : undefined;
+      const related = repairedSource && before.issues.some(issue=>issue.id === repair?.issueId &&
+        issue.source?.file === repairedSource.file && issue.source?.key === repairedSource.key);
+      const scopedRepair = repair && (repair.stateId === recipe.id || related) ? repair : undefined;
       const shot = candidateSnapshot ? id() : undefined;
       if (shot) shots.push(shot);
       const replayed = await capture({...beforeSite, dir: candidateDir}, recipe, bounded, shot, scopedRepair?.target);
@@ -735,4 +756,141 @@ export async function verifyPanorama(projectId: string, snapshotId: string, cand
     }
   })();
   return {name: '已采集状态复测', detail: `${tracked.length} 个已采集状态完成操作重放、axe 和键盘检查。`};
+}
+
+function latestExploration(projectId:string, version:string): ExplorerGraph | undefined {
+  // Library callers can use the scanner before the server runs account/job migrations.
+  if (!db.prepare("SELECT 1 FROM pragma_table_info('jobs') WHERE name='project_id'").get()) return;
+  const record = db.prepare(`SELECT json_extract(result,'$.graph') AS graph,status FROM jobs
+    WHERE project_id=? AND type='explorer' AND json_extract(result,'$.graph.snapshotId')=? ORDER BY rowid DESC LIMIT 1`)
+    .get(projectId,version) as {graph:string;status:string} | undefined;
+  if (!record) return;
+  const graph = JSON.parse(record.graph) as ExplorerGraph;
+  if (record.status === 'failed' && graph.stop === 'running') {
+    graph.uncovered.push('服务或浏览器任务中断，以下仅为已保存的探索进度。');
+  }
+  return graph;
+}
+
+class KnownExplorerState extends Error {}
+
+export async function exploreSite(projectId:string, version:string, guest:boolean, signal:AbortSignal,
+  progress:(message:string, payload?:object)=>void) {
+  const selected = site(projectId,version);
+  const dynamic = project(projectId).mode === 'react-source';
+  const budget = explorerBudget(guest);
+  const timeout = AbortSignal.timeout(budget.durationMs);
+  const bounded = AbortSignal.any([signal,timeout]);
+  const begin = performance.now();
+  const graph: ExplorerGraph = {projectId,snapshotId:version,startedAt:new Date().toISOString(),elapsedMs:0,stop:'running',
+    planner:'deterministic',budget,replayStepsReserved:0,maxContextConcurrency:1,pages:[],nodes:[],edges:[],omitted:{},
+    uncovered:[dynamic ? '未运行未标注的通用按钮、登录、远程请求、业务提交或跨站操作。'
+      : '仅探索本地快照已保存的页面和原生交互，原站脚本及远程交互未覆盖。',
+      '只探索能稳定识别的控件与状态；未发现的路由、超过候选限制的控件及人工体验检查不在覆盖范围内。']};
+  const files = dynamic ? [selected.entry] : documents(selected);
+  const pages = new Map<string,ExplorerGraph['pages'][number]>();
+  const fingerprints = new Map<string,string>();
+  type Work = {recipe:Recipe;from:string|null;step?:PanoramaStep;depth:number};
+  const queue:Work[] = files.slice(0,budget.pages).map(start=>({from:null,depth:0,recipe:{
+    id:id(),start,path:documentPath(start),steps:[],checkpoints:[],label:'自主探索 · 初始页面',explorer:true,
+  }}));
+  const discover = (url:string) => {
+    if (!pages.has(url)) {
+      const page:ExplorerGraph['pages'][number] = {path:url,pageId:hash(url).slice(0,20),status:'discovered'};
+      pages.set(url,page);
+      graph.pages.push(page);
+    }
+    return pages.get(url)!;
+  };
+  for (const file of files) discover(documentPath(file));
+  if (files.length > budget.pages) graph.uncovered.push(`${files.length-budget.pages} 个本地文件超出页面预算。`);
+  const publish = (url:string) => {
+    graph.elapsedMs = Math.round(performance.now()-begin);
+    progress(`已发现 ${pages.size} 页 · 已探索 ${graph.nodes.length} 状态 · 已检测 ${graph.nodes.filter(node=>node.captureId).length} 状态 · ${url}`, {graph});
+  };
+  let budgetHit = files.length > budget.pages;
+  let pageAttempts = 0;
+  const pageSlots = new Set<string>();
+  const queueLimit = budget.actions + budget.pages;
+  const navigationSeen = new Set<string>();
+  for (const work of queue) {
+    if (bounded.aborted) break;
+    const {recipe,step,from,depth} = work;
+    const pageRecord = discover(recipe.path);
+    const edge:ExplorerGraph['edges'][number] = {from,path:recipe.path,step,status:'skipped'};
+    graph.edges.push(edge);
+    if (depth > budget.depth || graph.nodes.length >= budget.states || graph.replayStepsReserved + recipe.steps.length > budget.actions ||
+        (!pageSlots.has(recipe.path) && pageAttempts >= budget.pages)) {
+      edge.reason = '超出页面、状态、深度或操作预算。';
+      budgetHit = true;
+      continue;
+    }
+    if (!pageSlots.has(recipe.path)) {pageSlots.add(recipe.path);pageAttempts++;}
+    graph.replayStepsReserved += recipe.steps.length;
+    publish(recipe.path);
+    const shot = id();
+    let fingerprint = '';
+    let candidates:Awaited<ReturnType<typeof explorerCandidates>> | undefined;
+    try {
+      const evidence = await capture(selected,recipe,bounded,shot,undefined,async(page,final,interaction)=>{
+        edge.interaction = interaction.findings.filter(item=>item.step === recipe.steps.length);
+        if (final.path !== recipe.path) throw new Error('未到达计划路径，未将该画面归入目标页面。');
+        pageRecord.status = 'visited';
+        delete pageRecord.reason;
+        const focusState = step?.action === 'tab' || step?.action === 'shift-tab';
+        fingerprint = hash(final.path + await explorerFingerprint(page,focusState));
+        const existing = fingerprints.get(fingerprint);
+        if (existing) {
+          edge.to = existing;
+          throw new KnownExplorerState();
+        }
+        candidates = await explorerCandidates(page,await controlsFor(page),dynamic);
+      });
+      bounded.throwIfAborted();
+      recipe.checkpoints = evidence.checkpoints;
+      save(projectId,version,recipe,evidence);
+      recordAttempt(projectId,version,recipe.steps.length ? recipe.id : recipe.path,recipe.path,'completed');
+      fingerprints.set(fingerprint,recipe.id);
+      graph.nodes.push({id:recipe.id,pageId:pageRecord.pageId,path:recipe.path,fingerprint,title:evidence.capture.title,
+        captureId:shot,scannedAt:evidence.capture.scan?.completedAt,steps:recipe.steps});
+      edge.to = recipe.id;
+      edge.status = 'captured';
+      for (const [name,count] of Object.entries(candidates!.omitted)) graph.omitted[name] = (graph.omitted[name] ?? 0)+count;
+      for (const candidate of candidates!.steps) {
+        const navigation = 'target' in candidate ? candidate.navigationPath : undefined;
+        // Repeating the same route transition from every open menu or tab is not useful coverage.
+        if (navigation) {
+          const key = dynamic ? JSON.stringify([recipe.path,navigation]) : navigation;
+          if (navigation === recipe.path || !dynamic && !pages.has(navigation) || navigationSeen.has(key)) continue;
+          navigationSeen.add(key);
+        }
+        if (step?.action === 'tab' && candidate.action !== 'tab') continue;
+        if ((candidate.action === 'fill' || candidate.action === 'validate') &&
+          recipe.steps.some(item=>item.action === candidate.action)) continue;
+        if (recipe.steps.length >= 6) {budgetHit = true; break;}
+        if (candidate.action === 'tab' && recipe.steps.filter(item=>item.action === 'tab').length >= 3) continue;
+        if (navigation) discover(navigation);
+        if (queue.length >= queueLimit) {budgetHit = true; break;}
+        queue.push({from:recipe.id,step:candidate,depth:depth+(navigation ? 1 : 0),recipe:{id:id(),start:recipe.start,
+          path:navigation ?? recipe.path,steps:[...recipe.steps,candidate],checkpoints:recipe.checkpoints,
+          label:'自主探索 · '+('target' in candidate ? candidate.target.name : candidate.action === 'toggle-details' ? candidate.name : candidate.action),explorer:true}});
+      }
+    } catch (error) {
+      for (const kind of ['viewport','full']) fs.rmSync(screenshotPath(shot,kind),{force:true});
+      if (error instanceof KnownExplorerState) {
+        edge.status = 'duplicate';
+      } else {
+        edge.status = bounded.aborted ? 'skipped' : 'failed';
+        edge.reason = bounded.aborted ? '探索已停止，未完成此操作。' : safeText((error as Error).message.split('\n')[0].slice(0,300));
+        if (!bounded.aborted && pageRecord.status !== 'visited') {pageRecord.status = 'failed';pageRecord.reason = edge.reason;}
+        if (fingerprint && !bounded.aborted) graph.nodes.push({id:recipe.id,pageId:pageRecord.pageId,path:recipe.path,
+          fingerprint,title:recipe.label,error:edge.reason,steps:recipe.steps});
+      }
+    }
+    publish(recipe.path);
+  }
+  graph.stop = signal.aborted ? 'cancelled' : timeout.aborted ? 'timeout' : budgetHit ? 'budget' : 'exhausted';
+  if (graph.stop !== 'exhausted') graph.uncovered.push('部分已发现路径因预算或任务中断未完成检测。');
+  publish('探索结束');
+  return {graph};
 }

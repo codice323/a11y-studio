@@ -1,5 +1,5 @@
 import { workspaceFetch as fetch } from './workspace-fetch';
-export type JobType = 'audit' | 'source-repair' | 'verification' | 'panorama';
+export type JobType = 'audit' | 'source-repair' | 'verification' | 'panorama' | 'explorer';
 
 export class JobRecoveryError extends Error {
   constructor(message: string) {
@@ -28,7 +28,7 @@ export async function startJob(url: string, type: JobType, data: unknown, signal
 }
 
 export async function waitJob<T>(id: string, type: JobType, signal: AbortSignal, onProgress?: (message: string) => void): Promise<T> {
-  const deadline = Date.now() + 180_000;
+  const deadline = Date.now() + (type === 'explorer' ? 325_000 : 180_000);
   let connectionFailures = 0;
   while (Date.now() < deadline) {
     signal.throwIfAborted();

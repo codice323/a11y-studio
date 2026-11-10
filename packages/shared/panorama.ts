@@ -2,7 +2,8 @@ import type { BehaviorAudit, Issue } from './types';
 
 export type Control = { role: 'button' | 'link' | 'tab' | 'textbox' | 'combobox'; name: string };
 export type PanoramaStep =
-  | { action: 'click' | 'validate' | 'fill'; target: Control; navigationPath?: string }
+  | { action: 'click' | 'validate' | 'fill'; target: Control; navigationPath?: string; explorer?: true }
+  | { action: 'toggle-details'; name: string }
   | { action: 'tab' | 'shift-tab' | 'escape' }
   | { action: 'scroll'; y: number };
 
@@ -51,4 +52,24 @@ export type PanoramaSide =
 
 export type PanoramaComparison = {
   stateId: string | null; left: PanoramaSide; right: PanoramaSide;
+};
+
+
+export type ExplorerGraph = {
+  projectId: string;
+  snapshotId: string;
+  startedAt: string;
+  elapsedMs: number;
+  stop: 'running' | 'exhausted' | 'budget' | 'timeout' | 'cancelled';
+  planner: 'deterministic';
+  budget: {pages:number;states:number;actions:number;depth:number;durationMs:number};
+  replayStepsReserved: number;
+  maxContextConcurrency: number;
+  pages: {path:string;pageId:string;status:'discovered'|'visited'|'failed';reason?:string}[];
+  nodes: {id:string;pageId:string;path:string;fingerprint:string;title:string;captureId?:string;
+    scannedAt?:string;error?:string;steps:PanoramaStep[]}[];
+  edges: {from:string|null;to?:string;path:string;step?:PanoramaStep;status:'captured'|'duplicate'|'failed'|'skipped';
+    reason?:string;interaction?:InteractionFinding[]}[];
+  omitted: Record<string,number>;
+  uncovered: string[];
 };

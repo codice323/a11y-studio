@@ -90,6 +90,7 @@ function App({account,signOut,openUpgrade,openVerification}:{account:Account;sig
   const [notice, setNotice] = useState('');
   const [filter, setFilter] = useState('all');
   const [inspection, setInspection] = useState<PageInspection>();
+  const [explorationRevision, setExplorationRevision] = useState(0);
   const [panoramaJump, setPanoramaJump] = useState<PanoramaJump>();
   const [panoramaIssue, setPanoramaIssue] = useState<{item: PanoramaIssue; stateId: string; version: string; path: string}>();
   const [view, setView] = useState<EvidenceView>('visual');
@@ -139,7 +140,8 @@ function App({account,signOut,openUpgrade,openVerification}:{account:Account;sig
     .map(reviewRepairIssue).find(item => item?.id === selectedId);
   useEffect(() => {
     if (!panoramaIssue || !inspection || inspection.projectId !== state?.project.id) return;
-    if (inspection.path !== panoramaIssue.path || inspection.stateId && inspection.stateId !== panoramaIssue.stateId) {
+    // A saved state ID remains stable while the comparison inventory resolves its path.
+    if (inspection.stateId ? inspection.stateId !== panoramaIssue.stateId : inspection.path !== panoramaIssue.path) {
       setPanoramaIssue(undefined);
       setControlTab('issues');
     }
@@ -225,7 +227,7 @@ function App({account,signOut,openUpgrade,openVerification}:{account:Account;sig
     try {
       const id = await startJob(url, type, data, controller.signal);
       setJobId(id);
-      return await waitJob<T>(id, type, controller.signal);
+      return await waitJob<T>(id, type, controller.signal, type === 'explorer' ? setBusy : undefined);
     } finally {
       activePoll.current = null;
       setJobId('');
@@ -350,6 +352,33 @@ function App({account,signOut,openUpgrade,openVerification}:{account:Account;sig
       if (!history) resetSelection();
       setNotice(batch.failures.length ? `检测结束，${batch.failures.length} 项页面或状态未完成，请查看结果报告。` : '已发现的页面和已记录的状态检测完成。');
     });
+  }
+
+  function startExploration() {
+    if (!state) return;
+    run('正在启动自动探索…', async () => {
+      try {
+        const {graph} = await runJob<{graph:import('../../../packages/shared/panorama').ExplorerGraph}>('explorer',route + '/explore');
+        if (!graph.nodes.some(node=>node.captureId)) {
+          throw new Error('本轮未完成任何状态检测。请在结果报告查看失败原因后重试。');
+        }
+        setNotice(graph.stop === 'timeout' || graph.stop === 'budget'
+          ? '探索已达到限制，结果报告保留了已检测的状态和未覆盖范围。'
+          : '探索结束，可在结果报告查看实际操作路径。');
+      } finally {
+        if (mounted.current) {setExplorationRevision(value=>value+1);openPage('report');}
+      }
+    });
+  }
+
+  function openStateIssue({issue:item,stateId,version,path}:{issue:PanoramaIssue;stateId:string;version:string;path:string}) {
+    setSelection(null);
+    setInspection(undefined);
+    setPanoramaIssue({item,stateId,version,path});
+    setPanoramaJump({stateId,left:version,right:version,key:stateId});
+    setView('visual');
+    openPage('workspace');
+    openAssistant();
   }
 
   function reviewWithAi() {
@@ -656,7 +685,7 @@ function App({account,signOut,openUpgrade,openVerification}:{account:Account;sig
 
         {!state ? <Home fixtures={fixtures} projects={projects} busy={working} onCreate={createProject} onOpen={openProject} onManage={manageProject} onError={setError} /> :
           <>
-          {page === 'report' && <Report state={state} busy={working} onRollback={rollback} onOpen={(item) => chooseHistory(item, 'visual', true, true)} onWorkspace={() => openPage('workspace')} />}
+          {page === 'report' && <Report key={explorationRevision} state={state} busy={working} onRollback={rollback} onOpen={(item) => chooseHistory(item, 'visual', true, true)} onWorkspace={() => openPage('workspace')} onExploreIssue={openStateIssue} />}
           {liveView?.scope === projectScope && <section className="workspace-view live-workspace panel" hidden={page !== 'live'} aria-label="网页交互对比工作区">
             <div className="panel-head"><h2>{state.project.name}</h2>
               {liveInspection?.path && state.project.mode !== 'react-source' && /\.html?$/i.test(liveInspection.path.split('#')[0]) &&
@@ -670,15 +699,7 @@ function App({account,signOut,openUpgrade,openVerification}:{account:Account;sig
               current={state.project.currentSnapshot} projectMode={state.project.mode} onInspection={setLiveInspection}
               versions={<ComparisonVersions state={state} pair={livePair} onPair={next=>setChosenLivePair({scope:projectScope,pair:next})} busy={working} />}
               onClose={()=>{setLiveView(undefined);setLiveInspection(undefined);openPage('workspace');}}
-              onRepair={({issue:item,stateId,version,path})=>{
-                setSelection(null);
-                setInspection(undefined);
-                setPanoramaIssue({item,stateId,version,path});
-                setPanoramaJump({stateId,left:version,right:version,key:stateId});
-                setView('visual');
-                openPage('workspace');
-                openAssistant();
-              }} />}
+              onRepair={openStateIssue} />}
           </section>}
           {page === 'live' && liveView?.scope !== projectScope && <button className="secondary" onClick={() => openPage('live')}>打开当前版本的网页交互对比</button>}
           <section className="workspace-view" hidden={page !== 'workspace'} aria-label="诊断工作区">
@@ -687,6 +708,7 @@ function App({account,signOut,openUpgrade,openVerification}:{account:Account;sig
               <div className="project-title"><b>{state.project.name}</b><span>{state.project.mode==='react-source'?'React 原始组件工程':state.project.mode==='static-source'?'静态源码工程':'网页快照'}：{state.project.entry} · 当前版本 {versionName(state, state.project.currentSnapshot)}</span></div>
               <div className="version-controls">
                 <div className="project-actions">
+                  <button className="secondary" onClick={startExploration} disabled={working}>自动探索与检测</button>
                   <button className="secondary" onClick={scanAgain} disabled={working}><RefreshCw size={14} />重新检测</button>
                   <select aria-label="切换项目版本" value={state.project.currentSnapshot} onChange={event => rollback(event.target.value)} disabled={working}>
                     {state.snapshots.map(snapshot => <option key={snapshot.id} value={snapshot.id}>{versionName(state, snapshot.id)}</option>)}
@@ -1103,8 +1125,9 @@ function ExportButton({ route, disabled }: { route: string; disabled: boolean })
     : <a className="button dark" href={route + '/export'}><Download size={15} />导出项目 ZIP</a>;
 }
 
-function Report({ state, onRollback, onOpen, onWorkspace, busy }: {
+function Report({ state, onRollback, onOpen, onWorkspace, onExploreIssue, busy }: {
   state: State; onRollback: (id: string) => void; onOpen: (item: HistoryItem) => void; onWorkspace: () => void; busy: boolean;
+  onExploreIssue: (target:{issue:PanoramaIssue;stateId:string;version:string;path:string}) => void;
 }) {
   const [site, setSite] = useState<ReturnType<typeof import('../../api/panorama').siteReport>>();
   const [siteError, setSiteError] = useState(false);
@@ -1124,6 +1147,17 @@ function Report({ state, onRollback, onOpen, onWorkspace, busy }: {
     <section className="panel report-section" aria-label="页面与状态检测">
       <h2>页面与状态检测</h2>
       {siteError ? <p role="status">页面与状态报告暂不可用。</p> : !site ? <p role="status">正在读取页面检测证据…</p> : <>
+        {site.exploration && <details>
+          <summary>自动探索记录 · {site.exploration.pages.length} 个已发现页面 · {site.exploration.nodes.filter(node=>node.captureId).length} 个已检测状态</summary>
+          <p>确定性探索 · {{running:'未结束',exhausted:'已处理候选操作',budget:'达到探索预算',timeout:'达到时间限制',cancelled:'用户停止'}[site.exploration.stop]} · {(site.exploration.elapsedMs / 1000).toFixed(1)} 秒</p>
+          <ul>{site.exploration.uncovered.map(reason=><li key={reason}>{reason}</li>)}</ul>
+          <ul>{site.exploration.pages.map(item=><li key={item.pageId}><code>{item.path}</code> · {{discovered:'已发现，未访问',visited:'浏览器已访问',failed:'访问失败'}[item.status]} {item.reason}</li>)}</ul>
+          <ol>{site.exploration.edges.map((edge,index)=><li key={index}><code>{edge.path}</code> · {edge.step
+            ? edge.step.action + ('target' in edge.step ? ' · '+edge.step.target.name : 'name' in edge.step ? ' · '+edge.step.name : '')
+            : '打开本地页面'} · {{captured:'已检测',duplicate:'已匹配先前状态',failed:'失败',skipped:'跳过'}[edge.status]} {edge.reason}
+            {edge.interaction?.map((finding,position)=><p key={position}>{finding.status==='confirmed'?'已确认行为异常':finding.status==='needs-review'?'待复核':'已观测'} · {finding.explanation}</p>)}
+          </li>)}</ol>
+        </details>}
         <p>已检测 {site.pages.filter(page => page.status === 'completed').length}/{site.pages.length} 个已发现页面 · 全站 {site.confirmed} 项确定性违规（同页重复状态去重）。</p>
         <p>{site.mode === 'snapshot' ? '静态快照 · 未执行原站脚本，动态状态未覆盖。' : '覆盖已扫描页面及已重放状态。未执行的交互和未发现的路由不在报告范围内。'}</p>
         <ul>{site.pages.map(page => <li key={page.pageId}><code>{page.path}</code> · {
@@ -1174,7 +1208,9 @@ function Report({ state, onRollback, onOpen, onWorkspace, busy }: {
             </li>)}</ul>
           </details>}
           {item.keyboard.findings.length > 0 && <ul>{item.keyboard.findings.map((finding,index) => <li key={index}>{finding.ruleId} · <code>{finding.selector}</code> · {finding.explanation}</li>)}</ul>}
-          <ul>{item.issues.map((issue,index) => <li key={issue.id+index}>{issue.ruleId} · <code>{issue.selector}</code></li>)}</ul>
+          <ul>{item.issues.map((issue,index) => <li key={issue.id+index}>{issue.ruleId} · <code>{issue.selector}</code>{' '}
+            <button className="secondary" disabled={busy} onClick={()=>onExploreIssue({issue,stateId:item.stateId,version:site.snapshotId,path:item.path})}>在诊断中查看</button>
+          </li>)}</ul>
           {item.sourceFrom && <p>采集时由 {item.sourceFrom} 点击同源导航进入。</p>}
           {item.steps.length > 0 && <ol>{item.steps.map((step,index) => <li key={index}>{step.action}{'target' in step && ' · '+step.target.name}</li>)}</ol>}
           {item.resourceFailures?.map((failure,index) => <p key={index}>{failure.path} · {failure.reason}</p>)}

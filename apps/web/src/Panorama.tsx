@@ -12,9 +12,9 @@ const pagePath = (file: string) => '/' + file.split('/').map(encodeURIComponent)
 type Request = {site?:true; start?: string; stateId?: string; step?: PanoramaStep; from?: 'left' | 'right'};
 const actions = {
   click: '点击控件', fill: '输入固定测试值', validate: '检查原生表单校验', tab: 'Tab',
-  'shift-tab': 'Shift+Tab', escape: 'Escape', scroll: '滚动',
+  'shift-tab': 'Shift+Tab', escape: 'Escape', scroll: '滚动', 'toggle-details': '切换折叠面板',
 };
-const stepName = (step: PanoramaStep) => actions[step.action] + ('target' in step ? ' · ' + step.target.name : '');
+const stepName = (step: PanoramaStep) => actions[step.action] + ('target' in step ? ' · ' + step.target.name : 'name' in step ? ' · ' + step.name : '');
 
 export type PageInspection = {
   projectId: string; version: string; path: string; stateId?: string;
