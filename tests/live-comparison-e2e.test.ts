@@ -65,7 +65,7 @@ function Museum(){
 createRoot(document.querySelector('#root')).render(<Museum/>);`,
 };
 
-test('Chrome 实时双侧比较：校园 ZIP 导航及 React 独立状态、动态检查与语义失配', {timeout:210_000}, async()=>{
+test('Chrome 实时双侧比较：校园 ZIP 导航及 React 独立状态、动态检查与语义失配', {timeout:process.env.A11Y_LIVE_EXPIRY_CHECK ? 355_000 : 210_000}, async()=>{
   const data = await mkdtemp(path.join(os.tmpdir(),'a11y-live-e2e-'));
   const output = process.env.A11Y_LIVE_EVIDENCE;
   if (output) await mkdir(output,{recursive:true});
@@ -120,8 +120,8 @@ test('Chrome 实时双侧比较：校园 ZIP 导航及 React 独立状态、动�
     page.on('response',r=>netLog.push({url:r.url(),status:r.status(),method:r.request().method()}));
     const trace:unknown[]=[];
     if (output) await ctx.tracing.start({screenshots:true,snapshots:true,sources:true});
-    const left=page.getByRole('region',{name:'左侧实时浏览器',exact:true});
-    const right=page.getByRole('region',{name:'右侧实时浏览器',exact:true});
+    const left=page.getByRole('region',{name:'左侧网页交互对比',exact:true});
+    const right=page.getByRole('region',{name:'右侧网页交互对比',exact:true});
     async function action(click:()=>Promise<void>) {
       const response=page.waitForResponse(r=>r.request().method()==='POST'&&r.url().endsWith('/action'));
       await click();
@@ -130,7 +130,7 @@ test('Chrome 实时双侧比较：校园 ZIP 导航及 React 独立状态、动�
       assert.ok(received.ok(),JSON.stringify(body));
       trace.push({outcome:body.outcome,left:{path:body.left.path,focus:body.left.focus,scroll:body.left.scroll},
         right:{path:body.right.path,focus:body.right.focus,scroll:body.right.scroll},differences:body.differences});
-      await page.waitForFunction(()=>Array.from(document.querySelectorAll('button')).some(button=>button.textContent==='刷新实时画面'&&!button.disabled));
+      await page.waitForFunction(revision=>document.querySelector('[data-live-revision]')?.getAttribute('data-live-revision')===String(revision),body.revision);
       return body;
     }
     const more=async (region:ReturnType<Page['getByRole']>)=>{
@@ -148,13 +148,15 @@ test('Chrome 实时双侧比较：校园 ZIP 导航及 React 独立状态、动�
     const sessions:string[] = [];
     async function openLive() {
       const waiting=page.waitForResponse(r=>r.request().method()==='POST'&&r.url().endsWith('/live'));
-      await page.getByRole('button',{name:'实时浏览器',exact:true}).click();
+      await page.getByRole('button',{name:'网页交互对比',exact:true}).click();
       const response=await waiting;
       assert.ok(response.ok(),response.ok()?'':await response.text());
       sessions.push(response.url()+'/'+(await response.json()).id);
-      await page.getByRole('button',{name:/^检测(?:左侧状态|当前状态)$/}).first().waitFor();
+      await left.getByRole('button',{name:'左侧可操作网页画面'}).waitFor();
     }
     async function scan(region:typeof left,name:string) {
+      const advanced=page.getByRole('button',{name:'更多操作',exact:true});
+      if (await advanced.getAttribute('aria-expanded')!=='true') await advanced.click();
       const waiting=page.waitForResponse(r=>/\/live\/[^/]+\/scan\/(left|right)$/.test(r.url()));
       await page.getByRole('button',{name:region===left?'检测左侧状态':'检测右侧状态',exact:true}).click();
       const response=await waiting;
@@ -181,6 +183,32 @@ test('Chrome 实时双侧比较：校园 ZIP 导航及 React 独立状态、动�
       const campusSource=await campusFixtures(path.join(data,'campus-fixtures'));
       const campus=await upload('campus-multipage.zip',await readFile(campusSource.zip),'ZIP');
       await openLive();
+      if (process.env.A11Y_LIVE_EXPIRY_CHECK) {
+        await delay(301_000);
+        const expiredResponse=page.waitForResponse(response=>response.url().endsWith('/action'));
+        await left.getByRole('button',{name:'左侧可操作网页画面'}).press('PageDown');
+        assert.equal((await expiredResponse).status(),400);
+        const error=page.getByRole('alert').filter({hasText:'会话已关闭'});
+        await error.waitFor();
+        const recovery=page.getByRole('button',{name:'重新打开对比'});
+        await recovery.focus();
+        const restarted=page.waitForResponse(response=>response.request().method()==='POST' && response.url().endsWith('/live'));
+        await recovery.press('Enter');
+        const response=await restarted;
+        assert.ok(response.ok(),await response.text());
+        const replacement=response.url()+'/'+(await response.json()).id;
+        assert.notEqual(replacement,sessions[0]);
+        sessions.push(replacement);
+        await left.getByRole('button',{name:'左侧可操作网页画面'}).waitFor();
+        await error.waitFor({state:'hidden'});
+        await save('expiry.json',{status:400,recoveredWithKeyboard:true});
+        return;
+      }
+      assert.equal(await page.getByRole('button',{name:'检测左侧状态'}).isVisible(),false);
+      assert.equal(await left.getByText('静态快照',{exact:true}).count(),0);
+      await page.getByRole('button',{name:'更多操作',exact:true}).click();
+      await page.getByText('页面信息',{exact:true}).click();
+      await page.getByText(/原网站脚本不执行/).waitFor();
       const campusHome=await scan(left,'campus-home');
       assert.equal(campusHome.path,'/index.html');
       assert.ok(campusHome.violations.some((r:{id:string})=>r.id==='image-alt'));
@@ -227,9 +255,16 @@ test('Chrome 实时双侧比较：校园 ZIP 导航及 React 独立状态、动�
       if (process.env.A11Y_SCROLL_BENCH) {
         await page.evaluate(() => {
           const screen = document.querySelector('.live-screen')!;
-          const data = {events:[] as number[], updates:[] as number[], unavailable:0, minTop:Infinity, maxTop:-Infinity};
+          const data = {events:[] as number[], updates:[] as number[], unavailable:0, minTop:Infinity, maxTop:-Infinity,
+            minToolbar:Infinity,maxToolbar:-Infinity,busyFrames:0,toolbarMutations:0,remountFrames:0};
+          const toolbar=document.querySelector('.live-toolbar')!;
+          const firstImage=screen.querySelector('img');
+          new MutationObserver(items=>{if(data.events.length) data.toolbarMutations+=items.length;})
+            .observe(toolbar,{attributes:true,attributeFilter:['disabled'],subtree:true,characterData:true,childList:true});
           Object.assign(window,{scrollEvidence:data});
-          screen.addEventListener('wheel',()=>data.events.push(performance.now()));
+          for (const preview of document.querySelectorAll('.live-screen')) {
+            preview.addEventListener('wheel',()=>data.events.push(performance.now()));
+          }
           new MutationObserver(() => {
             const image = screen.querySelector('img')!;
             void image.decode().then(()=>data.updates.push(performance.now()),()=>{});
@@ -238,6 +273,11 @@ test('Chrome 实时双侧比较：校园 ZIP 导航及 React 独立状态、动�
             const image = screen.querySelector('img');
             if (data.events.length) {
               if (!image?.complete || !image.naturalWidth) data.unavailable++;
+              const height=toolbar.getBoundingClientRect().height;
+              data.minToolbar=Math.min(data.minToolbar,height);
+              data.maxToolbar=Math.max(data.maxToolbar,height);
+              if (/更新中|正在刷新画面|正在同步|已在两侧执行/.test(toolbar.textContent??'')) data.busyFrames++;
+              if (image!==firstImage) data.remountFrames++;
               const top=screen.getBoundingClientRect().top;
               data.minTop=Math.min(data.minTop,top);
               data.maxTop=Math.max(data.maxTop,top);
@@ -259,11 +299,18 @@ test('Chrome 实时双侧比较：校园 ZIP 导航及 React 独立状态、动�
         await delay(1300);
         const evidence=await page.evaluate(()=>Reflect.get(window,'scrollEvidence'));
         const report={browser:browser.version(),...evidence,replies,outerBefore:outer,outerAfter:await page.evaluate(()=>scrollY)};
+        assert.equal(evidence.busyFrames,0);
+        assert.equal(evidence.toolbarMutations,0);
+        assert.equal(evidence.maxToolbar-evidence.minToolbar,0);
+        assert.equal(evidence.remountFrames,0);
+        assert.equal(evidence.unavailable,0);
+        assert.equal(replies.at(-1)?.scroll,480);
         await save('scroll-benchmark.json',report);
         if (output) await page.screenshot({path:path.join(output,'scroll-workbench.png')});
         console.log(JSON.stringify(report));
         if (process.env.A11Y_SCROLL_STRESS) {
           const sessionStarts=netLog.filter(entry=>entry.url.endsWith('/live')&&entry.method==='POST').length;
+          await right.getByRole('button',{name:'右侧可操作网页画面'}).hover();
           for (let index=0;index<120;index++) await page.mouse.wheel(0,index%60<30 ? 12 : -12);
           await delay(900);
           const final=await page.evaluate(()=>Reflect.get(window,'scrollEvidence'));
@@ -309,7 +356,7 @@ test('Chrome 实时双侧比较：校园 ZIP 导航及 React 独立状态、动�
       const top=await action(()=>page.mouse.wheel(0,-1600));
       assert.equal(top.right.scroll,0);
       await page.evaluate(()=>document.body.style.minHeight='1800px');
-      await page.getByRole('button',{name:'关闭实时浏览器'}).hover();
+      await page.getByRole('button',{name:'退出对比'}).hover();
       await page.waitForFunction(()=>!document.querySelector('.live-screen:hover'));
       const outside=await page.evaluate(()=>scrollY);
       await page.mouse.wheel(0,150);
@@ -369,11 +416,33 @@ test('Chrome 实时双侧比较：校园 ZIP 导航及 React 独立状态、动�
       const scroll=await action(()=>page.mouse.wheel(0,360));
       assert.ok(scroll.left.scroll>0);
       assert.equal(scroll.left.scroll,scroll.right.scroll);
+      // Hold one real scroll request so a fast click is made against the last painted frame.
+      let releaseScroll!:()=>void;
+      const gate=new Promise<void>(resolve=>{releaseScroll=resolve;});
+      const entered=page.waitForRequest(request=>request.url().endsWith('/action') && request.postDataJSON().operation.action==='scroll');
+      const scrolled=page.waitForResponse(response=>response.url().endsWith('/action') && response.request().postDataJSON().operation.action==='scroll');
+      await page.route('**/action',async route=>{await gate;await route.continue();},{times:1});
+      try {
+        await page.mouse.wheel(0,24);
+        await entered;
+        await liveScreen.click({force:true});
+        const feedback=page.getByRole('alert').filter({hasText:'这次点击未执行'});
+        await feedback.waitFor();
+        assert.match(await feedback.ariaSnapshot(),/alert.*这次点击未执行/);
+      } finally {releaseScroll();}
+      const settled=await (await scrolled).json();
+      await page.waitForFunction(revision=>document.querySelector('[data-live-revision]')?.getAttribute('data-live-revision')===String(revision),settled.revision);
       const miss=await control(left,'Refresh estimate (button)');
       assert.equal(miss.outcome.matched,false);
       assert.equal(miss.outcome.executions.left.status,'executed');
       assert.equal(miss.outcome.executions.right.status,'unmatched');
       await page.getByRole('alert').filter({hasText:'操作匹配失败'}).waitFor();
+      const history=page.getByText('操作记录',{exact:true});
+      await history.focus();
+      await history.press('Enter');
+      await page.getByText(/同步失败 · .*语义目标不存在/).first().waitFor();
+      assert.equal(await history.evaluate(node=>document.activeElement===node),true);
+      await history.press('Enter');
       await page.getByLabel('同步操作').uncheck();
       const rightScreen=right.getByRole('button',{name:'右侧可操作网页画面'});
       const independent=await action(()=>rightScreen.press('PageDown'));
@@ -417,7 +486,7 @@ test('Chrome 实时双侧比较：校园 ZIP 导航及 React 独立状态、动�
       assert.notEqual(museumLeft.version,museumRight.version);
       assert.equal(museumLeft.sequenceKey,museumRight.sequenceKey);
       assert.ok(museumRight.observations.some((item:{rule:string})=>item.rule==='modal-focus-entered'));
-      await page.getByText('交互证据与差异',{exact:true}).click();
+      await page.getByText('操作记录',{exact:true}).click();
       await page.getByText(/同一路由与操作序列的状态证据 · 消失 1 项/).waitFor();
       assert.match(museumRight.ax,/button "Print ticket"/);
       assert.doesNotMatch(museumLeft.ax,/button "Print ticket"/);
@@ -457,7 +526,7 @@ test('Chrome 实时双侧比较：校园 ZIP 导航及 React 独立状态、动�
       await page.mouse.wheel(0,96);
       await closingWheel;
       const removed=page.waitForResponse(response=>response.url()===ownedSession && response.request().method()==='DELETE');
-      await page.getByRole('button',{name:'关闭实时浏览器'}).click();
+      await page.getByRole('button',{name:'退出对比'}).click();
       assert.equal((await removed).status(),204);
       assert.ok(!(await fetch(ownedSession+'/scan/right',{method:'POST'})).ok);
       assert.equal(await right.isVisible(),false);

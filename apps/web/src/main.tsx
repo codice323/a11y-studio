@@ -51,7 +51,7 @@ const controlTabs = [
 ] as const;
 const workspaceViews = [
   {id:'workspace', label:'诊断工作台', icon:ScanSearch},
-  {id:'live', label:'实时浏览器', icon:PanelsTopLeft},
+  {id:'live', label:'网页交互对比', icon:PanelsTopLeft},
   {id:'report', label:'结果报告', icon:Activity},
 ] as const;
 type WorkspaceView = typeof workspaceViews[number]['id'];
@@ -657,7 +657,7 @@ function App({account,signOut,openUpgrade,openVerification}:{account:Account;sig
         {!state ? <Home fixtures={fixtures} projects={projects} busy={working} onCreate={createProject} onOpen={openProject} onManage={manageProject} onError={setError} /> :
           <>
           {page === 'report' && <Report state={state} busy={working} onRollback={rollback} onOpen={(item) => chooseHistory(item, 'visual', true, true)} onWorkspace={() => openPage('workspace')} />}
-          {liveView?.scope === projectScope && <section className="workspace-view live-workspace panel" hidden={page !== 'live'} aria-label="实时浏览器工作区">
+          {liveView?.scope === projectScope && <section className="workspace-view live-workspace panel" hidden={page !== 'live'} aria-label="网页交互对比工作区">
             <div className="panel-head"><h2>{state.project.name}</h2>
               {liveInspection?.path && state.project.mode !== 'react-source' && /\.html?$/i.test(liveInspection.path.split('#')[0]) &&
                 <button className="secondary" onClick={() => {
@@ -667,7 +667,7 @@ function App({account,signOut,openUpgrade,openVerification}:{account:Account;sig
             </div>
             {livePair.left && livePair.right && <LiveComparison project={state.project.id} left={livePair.left} right={livePair.right}
               names={{left:versionName(state,livePair.left),right:versionName(state,livePair.right)}} start={liveView.start}
-              current={state.project.currentSnapshot} onInspection={setLiveInspection}
+              current={state.project.currentSnapshot} projectMode={state.project.mode} onInspection={setLiveInspection}
               versions={<ComparisonVersions state={state} pair={livePair} onPair={next=>setChosenLivePair({scope:projectScope,pair:next})} busy={working} />}
               onClose={()=>{setLiveView(undefined);setLiveInspection(undefined);openPage('workspace');}}
               onRepair={({issue:item,stateId,version,path})=>{
@@ -680,7 +680,7 @@ function App({account,signOut,openUpgrade,openVerification}:{account:Account;sig
                 openAssistant();
               }} />}
           </section>}
-          {page === 'live' && liveView?.scope !== projectScope && <button className="secondary" onClick={() => openPage('live')}>打开当前版本的实时浏览器</button>}
+          {page === 'live' && liveView?.scope !== projectScope && <button className="secondary" onClick={() => openPage('live')}>打开当前版本的网页交互对比</button>}
           <section className="workspace-view" hidden={page !== 'workspace'} aria-label="诊断工作区">
             <div className="project-strip">
               <div className="project-symbol"><FileCode2 size={19} /></div>
