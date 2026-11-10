@@ -39,7 +39,7 @@ function App() {
       <button id="menu" aria-expanded={expanded} onClick={() => setExpanded(!expanded)}>Display options</button>
       {expanded && <p>Display options open</p>}
       <button onClick={() => setOpen(true)}>Open workshop details</button>
-      {open && <section role="dialog" aria-label="Workshop details" onKeyDown={event => {if (event.key === 'Escape') setOpen(false);}}>
+      {open && <section role="dialog" aria-modal="true" aria-label="Workshop details" onKeyDown={event => {if (event.key === 'Escape') setOpen(false);}}>
         <h2>Workshop details</h2><button id="workshop-icon" type="button" style={{minWidth: 40,minHeight: 36}}><span aria-hidden="true">i</span></button>
         <button onClick={() => setOpen(false)}>Close workshop details</button>
       </section>}
@@ -95,6 +95,7 @@ test('全景工作台用真实 Chrome 采集静态多页和 React 路由，重�
       ]) {
         const page = await browser.newPage({viewport:{width: 1440, height: 960}});
         await attachTestAccount(page.context(),origin);
+        if (evidence) await page.context().tracing.start({screenshots:true,snapshots:true});
         page.setDefaultTimeout(22000);
         await page.goto(origin);
         await page.getByRole('button', {name:'源码工程',exact:true}).click();
@@ -181,6 +182,13 @@ test('全景工作台用真实 Chrome 采集静态多页和 React 路由，重�
         const modal = await panel.getByLabel('交互状态').inputValue();
         const issue = page.getByRole('region', {name:'待处理问题'}).getByRole('button').filter({hasText:scenario.id});
         await issue.waitFor();
+        const scanned = (await api(route + '/reports')).site;
+        const recorded = scanned.states.find((item: {stateId:string}) => item.stateId === modal);
+        assert.equal(recorded.scan.interaction.transitions.at(-1).toPath, scenario.page);
+        assert.equal(recorded.scan.interaction.transitions.at(-1).action, 'click');
+        assert.ok(recorded.scan.interaction.transitions.at(-1).afterFocus);
+        assert.equal(recorded.scan.interaction.findings.some((item:{status:string;ruleId:string}) =>
+          item.status === 'confirmed' && item.ruleId === 'modal-focus-entry'),scenario.name === 'workshop');
         assert.equal(await panel.getByRole('region',{name:'当前状态问题'}).count(),0);
         await panel.getByRole('button', {name:'无障碍语义'}).click();
         await panel.getByText(/浏览器无障碍语义/).first().waitFor();
@@ -257,6 +265,7 @@ test('全景工作台用真实 Chrome 采集静态多页和 React 路由，重�
           await screenshot(page, 'workshop-unmatched');
           console.log('React 工程：同态修复通过，版本缺少控件时在第 4 步停止。');
         }
+        if (evidence) await page.context().tracing.stop({path:path.join(evidence,scenario.name+'-trace.zip')});
         await page.close();
       }
     } finally { await browser.close(); }

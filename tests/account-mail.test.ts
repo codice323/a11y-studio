@@ -54,7 +54,7 @@ test('Chrome 邮箱验证、密码重置与四个独立账号并发修复', {tim
         async function receive(to:string,purpose:string){
           for(let attempt=0;attempt<80;attempt++){
             for(const name of await readdir(mail)){
-              if(seen.has(name)) continue;
+              if(!name.endsWith('.json') || seen.has(name)) continue;
               const file=path.join(mail,name);
               const item=JSON.parse(await readFile(file,'utf8'));
               if(item.to!==to || item.purpose!==purpose) continue;

@@ -5,7 +5,7 @@ const MAX_CONTROLS = 60;
 const MAX_TAB_STEPS = 75;
 const BUDGET_MS = 6500;
 const limitNotes = [
-  '仅检查禁用页面脚本的静态 Chromium 快照。动态组件的按键处理、打开后的菜单及业务操作需要人工验证。',
+  '只检查当前 Chromium 页面状态和有限 Tab 路径。动态组件需进入实际状态；其他按键和业务操作需要人工验证。',
   '焦点探查比较控件、伪元素及至多四层近邻祖先的计算样式，无法判定遮挡、对比度、动画或全部焦点样式。',
 ];
 
@@ -45,7 +45,7 @@ export function keyboardFindings(controls: Control[], sequence: string[], comple
     const { selector, role, tabindex, radio, managed, tabbableCandidate, expanded, controlledHidden } = control;
     if (tabbableCandidate && !radio && !managed && !tabPositions.has(selector) && (tabindex < 0 || complete)) {
       results.push({ ruleId: 'keyboard-unreached', selector, status: 'needs-review',
-        explanation: '在静态快照中未通过 Tab 到达此控件。请复核是否有其他键盘入口或组件导航。',
+        explanation: '在当前页面状态中未通过 Tab 到达此控件。请复核是否有其他键盘入口或组件导航。',
         evidence: { role, tabindex, completedTabCycle: complete } });
     }
     const earlier = overtaken.get(selector);
@@ -58,7 +58,7 @@ export function keyboardFindings(controls: Control[], sequence: string[], comple
     }
     if ((expanded === 'true' && controlledHidden === true) || (expanded === 'false' && controlledHidden === false)) {
       results.push({ ruleId: 'expanded-visibility-mismatch', selector, status: 'needs-review',
-        explanation: '静态 aria-expanded 与唯一 aria-controls 目标的渲染状态不一致，需结合真实组件交互复核。',
+        explanation: '当前 aria-expanded 与唯一 aria-controls 目标的渲染状态不一致，需结合真实组件交互复核。',
         evidence: { expanded, controlledHidden } });
     }
   }

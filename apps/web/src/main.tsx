@@ -745,6 +745,12 @@ function App({account,signOut,openUpgrade,openVerification}:{account:Account;sig
                     axe 待复核 {currentInspection.review.axe} 项 · V2 行为证据 {currentInspection.review.behavior} 项
                     {currentInspection.review.behaviorStatus !== 'completed' && '（行为检查未完整完成）'}
                   </p>}
+                  {list === 'open' && !!currentInspection?.review?.interaction?.findings.length && <details>
+                    <summary>交互检测证据 · {currentInspection.review.interaction.findings.length} 项</summary>
+                    <ul>{currentInspection.review.interaction.findings.map((finding,index) => <li key={index}>
+                      第 {finding.step} 步 · {finding.status === 'confirmed' ? '已确认行为异常' : finding.status === 'needs-review' ? '待人工复核' : '浏览器观测'} · {finding.explanation}
+                    </li>)}</ul>
+                  </details>}
                   {!stateFindings && <DetectionReview key={state.current?.id} detection={state.current?.detection} aiConfigured={ai.configured} busy={working} onReview={reviewWithAi} onDecision={decideAiFinding} onRepair={chooseIssue} />}
                   <div className="issue-foot"><Info size={15} /><span>问题状态仅对应当前版本。<button className="record-link" onClick={() => openPage('report')}>查看跨版本历史</button></span></div>
                 </div>
@@ -1143,6 +1149,15 @@ function Report({ state, onRollback, onOpen, onWorkspace, busy }: {
             <p>图片 {item.scan.resources.loadedImages}/{item.scan.resources.images} · 外部样式 {item.scan.resources.loadedStylesheets}/{item.scan.resources.stylesheets}</p>
             {item.scan.incomplete.length > 0 && <ul>{item.scan.incomplete.map(rule => <li key={rule.ruleId}>axe 待复核 · {rule.ruleId} · {rule.selectors.join('、')}</li>)}</ul>}
           </> : <p>历史扫描未保存引擎版本与规则明细。运行全站检测可补全证据。</p>}
+          {item.scan?.interaction && item.scan.interaction.transitions.length > 0 && <details>
+            <summary>操作证据 · {item.scan.interaction.transitions.length} 步 · {item.scan.interaction.findings.filter(finding => finding.status === 'confirmed').length} 项已确认行为异常</summary>
+            <ol>{item.scan.interaction.transitions.map(step => <li key={step.step}>
+              {step.action} · <code>{step.fromPath}</code> → <code>{step.toPath}</code> · 焦点 {step.beforeFocus || '文档'} → {step.afterFocus || '文档'}
+            </li>)}</ol>
+            <ul>{item.scan.interaction.findings.map((finding,index) => <li key={index}>
+              第 {finding.step} 步 · {finding.status === 'confirmed' ? '已确认行为异常' : finding.status === 'needs-review' ? '待人工复核' : '浏览器观测'} · <code>{finding.selector}</code> {finding.explanation}
+            </li>)}</ul>
+          </details>}
           {item.keyboard.findings.length > 0 && <ul>{item.keyboard.findings.map((finding,index) => <li key={index}>{finding.ruleId} · <code>{finding.selector}</code> · {finding.explanation}</li>)}</ul>}
           <ul>{item.issues.map((issue,index) => <li key={issue.id+index}>{issue.ruleId} · <code>{issue.selector}</code></li>)}</ul>
           {item.sourceFrom && <p>采集时由 {item.sourceFrom} 点击同源导航进入。</p>}

@@ -1,6 +1,6 @@
 import { workspaceFetch as fetch } from './workspace-fetch';
 import { useEffect, useRef, useState, type ReactNode } from 'react';
-import type { PanoramaComparison, PanoramaIssue, PanoramaRecipe, PanoramaSide, PanoramaStep } from '../../../packages/shared/panorama';
+import type { PanoramaCapture, PanoramaComparison, PanoramaIssue, PanoramaRecipe, PanoramaSide, PanoramaStep } from '../../../packages/shared/panorama';
 import { startJob, waitJob } from './jobs';
 import type { EvidenceView } from './Evidence';
 import type { VersionPair } from './VersionComparison';
@@ -21,7 +21,7 @@ export type PageInspection = {
   scoped: boolean; findings: PanoramaIssue[];
   scanStatus: 'scanned' | 'pending' | 'failed' | 'unscanned';
   scanError?: string;
-  review?: {axe:number; behavior:number; behaviorStatus:string};
+  review?: {axe:number; behavior:number; behaviorStatus:string; interaction?: NonNullable<PanoramaCapture['scan']>['interaction']};
   coverage?: string;
   comparison?: string;
 };
@@ -196,7 +196,7 @@ export function Panorama({state, onInspection, disabled, jump, pair: versions, v
   const comparison = pair && scoped ? `右侧较左侧解决 ${resolved.length} 个问题，新增 ${added.length} 个问题。` : undefined;
   useEffect(() => {
     onInspection({projectId:project.id,version:shownVersion,path:page,stateId,scoped,findings:shown?.issues ?? [],coverage,comparison,
-      scanStatus,scanError,review:shown && {axe:shown.manual,behavior:shown.keyboard.findings.length,behaviorStatus:shown.keyboard.status}});
+      scanStatus,scanError,review:shown && {axe:shown.manual,behavior:shown.keyboard.findings.length,behaviorStatus:shown.keyboard.status,interaction:shown.scan?.interaction}});
   }, [onInspection, project.id, shownVersion, page, stateId, scoped, shown, coverage, comparison, scanStatus, scanError]);
 
   function renderShot(position: 'left' | 'right', src: string, title: string, size: Entry['size'],

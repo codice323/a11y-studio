@@ -13,6 +13,11 @@ export type PanoramaIssue = {
   source?: {file: string; line: number; tag: string; key?: string};
 };
 
+export type InteractionFinding = {
+  ruleId: string; selector: string; explanation: string; step: number;
+  status: 'confirmed' | 'needs-review' | 'observed';
+};
+
 export type PanoramaCapture = {
   id: string; path: string; title: string; ax: string; dom: string; focus: string;
   width: number; height: number; scrollY: number; issues: PanoramaIssue[]; manual: number;
@@ -26,6 +31,10 @@ export type PanoramaCapture = {
     rules: {id:string; outcome:string}[];
     incomplete: {ruleId:string; selectors:string[]}[];
     behavior: BehaviorAudit;
+    interaction?: {
+      transitions: {step:number; action:PanoramaStep['action']; fromPath:string; toPath:string; beforeFocus:string; afterFocus:string}[];
+      findings: InteractionFinding[];
+    };
     resources: {images:number; loadedImages:number; stylesheets:number; loadedStylesheets:number};
   };
   resourceFailures?: {type:string; path:string; reason:string; status?:number}[];

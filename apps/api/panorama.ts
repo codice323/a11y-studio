@@ -3,6 +3,7 @@ import path from 'node:path';
 import type { Page } from 'playwright-core';
 import { z } from 'zod';
 import type { Control, PanoramaCapture, PanoramaComparison, PanoramaIssue, PanoramaSide, PanoramaStep } from '../../packages/shared/panorama';
+import { createInteractionAudit, readInteractionState } from './interaction-audit';
 import { scanBehavior } from './scan-behavior';
 import { scanRules } from './scan-rules';
 import { inspectPageElement, withRepairPage, type ResourceFailure } from './scan';
@@ -184,8 +185,9 @@ function checkpointMatches(expected: Checkpoint, actual: Checkpoint, action?: Pa
     (action !== 'scroll' || Math.abs(expected.scrollY - actual.scrollY) <= 3);
 }
 
-export async function act(page: Page, step: PanoramaStep, signal: AbortSignal) {
+export async function act(page: Page, step: PanoramaStep, signal: AbortSignal, recordTarget?: (selector:string) => void) {
   signal.throwIfAborted();
+  let activated = '';
   let invalidFields: {id:string;referenced:boolean}[] | undefined;
   if (step.action === 'tab' || step.action === 'shift-tab' || step.action === 'escape') {
     await page.keyboard.press({ tab: 'Tab', 'shift-tab': 'Shift+Tab', escape: 'Escape' }[step.action]);
@@ -203,6 +205,14 @@ export async function act(page: Page, step: PanoramaStep, signal: AbortSignal) {
     if (await target.count() !== 1 || !await target.isVisible() || !await target.isEnabled()) {
       throw new Error('目标控件不存在、不唯一或不可操作。');
     }
+    if (recordTarget) activated = await target.evaluate(el => {
+      if (el.id && document.querySelectorAll('#' + CSS.escape(el.id)).length === 1) return '#' + CSS.escape(el.id);
+      const parts = [];
+      for (let element: Element | null = el; element && element !== document.body; element = element.parentElement) {
+        parts.unshift(element.localName + ':nth-child(' + (Array.from(element.parentElement?.children ?? []).indexOf(element) + 1) + ')');
+      }
+      return 'body > ' + parts.join(' > ');
+    });
     const eligibility = await target.evaluate((el, expectedPath) => {
       if (expectedPath && (!(el instanceof HTMLAnchorElement) || new URL(el.href, location.href).pathname !== expectedPath)) return 'blocked';
       if (el instanceof HTMLAnchorElement) {
@@ -245,6 +255,7 @@ export async function act(page: Page, step: PanoramaStep, signal: AbortSignal) {
   // Wait for paint and short client-side updates, within the bounded replay.
   await page.waitForTimeout(120);
   signal.throwIfAborted();
+  recordTarget?.(activated);
   return invalidFields;
 }
 
@@ -266,8 +277,10 @@ export async function controlsFor(page: Page): Promise<Control[]> {
   return output;
 }
 
+type InteractionScan = NonNullable<NonNullable<PanoramaCapture['scan']>['interaction']>;
+
 async function withReplay<T>(site: Site, recipe: Recipe, signal: AbortSignal, inspect: (
-  page: Page, product: Awaited<ReturnType<typeof buildReactProject>> | undefined, checkpoints: Checkpoint[], resources: ResourceFailure[]
+  page: Page, product: Awaited<ReturnType<typeof buildReactProject>> | undefined, checkpoints: Checkpoint[], resources: ResourceFailure[], interaction: InteractionScan
 ) => Promise<T>) {
   const start = recipe.start;
   if (!documents(site).includes(start)) throw new ReplayError('此版本中没有起始页面。');
@@ -281,27 +294,38 @@ async function withReplay<T>(site: Site, recipe: Recipe, signal: AbortSignal, in
     if (recipe.checkpoints[0] && !checkpointMatches(recipe.checkpoints[0], checkpoints[0])) {
       throw new ReplayError('两个版本的起始页面无法可靠匹配。', 0);
     }
+    const interaction: InteractionScan = {transitions:[],findings:[]};
+    const analyze = createInteractionAudit();
+    let before = recipe.steps.length ? await readInteractionState(page) : undefined;
     for (const [index, step] of recipe.steps.entries()) {
       try {
-        await act(page, step, signal);
+        let activated = '';
+        const invalid = await act(page, step, signal, selector => {activated = selector;});
         const actual = await checkpoint(page);
         if ('target' in step && step.navigationPath && actual.path !== step.navigationPath) throw new Error('导航后未到达所发现的页面。');
         const expected = recipe.checkpoints[index + 1];
         if (expected && !checkpointMatches(expected, actual, step.action)) throw new Error('页面、状态、焦点或滚动位置不一致。');
+        const after = await readInteractionState(page);
+        const prior = before!;
+        interaction.transitions.push({step:index+1,action:step.action,fromPath:checkpoints.at(-1)!.path,toPath:actual.path,
+          beforeFocus:safeText(prior.focus),afterFocus:safeText(after.focus)});
+        interaction.findings.push(...analyze(prior,after,step.action,index+1,activated,invalid)
+          .map(finding => ({...finding,selector:safeText(finding.selector)})));
+        before = after;
         checkpoints.push(actual);
       } catch (error) {
         signal.throwIfAborted();
         throw new ReplayError((error as Error).message.split('\n')[0], index + 1);
       }
     }
-    return inspect(page, product, checkpoints, resources);
+    return inspect(page, product, checkpoints, resources, interaction);
   }, 6500, true);
 }
 
 const maskedFields = 'input:not([type=button],[type=submit],[type=checkbox],[type=radio]),textarea,[contenteditable=true]';
 
 async function capture(site: Site, recipe: Recipe, signal: AbortSignal, screenshotId?: string, target?: string) {
-  return withReplay(site, recipe, signal, async (page, product, checkpoints, resourceFailures) => {
+  return withReplay(site, recipe, signal, async (page, product, checkpoints, resourceFailures, interaction) => {
     const final = checkpoints[checkpoints.length - 1];
     const size = await page.evaluate(() => ({
       width: document.documentElement.scrollWidth, height: document.documentElement.scrollHeight,
@@ -381,7 +405,7 @@ async function capture(site: Site, recipe: Recipe, signal: AbortSignal, screensh
     return { checkpoints, targetSemantics, capture: { id: screenshotId ?? '', title, path: final.path, ax, dom: safeText(dom), focus: final.focus,
       ...size, scrollY: final.scrollY, issues, manual: scanned.incomplete.reduce((sum, item) => sum + item.nodes.length, 0),
       scan: { completedAt:new Date().toISOString(), elapsedMs:Math.round(performance.now() - scannedAt),
-        browser:page.context().browser()?.version(),engine:scanned.engine,rules:scanned.rules,resources,
+        browser:page.context().browser()?.version(),engine:scanned.engine,rules:scanned.rules,resources,interaction,
         incomplete:scanned.incomplete.map(rule => ({ruleId:rule.id,selectors:rule.nodes.map(node => safeText(JSON.stringify(node.target)))})),
         behavior:{...behavior,semanticCandidates:[],tabSequence:behavior.tabSequence.map(safeText),findings:behavior.findings.map(finding => ({
           ...finding,selector:safeText(finding.selector),explanation:safeText(finding.explanation),
@@ -484,7 +508,7 @@ export async function collectPanorama(projectId: string, input: unknown, signal:
       const last = db.prepare('SELECT status FROM panorama_attempts WHERE project_id=? AND snapshot_id=? AND scope=?')
         .get(projectId,version,scope) as {status:string}|undefined;
       const prior = cached(projectId, version, recipe.id);
-      if (!refresh && prior?.capture.scan && (!last || last.status === 'completed')) {
+      if (!refresh && prior?.capture.scan?.interaction && (!last || last.status === 'completed')) {
         result.stateId = recipe.id;
         result[side] = {status: 'captured', capture: prior.capture};
         continue;
@@ -636,7 +660,8 @@ export async function verifyPanorama(projectId: string, snapshotId: string, cand
   const shots: string[] = [];
   for (const recipe of tracked) {
     try {
-      const before = cached(projectId, snapshotId, recipe.id)?.capture ?? (await capture(beforeSite, recipe, bounded)).capture;
+      const previous = cached(projectId, snapshotId, recipe.id)?.capture;
+      const before = previous?.scan?.interaction ? previous : (await capture(beforeSite, recipe, bounded)).capture;
       const scopedRepair = repair && repair.stateId === recipe.id ? repair : undefined;
       const shot = candidateSnapshot ? id() : undefined;
       if (shot) shots.push(shot);
@@ -646,6 +671,11 @@ export async function verifyPanorama(projectId: string, snapshotId: string, cand
           replayed.targetSemantics?.role !== 'button' || replayed.targetSemantics?.name !== scopedRepair.value)) {
         throw new Error('按钮名称在同一交互状态下未通过 Chromium 语义和 axe 验证。');
       }
+      const existingBehavior = new Set((before.scan?.interaction?.findings ?? []).filter(item => item.status === 'confirmed')
+        .map(item => JSON.stringify([item.step,item.ruleId,item.selector])));
+      const newBehavior = after.scan?.interaction?.findings.find(item => item.status === 'confirmed' &&
+        !existingBehavior.has(JSON.stringify([item.step,item.ruleId,item.selector])));
+      if (newBehavior) throw new Error('步骤 ' + newBehavior.step + ' · ' + newBehavior.explanation);
       const missing = after.resourceFailures?.find(item => !before.resourceFailures?.some(previous => previous.path === item.path && previous.type === item.type));
       if (missing) throw new Error('新增资源加载失败 · ' + missing.path);
       const violations = new Set(before.issues.map(issue => issue.id));

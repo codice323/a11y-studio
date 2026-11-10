@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { mkdir, writeFile } from 'node:fs/promises';
+import { mkdir, rename, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 
 const testDirectory = process.env.NODE_ENV === 'production' ? undefined : process.env.A11Y_MAIL_TEST_DIR;
@@ -12,8 +12,14 @@ export async function deliverAccountMail(to:string, purpose:'verify'|'reset'|'up
   const text = subject+'\n'+link.href+'\n如果你没有发起此操作，可以忽略此邮件。';
   if (testDirectory) {
     await mkdir(testDirectory,{recursive:true,mode:0o700});
-    await writeFile(path.join(testDirectory,randomUUID()+'.json'),JSON.stringify({to,purpose,link:link.href}),
-      {mode:0o600,flag:'wx'});
+    const file = path.join(testDirectory, randomUUID()+'.json');
+    const pending = file+'.tmp';
+    try {
+      await writeFile(pending,JSON.stringify({to,purpose,link:link.href}),{mode:0o600,flag:'wx'});
+      await rename(pending,file);
+    } finally {
+      await rm(pending,{force:true});
+    }
     return;
   }
   if (!apiKey || !from) throw new Error('Account mail disabled');
