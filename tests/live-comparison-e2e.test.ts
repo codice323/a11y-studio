@@ -1,3 +1,4 @@
+import { testFetch as fetch, registerTestAccount, attachTestAccount } from './helpers/account';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
@@ -53,14 +54,16 @@ test('Chrome 实时双侧比较：校园 ZIP 导航及 React 独立状态、动�
     if (output) await writeFile(path.join(output,file),JSON.stringify(content,null,2));
   };
   try {
-    for(let i=0;!(await fetch(origin+'/api/status').then(r=>r.ok,()=>false));i++){
+    for(let i=0;!(await fetch(origin+'/api/health').then(r=>r.ok,()=>false));i++){
       if(i>100 || service.exitCode!==null) throw new Error(serviceLog || '启动超时');
       await delay(100);
     }
+    await registerTestAccount(origin);
     process.env.A11Y_DATA_DIR=data;
     const {db,id,now,snapshotDir,treeHash}=await import('../apps/api/storage');
     const browser=await chromium.launch({headless:true,executablePath:process.env.CHROME_PATH || '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome'});
     const ctx=await browser.newContext({viewport:{width:1440,height:1000}});
+    await attachTestAccount(ctx,origin);
     const page=await ctx.newPage();
     const netLog:{url:string;status:number;method:string}[]=[];
     page.on('response',r=>netLog.push({url:r.url(),status:r.status(),method:r.request().method()}));

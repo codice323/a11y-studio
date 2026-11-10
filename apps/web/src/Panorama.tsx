@@ -1,3 +1,4 @@
+import { workspaceFetch as fetch } from './workspace-fetch';
 import { useEffect, useRef, useState, type ReactNode } from 'react';
 import type { PanoramaComparison, PanoramaIssue, PanoramaRecipe, PanoramaSide, PanoramaStep } from '../../../packages/shared/panorama';
 import { startJob, waitJob } from './jobs';

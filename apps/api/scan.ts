@@ -24,8 +24,8 @@ export async function withRepairPage<T>(dir: string, entry: string, signal: Abor
  const deadline = Date.now() + waitForSlotMs;
  const localSignal = !live && (engineering || isolated) ? AbortSignal.any([...(signal?[signal]:[]),AbortSignal.timeout(35000)]) : signal;
  // Preview and evidence requests can briefly occupy both browsers during patch review.
- while ((live ? liveBrowsers >= 2 : activeScans >= MAX_SCANS) && Date.now() < deadline) await delay(100, undefined, {signal});
- if (live ? liveBrowsers >= 2 : activeScans >= MAX_SCANS) throw new Error('扫描任务过多，请稍后再试。');
+ while ((live ? liveBrowsers >= 4 : activeScans >= MAX_SCANS) && Date.now() < deadline) await delay(100, undefined, {signal});
+ if (live ? liveBrowsers >= 4 : activeScans >= MAX_SCANS) throw new Error('扫描任务过多，请稍后再试。');
  try {
   if (live) liveBrowsers++;
   else activeScans++;

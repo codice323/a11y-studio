@@ -1,3 +1,4 @@
+import { workspaceFetch as fetch } from './workspace-fetch';
 import type { Bounds } from './types';
 
 export type ContrastEvidence = { ratio: number; required: number; valid: boolean; uncertain: boolean; foreground?: string };

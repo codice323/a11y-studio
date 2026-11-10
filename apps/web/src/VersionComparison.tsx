@@ -1,3 +1,4 @@
+import { workspaceFetch as fetch } from './workspace-fetch';
 import { useEffect, useMemo, useState } from 'react';
 import type { compareSnapshots } from '../../api/version-compare';
 import { Panorama, type PageInspection, type PanoramaJump } from './Panorama';

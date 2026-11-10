@@ -1,3 +1,4 @@
+import { workspaceFetch as fetch } from './workspace-fetch';
 import { useEffect, useRef, useState } from 'react';
 import type { scanLive } from '../../api/live-comparison';
 import type { LiveAction, LiveComparison as LiveResult, LiveSide } from '../../../packages/shared/live-comparison';

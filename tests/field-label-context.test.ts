@@ -1,3 +1,4 @@
+import { testFetch as fetch, registerTestAccount } from './helpers/account';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
@@ -64,9 +65,10 @@ test('13 种独立表单经真实浏览器扫描和原生标签预检，冲突�
   const results=[];
   try {
     for(let i=0;i<50;i++){
-      if(await fetch(base+'/api/status').then(r=>r.ok,()=>false))break;
+      if(await fetch(base+'/api/health').then(r=>r.ok,()=>false))break;
       await delay(100);
     }
+    await registerTestAccount(base);
     for(const sample of cases){
       const form=new FormData();
       form.set('file',new Blob([`<!doctype html><html lang="zh-CN"><title>表单</title><main><h1>数据录入</h1>${sample.body}</main></html>`]),sample.key+'.html');

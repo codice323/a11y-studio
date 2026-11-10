@@ -1,3 +1,4 @@
+import { workspaceFetch as fetch } from './workspace-fetch';
 import { JobRecoveryError, startJob, waitJob, type JobType } from './jobs';
 import type { ImageAltAnalysis, ImagePurpose, RepairAnalysis } from '../../../packages/shared/types';
 import { useEffect, useRef, useState, type FormEvent, type KeyboardEvent, type ReactNode } from 'react';
@@ -16,6 +17,7 @@ import { ComparisonVersions, type VersionPair } from './VersionComparison';
 import type { PageInspection, PanoramaJump } from './Panorama';
 import type { PanoramaIssue } from '../../../packages/shared/panorama';
 import { versionName, type HistoryItem, type Issue, type Proposal, type State, type Verification } from './types';
+import { AccountGate, type Account } from './AccountGate';
 import './style.css';
 
 const issueNames: Record<string, [string, string]> = {
@@ -37,7 +39,7 @@ const severityRank = (impact: string) => severityOrder.get(impact) ?? 4;
 const issueTitle = (issue: Issue) => issueNames[issue.ruleId]?.[0] ?? issue.help;
 const dateText = (date: string) => new Date(date).toLocaleString('zh-CN');
 type Fixture = { id: string; name: string; description: string };
-type Project = { discovery?:{pages:number;failed:{path:string;reason:string}[];unchecked:number}; id: string; name: string; assets?: { stylesheets: number; images: number; skipped: number }; rendering?: { mode: string; requests: number; blocked: number; empty: boolean } };
+type Project = {mode?:string;updatedAt?:string;versionName?:string;versionNumber?:number;scanStatus?:string; discovery?:{pages:number;failed:{path:string;reason:string}[];unchecked:number}; id: string; name: string; assets?: { stylesheets: number; images: number; skipped: number }; rendering?: { mode: string; requests: number; blocked: number; empty: boolean } };
 type UrlImport = { url: string; mode: 'static' | 'rendered'; discover?:boolean };
 type Knowledge = { title: string; url: string; guidance: string; refs: string[] };
 type Source = 'html' | 'zip' | 'url' | 'source';
@@ -72,7 +74,8 @@ function post<T>(url: string, data: unknown = {}) {
   return request<T>(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data) });
 }
 
-function App() {
+function App({account,signOut}:{account:Account;signOut:()=>Promise<void>}) {
+  const [signingOut,setSigningOut] = useState(false);
   const [state, setState] = useState<State | null>(null);
   const [projects, setProjects] = useState<Project[]>([]);
   const [fixtures, setFixtures] = useState<Fixture[]>([]);
@@ -595,11 +598,18 @@ function App() {
       </div>
     </aside>
     <main className={state ? undefined : 'home-page'}>
-      <header className="topbar"><div>工作空间 <span>/</span> <b>{state ? activeLabel : '导入项目'}</b></div><div className="topright"><span className="pill"><i />本地模式</span></div></header>
+      <header className="topbar"><div>工作空间 <span>/</span> <b>{state ? activeLabel : '我的项目'}</b></div><div className="topright">{account.isGuest && <span className="account-guest-label">游客模式</span>}<details className="account-menu"><summary>个人菜单</summary>
+        <div className="panel"><strong>个人资料</strong><p>{account.name}</p>{!account.isGuest && <p>{account.email}</p>}
+          <button type="button" className="secondary" disabled={signingOut} onClick={()=>{
+            setSigningOut(true);
+            void signOut().catch(problem=>setError((problem as Error).message)).finally(()=>setSigningOut(false));
+          }}>{signingOut?'正在退出…':'退出登录'}</button>
+        </div></details></div></header>
       <div className={state ? 'content' : 'content home-content'}>
+        {account.isGuest && account.expiresAt && <p className="account-guest-notice">游客项目临时保存，可用至 {new Date(account.expiresAt).toLocaleString('zh-CN')}。请及时导出需要保留的内容。</p>}
         <div className={'page-intro' + (state ? '' : ' hero')}>
           <div><div className="eyebrow"><span />ACCESSIBILITY WORKSPACE</div>
-            <h1 id="page-title" tabIndex={-1} ref={heading}>{state ? page === 'workspace' ? '网页无障碍工作台' : activeLabel : '让每个人，都能更好地使用网页'}</h1>
+            <h1 id="page-title" tabIndex={-1} ref={heading}>{state ? page === 'workspace' ? '网页无障碍工作台' : activeLabel : '我的项目'}</h1>
             <p>{state ? page === 'report' ? '回顾检测覆盖、问题变化和验证证据。' : page === 'live' ? '同步操作两个版本，核对导航和交互状态。' : '定位问题、审核补丁并对比修复证据。' : '面向网页开发者、设计师和小型团队的 AI 无障碍检测与智能修复平台。用户上传自己的网页后，系统自动检测问题、可视化定位、解释影响、提供 AI 修复方案，并在用户确认后修改代码，重新验证修复效果，最终导出网页和检测报告。'}</p>
           </div>
           {state && <div className="intro-actions">
@@ -813,8 +823,15 @@ function Home({ fixtures, projects, busy, onCreate, onOpen, onError }: {
         form.set('fixture', fixture.id);
         onCreate(form);
       }}><span className="example-number">0{index + 1}</span><span><b>{fixture.name}</b><small>{fixture.description}</small></span><ArrowUpRight size={17} /></button>)}</div>
-      {projects.length > 0 && <><div className="section-title recent-title"><div><span className="section-tag">RECENT PROJECTS</span><h2>最近项目</h2></div></div>
-        <div className="recent-list">{projects.slice(0, 6).map(project => <button key={project.id} onClick={() => onOpen(project.id)} disabled={busy}><FileCode2 size={16} /><span>{project.name}</span><ChevronRight size={15} /></button>)}</div></>}
+      <div className="section-title recent-title"><div><span className="section-tag">PERSONAL PROJECTS</span><h2>我的项目列表</h2></div></div>
+      {projects.length ? <div className="recent-list">{projects.map(project => <button key={project.id} aria-label={project.name} aria-describedby={'project-meta-'+project.id}
+        onClick={() => onOpen(project.id)} disabled={busy}>
+        <FileCode2 size={16} /><span className="account-project-title"><b>{project.name}</b>
+          <small id={'project-meta-'+project.id}>{project.mode==='react-source'?'React 源码':project.mode==='static-source'?'静态源码':'网页快照'}
+            {' · V'+(project.versionNumber??0)}{project.versionName ? ' '+project.versionName : ''}
+            {' · '+({completed:'检测完成',running:'检测中',failed:'检测失败',queued:'等待检测'}[project.scanStatus??'']??'未检测')}</small>
+          {project.updatedAt && <small>最近更新 {dateText(project.updatedAt)}</small>}</span>
+        <ChevronRight size={15} /></button>)}</div> : <p className="muted">暂无项目。可导入网页或从示例创建。</p>}
     </section>
     <section className="steps" aria-label="修复流程">
       <div><ScanSearch /><span>01</span><b>发现问题</b><small>运行真实扫描，定位页面元素</small></div>
@@ -1128,4 +1145,4 @@ function ConfirmDialog({ imagePurpose, sourceReview, onClose, onConfirm }: {
   </dialog>;
 }
 
-createRoot(document.getElementById('root')!).render(<App />);
+createRoot(document.getElementById('root')!).render(<AccountGate>{(account,signOut)=><App key={account.id} account={account} signOut={signOut} />}</AccountGate>);

@@ -19,7 +19,7 @@ async function extract(buffer:Buffer, dest:string, engineering:boolean) {
     });zip.readEntry();
   });
 }
-export async function createProject(opts:{fixture?:string; file?:Express.Multer.File; engineering?:boolean; captured?: { name: string; files: Map<string, Buffer> }}) {
+export async function createProject(opts:{ownerUserId?:string; fixture?:string; file?:Express.Multer.File; engineering?:boolean; captured?: { name: string; files: Map<string, Buffer> }}) {
   const pid=id(),sid=id(), dest=snapshotDir(pid,sid);fs.mkdirSync(dest,{recursive:true});
   try {let name='未命名项目';
     if(opts.fixture){ if(!['demo-form','demo-contrast','demo-mixed'].includes(opts.fixture))throw new Error('示例不存在。');name=({'demo-form':'课程报名','demo-contrast':'自然笔记','demo-mixed':'慢绿生活'} as Record<string,string>)[opts.fixture];fs.cpSync(path.join(ROOT,'fixtures',opts.fixture),dest,{recursive:true}); }
@@ -44,7 +44,7 @@ export async function createProject(opts:{fixture?:string; file?:Express.Multer.
       await buildReactProject(dest,entry);
     }else if(mode==='static-source'&&files.some(file=>/\.[jt]sx?$/i.test(file))) throw new Error('静态源码工程 V1 不运行脚本，请导入 HTML、CSS 和图片。');
     const created=now();
-    db.transaction(()=>{db.prepare('INSERT INTO projects(id,name,entry,current_snapshot,created_at,mode) VALUES(?,?,?,?,?,?)').run(pid,name,entry,sid,created,mode);db.prepare('INSERT INTO snapshots(id,project_id,parent_id,entry,hash,created_at,description) VALUES(?,?,?,?,?,?,?)').run(sid,pid,null,entry,treeHash(dest),created,'原始版本 V0')})();
+    db.transaction(()=>{if (opts.ownerUserId) db.prepare('INSERT INTO projects(id,name,entry,current_snapshot,created_at,mode,owner_user_id) VALUES(?,?,?,?,?,?,?)').run(pid,name,entry,sid,created,mode,opts.ownerUserId);else db.prepare('INSERT INTO projects(id,name,entry,current_snapshot,created_at,mode) VALUES(?,?,?,?,?,?)').run(pid,name,entry,sid,created,mode);db.prepare('INSERT INTO snapshots(id,project_id,parent_id,entry,hash,created_at,description) VALUES(?,?,?,?,?,?,?)').run(sid,pid,null,entry,treeHash(dest),created,'原始版本 V0')})();
     return {id:pid,name,entry,mode,currentSnapshot:sid,createdAt:created};
   } catch(e){fs.rmSync(path.join(DATA,'projects',pid),{recursive:true,force:true});throw e;}
 }

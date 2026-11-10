@@ -1,3 +1,4 @@
+import { testFetch as fetch, registerTestAccount, attachTestAccount } from './helpers/account';
 import assert from 'node:assert/strict';
 import {spawn, type ChildProcess} from 'node:child_process';
 import {once} from 'node:events';
@@ -171,14 +172,16 @@ test('校园综合服务平台按用户操作顺序验收四种导入入口', {t
     if(failure)throw Error(name+': '+failure);
   }
   try{
-    for(let n=0;!(await fetch(origin+'/api/status').then(res=>res.ok,()=>false));n++){
+    for(let n=0;!(await fetch(origin+'/api/health').then(res=>res.ok,()=>false));n++){
       if(n===100||service.exitCode!==null)throw Error('验收服务未启动');
       await delay(100);
     }
     const browser=await chromium.launch({executablePath:chrome,headless:true});
     try{
       for(const mode of testedModes){
+        await registerTestAccount(origin);
         const page=await browser.newPage({viewport:{width:1400,height:900},acceptDownloads:true});
+        await attachTestAccount(page.context(),origin);
         page.setDefaultTimeout(28_000);
         const scenario:Scenario={mode,page,id:'',original:'',requests:[]};
         page.on('response',async response=>{
@@ -304,7 +307,7 @@ test('校园综合服务平台按用户操作顺序验收四种导入入口', {t
           await panoramaReady(page);
         }
         if(s.mode.id!=='source'){
-          await page.getByText(/静态快照，仅检测可用页面/).waitFor();
+          await panel.getByText('静态快照 · 动态交互状态未覆盖',{exact:true}).waitFor();
           assert.equal(await panel.getByRole('group',{name:'记录安全操作'}).count(),0);
         }
         await panel.getByRole('button',{name:'页面对照',exact:true}).click();

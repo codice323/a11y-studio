@@ -1,3 +1,4 @@
+import { testFetch as fetch, registerTestAccount, attachTestAccount } from './helpers/account';
 import assert from 'node:assert/strict';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { once } from 'node:events';
@@ -82,10 +83,11 @@ test('URL 快照从首页导入，经真实扫描、修复和三视图复测后�
   }
   try {
     for (let attempt = 0; attempt < 100; attempt++) {
-      if (await api('/api/status').then(res => res.ok, () => false)) break;
+      if (await api('/api/health').then(res => res.ok, () => false)) break;
       if (attempt === 99) throw new Error('测试服务启动超时。');
       await new Promise(resolve => setTimeout(resolve, 100));
     }
+    await registerTestAccount(base);
     const rejected = await api('/api/projects/import-url', { url: 'http://93.184.216.34/redirect-private' });
     assert.equal(rejected.status, 400);
     assert.match((await rejected.json()).error, /非公网/);
@@ -98,6 +100,7 @@ test('URL 快照从首页导入，经真实扫描、修复和三视图复测后�
     });
     try {
       const context = await browser.newContext({ viewport: { width: 375, height: 780 } });
+      await attachTestAccount(context,base);
       const page = await context.newPage();
       await page.goto(base);
       await page.getByRole('button', { name: 'URL', exact: true }).click();
@@ -316,10 +319,11 @@ test('真实快照可双向对比，分叉及切换项目后仍使用正确的�
   }
 
   try {
-    for (let i = 0; !(await fetch(base + '/api/status').then(res => res.ok, () => false)); i++) {
+    for (let i = 0; !(await fetch(base + '/api/health').then(res => res.ok, () => false)); i++) {
       assert.ok(i < 100, '测试服务启动超时');
       await delay(100);
     }
+    await registerTestAccount(base);
     const route = await create('demo-mixed');
     const v0 = (await api(route)).originalSnapshotId;
     async function fix(ruleId: string, value: string) {
@@ -342,6 +346,7 @@ test('真实快照可双向对比，分叉及切换项目后仍使用正确的�
     });
     try {
       const page = await browser.newPage({ viewport: { width: 1440, height: 1140 } });
+      await attachTestAccount(page.context(),base);
       page.setDefaultTimeout(12000);
       const evidence = page.getByRole('region', { name: '修复效果对比' });
       const left = evidence.getByLabel('左侧版本');

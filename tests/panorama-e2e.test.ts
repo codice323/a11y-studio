@@ -1,3 +1,4 @@
+import { testFetch as fetch, registerTestAccount, attachTestAccount } from './helpers/account';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
@@ -76,10 +77,11 @@ test('全景工作台用真实 Chrome 采集静态多页和 React 路由，重�
     return response.json();
   };
   try {
-    for (let i = 0; !(await fetch(origin + '/api/status').then(res => res.ok, () => false)); i++) {
+    for (let i = 0; !(await fetch(origin + '/api/health').then(res => res.ok, () => false)); i++) {
       if (i === 100 || service.exitCode !== null) assert.fail('服务未启动：' + serverLog);
       await delay(100);
     }
+    await registerTestAccount(origin);
     process.env.A11Y_DATA_DIR = data;
     const {db, id, now, treeHash, snapshotDir} = await import('../apps/api/storage');
     const {verifyPanorama} = await import('../apps/api/panorama');
@@ -92,6 +94,7 @@ test('全景工作台用真实 Chrome 采集静态多页和 React 路由，重�
         {name:'workshop', files:reactSite, page:'/workshops', opener:'Open workshop details', closer:'Close workshop details', id:'#workshop-icon'},
       ]) {
         const page = await browser.newPage({viewport:{width: 1440, height: 960}});
+        await attachTestAccount(page.context(),origin);
         page.setDefaultTimeout(22000);
         await page.goto(origin);
         await page.getByRole('button', {name:'源码工程',exact:true}).click();

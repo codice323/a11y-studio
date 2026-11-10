@@ -563,3 +563,21 @@ footer { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 8p
   .sidebar-bottom { order: 2; }
   .sidebar-collapsed nav { order: 0; flex-basis: auto; }
 }
+.account-shell { min-height: 100dvh; display: grid; place-items: center; padding: 24px; }
+.account-card { width: min(100%, 420px); padding: 24px; display: grid; gap: 12px; }
+.account-brand { font-size: 13px; color: var(--blue); font-weight: 750; }
+.account-card form, .account-card label { display: grid; gap: 7px; }
+.account-card form { gap: 12px; }
+.account-card input { min-width: 0; min-height: 42px; border: 1px solid #9cb0ce; border-radius: 8px; padding: 8px 10px; }
+.account-card button { min-height: 42px; }
+.account-error { color: #982a2a; }
+.account-menu { position: relative; }
+.account-menu summary { cursor: pointer; padding: 6px 9px; color: var(--ink); }
+.account-menu > div { position: absolute; right: 0; z-index: 5; top: 100%; min-width: 180px; max-width: min(300px, 90vw); padding: 12px; overflow-wrap: anywhere; }
+.account-menu button { margin-top: 8px; }
+.account-project-title { min-width: 0; display: grid; gap: 3px; overflow-wrap: anywhere; }
+.account-project-title small { color: var(--muted); white-space: normal; }
+
+.account-entry-actions { display: grid; grid-auto-flow: column; grid-auto-columns: 1fr; gap: 8px; }
+.account-guest-label { padding: 4px 8px; border-radius: 6px; background: #e8f0ff; color: #204782; font-size: 13px; }
+.account-guest-notice { margin: 0; padding: 8px 12px; border-radius: 8px; background: #e8f0ff; color: #204782; font-size: 13px; }

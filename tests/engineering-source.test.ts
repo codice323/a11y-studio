@@ -1,3 +1,4 @@
+import { testFetch as fetch, registerTestAccount, attachTestAccount } from './helpers/account';
 import assert from 'node:assert/strict';
 import { once } from 'node:events';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -95,7 +96,7 @@ test('静态与 React 源码工程经真实工作台审核、复测和独立 Vit
   };
   try {
     for (let attempt = 0; ; attempt++) {
-      if (await fetch(base + '/api/status').then(res => res.ok, () => false)) break;
+      if (await fetch(base + '/api/health').then(res => res.ok, () => false)) break;
       if (attempt === 99 || service.exitCode !== null) assert.fail('服务启动失败：' + serviceErrors);
       await new Promise(resolve => setTimeout(resolve, 100));
     }
@@ -103,7 +104,9 @@ test('静态与 React 源码工程经真实工作台审核、复测和独立 Vit
     try {
       for (const fixture of fixtures) {
         const started = performance.now();
+        await registerTestAccount(base);
         const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
+        await attachTestAccount(page.context(),base);
         page.setDefaultTimeout(25_000);
         await page.goto(base);
         await page.getByRole('button', { name: '源码工程', exact: true }).click();

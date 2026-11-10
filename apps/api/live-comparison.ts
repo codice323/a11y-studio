@@ -25,7 +25,7 @@ const risky = /支付|删除|发送|购买|付款|注销|下单|转账|提交订
 type Target = Control | {role:'summary';name:string};
 type PageLease = {page:Page; resources:ResourceFailure[]; network:BrowserRequestEvidence[]};
 type Session = {
-  id:string; project:string; controller:AbortController; ready:Promise<void>[];
+  id:string; project:string; accountId:string; authSessionId:string; controller:AbortController; ready:Promise<void>[];
   pages:Partial<Record<LiveSide,PageLease>>; pending:boolean; revision:number;
   observations:LiveComparison['observations']; dialogOpener:Partial<Record<LiveSide,string>>;
   versions:Record<LiveSide,string>;
@@ -55,15 +55,15 @@ function lease(session:Session, side:LiveSide, dir:string, entry:string, start?:
   });
 }
 
-export async function startLive(project:string, input:unknown) {
+export async function startLive(project:string, input:unknown, accountId:string, authSessionId:string) {
   const {left,right,start} = startInput.parse(input);
   const versions = validSnapshots(project);
   const before = versions.find(version => version.id === left);
   const after = versions.find(version => version.id === right);
   if (!before || !after) throw new Error('只能对比本项目的有效版本。');
-  if (sessions.size >= 1) throw new Error('当前已有实时对比，请先关闭另一处预览。');
+  if (sessions.size >= 2 || [...sessions.values()].some(session=>session.accountId===accountId)) throw new Error('当前已有实时对比，请先关闭另一处预览。');
   const controller = new AbortController();
-  const session:Session = {id:id(),project,controller,ready:[],pages:{},pending:true,revision:0,versions:{left,right},frameKeys:{},actions:[],
+  const session:Session = {id:id(),project,accountId,authSessionId,controller,ready:[],pages:{},pending:true,revision:0,versions:{left,right},frameKeys:{},actions:[],
     observations:{left:[],right:[]},dialogOpener:{},tabStreak:{left:0,right:0}};
   sessions.set(session.id,session);
   const expiration = setTimeout(() => controller.abort(),5 * 60 * 1000);
@@ -81,15 +81,19 @@ export async function startLive(project:string, input:unknown) {
   } finally { session.pending = false; }
 }
 
-function getSession(project:string, key:string) {
+function getSession(project:string, key:string, authSessionId:string) {
   const session = sessions.get(key);
-  if (!session || session.project !== project) throw new Error('实时会话已关闭，请重新打开。');
+  if (!session || session.project !== project || session.authSessionId !== authSessionId) throw new Error('实时会话已关闭，请重新打开。');
   return session;
 }
 
-export function closeLive(project:string,key:string) {
+export function closeLive(project:string,key:string,authSessionId:string) {
   const session = sessions.get(key);
-  if (session?.project === project) session.controller.abort();
+  if (session?.project === project && session.authSessionId === authSessionId) session.controller.abort();
+}
+
+export function closeAccountSession(authSessionId:string) {
+  for (const session of sessions.values()) if (session.authSessionId === authSessionId) session.controller.abort();
 }
 
 async function pageState(page:Page) {
@@ -244,9 +248,9 @@ async function observe(session:Session, side:LiveSide, before:Awaited<ReturnType
   }
 }
 
-export async function operateLive(project:string,key:string,input:unknown) {
+export async function operateLive(project:string,key:string,input:unknown,authSessionId:string) {
   const {side,sync,revision,operation} = actionInput.parse(input);
-  const session = getSession(project,key);
+  const session = getSession(project,key,authSessionId);
   if (session.pending || revision !== session.revision) throw new Error('操作所依据的画面已过期，请刷新实时预览。');
   const other = side === 'left' ? 'right' : 'left';
   const signal = session.controller.signal;
@@ -308,8 +312,8 @@ export async function operateLive(project:string,key:string,input:unknown) {
   } finally { session.pending = false; }
 }
 
-export async function scanLive(project:string,key:string,side:LiveSide) {
-  const session = getSession(project,key);
+export async function scanLive(project:string,key:string,side:LiveSide,authSessionId:string) {
+  const session = getSession(project,key,authSessionId);
   if (session.pending) throw new Error('请等待当前操作完成。');
   session.pending = true;
   try {

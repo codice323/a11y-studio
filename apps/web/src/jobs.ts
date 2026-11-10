@@ -1,3 +1,4 @@
+import { workspaceFetch as fetch } from './workspace-fetch';
 export type JobType = 'audit' | 'source-repair' | 'verification' | 'panorama';
 
 export class JobRecoveryError extends Error {

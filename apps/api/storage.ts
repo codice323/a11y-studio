@@ -5,7 +5,7 @@ import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 export const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 export const DATA = process.env.A11Y_DATA_DIR ? path.resolve(process.env.A11Y_DATA_DIR) : path.join(ROOT,'data');
-fs.mkdirSync(DATA,{recursive:true});
+fs.mkdirSync(DATA,{recursive:true,mode:0o700});
 export const db = new Database(path.join(DATA,'studio.sqlite'));
 db.pragma('journal_mode = WAL');
 db.exec(`CREATE TABLE IF NOT EXISTS live_state_audits(project_id TEXT NOT NULL,snapshot_id TEXT NOT NULL,state_id TEXT NOT NULL,data TEXT NOT NULL,created_at TEXT NOT NULL,PRIMARY KEY(project_id,snapshot_id,state_id));
