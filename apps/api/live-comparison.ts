@@ -18,7 +18,8 @@ const actionInput = z.object({side:z.enum(sides),sync:z.boolean(),revision:z.num
   z.object({action:z.literal('click'),x:z.number().int().min(0).max(899),y:z.number().int().min(0).max(699)}),
   z.object({action:z.enum(['click','fill','validate']),target:control}),
   z.object({action:z.enum(['activate','tab','shift-tab','escape','refresh'])}),
-  z.object({action:z.literal('scroll'),delta:z.number().int().min(-1600).max(1600)}),
+  z.object({action:z.literal('scroll'),delta:z.number().int().min(-1600).max(1600),
+    x:z.number().int().min(0).max(899).optional(),y:z.number().int().min(0).max(699).optional()}),
   z.object({action:z.literal('zoom'),percent:z.union([z.literal(75),z.literal(100),z.literal(125),z.literal(150)])}),
 ])});
 const pathFor = (file:string) => '/' + file.split('/').map(encodeURIComponent).join('/');
@@ -36,6 +37,7 @@ type Session = {
   scans:Partial<Record<LiveSide,{id:string; revision:number; frame:string; selectors:Map<string,string>}>>;
   versions:Record<LiveSide,string>;
   frameKeys:Partial<Record<LiveSide,string>>;
+  frames:Partial<Record<LiveSide,{frame:LiveFrame;dom:string;ax:string}>>;
   actions:NonNullable<LiveComparison['outcome']>[];
 };
 const sessions = new Map<string,Session>();
@@ -70,7 +72,7 @@ export async function startLive(project:string, input:unknown, accountId:string,
   if (!before || !after) throw new Error('只能对比本项目的有效版本。');
   if (sessions.size >= 2 || [...sessions.values()].some(session=>session.accountId===accountId)) throw new Error('当前已有实时对比，请先关闭另一处预览。');
   const controller = new AbortController();
-  const session:Session = {id:id(),project,accountId,authSessionId,controller,finished:[],pages:{},pending:true,revision:0,versions:{left,right},frameKeys:{},actions:[],
+  const session:Session = {id:id(),project,accountId,authSessionId,controller,finished:[],pages:{},pending:true,revision:0,versions:{left,right},frameKeys:{},frames:{},actions:[],
     observations:{left:[],right:[]},auditors:{left:createInteractionAudit(),right:createInteractionAudit()},journals:{left:[],right:[]},sequences:{left:null,right:null},scans:{}};
   sessions.set(session.id,session);
   const expiration = setTimeout(() => controller.abort(),5 * 60 * 1000);
@@ -161,20 +163,119 @@ async function liveImage(page:Page) {
     mask:[page.locator('input:not([type=button],[type=submit],[type=checkbox],[type=radio]),textarea,[contenteditable]')]})).toString('base64');
 }
 
-async function inspect(session:Session, outcome?:LiveComparison['outcome']):Promise<LiveComparison> {
+async function inspect(session:Session, outcome?:LiveComparison['outcome'], scrolled?:Set<LiveSide>):Promise<LiveComparison> {
   const [left,right] = await Promise.all(sides.map(async side => {
     const page = session.pages[side]!.page;
     const state = await pageState(page);
+    const dom = JSON.stringify(state.dom);
+    const previous = session.frames[side];
+    const reuse = scrolled && previous && previous.dom===dom && previous.frame.path===redact(state.path);
+    const capture = !reuse || scrolled.has(side) || session.frameKeys[side]!==frameKey(state);
+    const ax = reuse ? previous.ax : redact(await page.locator('body').ariaSnapshot({timeout:2500})).slice(0,16000);
+    const started = performance.now();
+    const image = capture ? await liveImage(page) : previous!.frame.image;
+    const elapsedMs = capture ? performance.now()-started : 0;
+    const controls = reuse ? previous.frame.controls : await controlsFor(page);
+    const frame:LiveFrame = {image,path:redact(state.path),title:redact(state.title),focus:state.focus,scroll:state.scroll,zoom:state.zoom,controls};
     session.frameKeys[side] = frameKey(state);
-    const ax = redact(await page.locator('body').ariaSnapshot({timeout:2500})).slice(0,16000);
-    const image = await liveImage(page);
-    const frame:LiveFrame = {image,path:redact(state.path),title:redact(state.title),focus:state.focus,scroll:state.scroll,zoom:state.zoom,controls:await controlsFor(page)};
-    return {frame,dom:JSON.stringify(state.dom),ax};
+    session.frames[side] = {frame,dom,ax};
+    return {frame,dom,ax,elapsedMs,capture,sendImage:!scrolled || previous?.frame.image!==image};
   }));
-  return {id:session.id,revision:session.revision,left:left.frame,right:right.frame,outcome,observations:session.observations,
+  return {id:session.id,revision:session.revision,
+    capture:{count:Number(left.capture)+Number(right.capture),elapsedMs:left.elapsedMs+right.elapsedMs},
+    left:{...left.frame,image:left.sendImage?left.frame.image:''},right:{...right.frame,image:right.sendImage?right.frame.image:''},
+    outcome,observations:session.observations,
     modes:{left:session.pages.left!.mode,right:session.pages.right!.mode},
     differences:{route:left.frame.path !== right.frame.path,dom:left.dom !== right.dom,semantics:left.ax !== right.ax,
       focus:left.frame.focus !== right.frame.focus,visual:left.frame.image !== right.frame.image}};
+}
+
+type ScrollPosition = {container:string; position:number; changed:boolean};
+type ScrollInput = {delta:number;x?:number;y?:number;peer?:ScrollPosition};
+
+async function scrollPage(page:Page, input:ScrollInput):Promise<ScrollPosition> {
+  return page.evaluate(({delta,x,y,peer})=>{
+    const root = document.scrollingElement;
+    if (!root) throw new Error('页面没有可滚动区域。');
+    const helpers = {
+      selector(el:Element):string {
+        if (el.id) {
+          const selector='#'+CSS.escape(el.id);
+          if (document.querySelectorAll(selector).length===1) return selector;
+        }
+        const parts:string[] = [];
+        for (let node:Element|null=el; node && node!==document.body; node=node.parentElement) {
+          const siblings=node.parentElement?.children;
+          parts.unshift(node.localName+':nth-child('+(siblings ? Array.from(siblings).indexOf(node)+1 : 1)+')');
+        }
+        return ['body',...parts].join(' > ');
+      },
+      scrollable(el:Element) {
+        return /^(auto|scroll|overlay)$/.test(getComputedStyle(el).overflowY) && el.scrollHeight-el.clientHeight>1;
+      },
+    };
+    let target:Element = root;
+    if (peer && peer.container!=='document') {
+      const matches=document.querySelectorAll(peer.container);
+      if (matches.length!==1 || !helpers.scrollable(matches[0])) throw new Error('另一侧没有匹配的内部滚动区域。');
+      target=matches[0];
+    } else if (!peer && x!==undefined && y!==undefined) {
+      for (let el=document.elementFromPoint(x,y); el && el!==root; el=el.parentElement) {
+        if (!helpers.scrollable(el)) continue;
+        const maximum=el.scrollHeight-el.clientHeight;
+        const canMove=delta<0 ? el.scrollTop>0 : el.scrollTop<maximum;
+        if (!canMove && getComputedStyle(el).overscrollBehaviorY==='auto') continue;
+        target=el;
+        break;
+      }
+    }
+    const before=target.scrollTop;
+    target.scrollTo({top:peer?.position ?? before+delta,behavior:'instant'});
+    return {container:target===root?'document':helpers.selector(target),position:target.scrollTop,changed:target.scrollTop!==before};
+  },input);
+}
+
+async function operateScroll(session:Session, side:LiveSide, sync:boolean, input:ScrollInput) {
+  const other = side==='left'?'right':'left';
+  const changed = new Set<LiveSide>();
+  const positions:NonNullable<NonNullable<LiveComparison['outcome']>['scroll']> = {};
+  const outcome:NonNullable<LiveComparison['outcome']> = {action:'scroll',side,delta:input.delta,matched:null,executions:{},scroll:positions};
+  const record = (side:LiveSide,result:ScrollPosition) => {
+    positions[side]={container:redact(result.container),position:result.position};
+    const sequence=session.sequences[side];
+    if (sequence) session.sequences[side]=hash(JSON.stringify([sequence,positions[side]]));
+    if (!result.changed) return;
+    changed.add(side);
+    const journal=session.journals[side];
+    if (journal && journal.length<6 && result.container==='document' && result.position<=6000) journal.push({action:'scroll',y:Math.round(result.position)});
+    else session.journals[side]=null;
+  };
+  const actual = await scrollPage(session.pages[side]!.page,input);
+  record(side,actual);
+  outcome.executions![side]={status:'executed'};
+  if (sync) {
+    try {
+      const sourceURL=session.pages[side]!.page.url();
+      const peer=session.pages[other]!.page;
+      if (sourceURL!==peer.url()) throw new Error('两侧当前页面不同，请先进入相同页面。');
+      const replay=await scrollPage(peer,{delta:input.delta,peer:actual});
+      record(other,replay);
+      outcome.executions![other]={status:'executed'};
+      outcome.matched=Math.abs(replay.position-actual.position)<=3;
+      if (!outcome.matched) outcome.reason='两侧的可滚动范围不同。';
+    } catch (error) {
+      outcome.executions![other]={status:'unmatched'};
+      outcome.matched=false;
+      outcome.reason=redact((error as Error).message.split('\n')[0]);
+      session.sequences[other]=null;
+    }
+  }
+  if (session.actions.length<100) session.actions.push(outcome);
+  session.revision++;
+  const next=await inspect(session,outcome,changed);
+  if (next.capture.count>0) session.scans={};
+  else for (const saved of Object.values(session.scans)) saved.revision=session.revision;
+  return next;
 }
 
 function targetLocator(page:Page,target:Target) {
@@ -244,6 +345,7 @@ export async function operateLive(project:string,key:string,input:unknown,authSe
   session.pending = true;
   const outcome:NonNullable<LiveComparison['outcome']> = {action:operation.action,side,matched:null,executions:{}};
   try {
+    if (operation.action==='scroll') return await operateScroll(session,side,sync,operation);
     if (operation.action !== 'refresh') {
       const before = await pageState(page);
       if ('x' in operation && session.frameKeys[side]!==frameKey(before)) throw new Error('点击画面已经过期，请刷新实时画面。');
@@ -253,9 +355,8 @@ export async function operateLive(project:string,key:string,input:unknown,authSe
       const action = operation.action === 'activate' ? 'click' : operation.action;
       const descriptor = target ? await describeTarget(page,target) : undefined;
       if (target) {outcome.target = target.name; outcome.role = target.role;}
-      if ('delta' in operation) outcome.delta = operation.delta;
       if ('percent' in operation) outcome.percent = operation.percent;
-      const execute = async (current:Page, isOther:boolean, scrollTarget?:number) => {
+      const execute = async (current:Page, isOther:boolean) => {
         const currentTarget = target ? (isOther ? await describeTarget(current,target) : descriptor) : undefined;
         if (isOther && currentTarget && (currentTarget.path !== descriptor?.path || currentTarget.submit !== descriptor?.submit ||
             currentTarget.tag !== descriptor?.tag || Boolean(currentTarget.stableId && descriptor?.stableId && currentTarget.stableId !== descriptor.stableId))) {
@@ -277,14 +378,10 @@ export async function operateLive(project:string,key:string,input:unknown,authSe
         } else if (action === 'tab' || action === 'shift-tab' || action === 'escape') {
           step = {action};
           await act(current,step,signal);
-        } else if ('delta' in operation) {
-          await current.evaluate(({delta,y}) => window.scrollTo({top:y ?? window.scrollY+delta,behavior:'instant'}),
-            {delta:operation.delta,y:scrollTarget});
         } else if ('percent' in operation) {
           await current.evaluate(percent=>{document.documentElement.style.zoom=String(percent/100);},operation.percent);
         }
         const result = await settledState(current);
-        if ('delta' in operation && result.scroll <= 6000) step = {action:'scroll',y:result.scroll};
         const previousSequence = session.sequences[targetSide];
         if (previousSequence) session.sequences[targetSide] = hash(JSON.stringify([previousSequence,
           step ?? {action,target,zoom:'percent' in operation ? operation.percent : undefined}]));
@@ -315,12 +412,11 @@ export async function operateLive(project:string,key:string,input:unknown,authSe
         if (sync) {
           try {
             if (before.path !== oppositeBefore?.path) throw new Error('两侧当前页面不同，请独立导航或重新打开对比。');
-            const replay = await execute(opposite,true,actual.result.scroll);
+            const replay = await execute(opposite,true);
             outcome.matched = replay.result.path===actual.result.path && replay.modal===actual.modal &&
               JSON.stringify(replay.invalid)===JSON.stringify(actual.invalid) &&
               JSON.stringify(interactionChanges(oppositeBefore!,replay.result))===JSON.stringify(interactionChanges(before,actual.result)) &&
               (!(action==='tab' || action==='shift-tab') || replay.result.focus===actual.result.focus) &&
-              (!('delta' in operation) || Math.abs(replay.result.scroll-actual.result.scroll)<=3) &&
               (!('percent' in operation) || replay.result.zoom===actual.result.zoom);
             if (!outcome.matched) outcome.reason = '操作后路由、弹窗、校验状态或可滚动范围不同。';
           } catch (error) {

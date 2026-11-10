@@ -1,5 +1,5 @@
 import { workspaceFetch as fetch } from './workspace-fetch';
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState, type ReactNode } from 'react';
 import type { scanLive } from '../../api/live-comparison';
 import type { LiveAction, LiveComparison as LiveResult, LiveSide } from '../../../packages/shared/live-comparison';
 import type { PageInspection } from './Panorama';
@@ -10,10 +10,10 @@ const sides = ['left','right'] as const;
 const label = {left:'左侧',right:'右侧'};
 const dimensions = {route:'路由',dom:'DOM',semantics:'无障碍语义',focus:'焦点',visual:'画面'};
 
-export function LiveComparison({ project, left, right, names, start, current, onInspection, onRepair, onClose }: {
+export function LiveComparison({ project, left, right, names, start, current, onInspection, onRepair, onClose, versions }: {
   project:string; left:string; right:string; names:Record<LiveSide,string>; start?:string; current:string;
   onInspection:(value:PageInspection)=>void;
-  onRepair:(value:RepairState)=>void; onClose:()=>void;
+  onRepair:(value:RepairState)=>void; onClose:()=>void; versions?:ReactNode;
 }) {
   const route = '/api/projects/'+encodeURIComponent(project)+'/live';
   const [session,setSession] = useState<LiveResult>();
@@ -23,8 +23,16 @@ export function LiveComparison({ project, left, right, names, start, current, on
   const [scanErrors,setScanErrors] = useState<Partial<Record<LiveSide,{path:string; reason:string}>>>({});
   const [scans,setScans] = useState<Partial<Record<LiveSide,Scan>>>({});
   const [targets,setTargets] = useState({left:'',right:''});
+  const [advanced,setAdvanced] = useState(false);
   const [keyboard,setKeyboard] = useState<LiveSide>();
   const lock = useRef(false);
+  const latest = useRef<LiveResult|undefined>(undefined);
+  const scrollQueue = useRef<{side:LiveSide;delta:number;x?:number;y?:number}[]>([]);
+  const scrollTimer = useRef<ReturnType<typeof setTimeout>|undefined>(undefined);
+  const pump = useRef<()=>void>(()=>{});
+  const syncRef = useRef(true);
+  const drag = useRef<{id:number;y:number;travel:number}|undefined>(undefined);
+  const dragged = useRef(false);
   const screens = useRef<Partial<Record<LiveSide,HTMLButtonElement | null>>>({});
   const [restart,setRestart] = useState(0);
   const transition = useRef(Promise.resolve());
@@ -35,6 +43,7 @@ export function LiveComparison({ project, left, right, names, start, current, on
     lock.current = true;
     setBusy(true);
     setError('');
+    latest.current=undefined;
     setSession(undefined);
     setScans({});
     setScanErrors({});
@@ -49,18 +58,24 @@ export function LiveComparison({ project, left, right, names, start, current, on
       else void opening.then(initial => initial && closeSession(initial.id)).catch(()=>{});
     };
     window.addEventListener('pagehide',closeOnPageExit);
-    void opening.then(initial => {
+    void opening.then(async initial => {
       openedId = initial?.id;
-      if (active) setSession(initial);
+      if (active && initial) {
+        await decodeFrames(initial);
+        if (active) {latest.current=initial;setSession(initial);}
+      }
     }, problem => {
       if (active) setError((problem as Error).message);
-    }).finally(() => {
+    }).catch(problem=>{if (active) setError((problem as Error).message);}).finally(() => {
       if (active) {setBusy(false);lock.current=false;}
     });
     return () => {
       active=false;
       window.removeEventListener('pagehide',closeOnPageExit);
       generation.current++;
+      clearTimeout(scrollTimer.current);
+      scrollTimer.current=undefined;
+      scrollQueue.current=[];
       transition.current = opening.then(async initial => {
         if (initial) await closeSession(initial.id);
       }).catch(()=>{});
@@ -83,37 +98,86 @@ export function LiveComparison({ project, left, right, names, start, current, on
         else setError(reason);
       }
     } finally {
-      if (requestGeneration === generation.current) {setBusy(false);lock.current=false;}
+      if (requestGeneration === generation.current) {setBusy(false);lock.current=false;pump.current();}
     }
   }
 
   function act(side:LiveSide, operation:LiveAction) {
-    if (!session) return;
-    void run(() => post<LiveResult>(route+'/'+session.id+'/action',{side,sync,revision:session.revision,operation}), next=>{
+    const previous=latest.current;
+    if (!previous) return;
+    if (lock.current) {
+      if (operation.action==='click' && 'x' in operation) setError('画面正在更新，请稍后点击。');
+      return;
+    }
+    if (operation.action!=='scroll') scrollQueue.current=[];
+    void run(async ()=>{
+      const next=await post<LiveResult>(route+'/'+previous.id+'/action',{side,sync:syncRef.current,revision:previous.revision,operation});
+      if (next.id!==previous.id || next.revision<=previous.revision) throw new Error('收到过期画面，请刷新。');
+      await decodeFrames(next,previous);
+      return next;
+    },next=>{
+      for (const side of sides) if (!next[side].image) next[side].image=previous[side].image;
+      latest.current=next;
       setSession(next);
-      setScans({});
-      setScanErrors({});
-      if (operation.action !== 'refresh') {
+      if (operation.action!=='scroll' || next.capture.count>0) {
+        setScans({});
+        setScanErrors({});
+      }
+      if (operation.action !== 'refresh' && operation.action !== 'scroll') {
         setTargets({left:'',right:''});
         const currentFrame = left===current ? next.left : right===current ? next.right : undefined;
         if (currentFrame) onInspection({projectId:project,version:current,path:currentFrame.path,scoped:true,findings:[],scanStatus:'unscanned'});
       }
+    },reason=>{
+      scrollQueue.current=[];
+      setError(reason);
     });
   }
 
+  pump.current=()=>{
+    if (!latest.current || lock.current || scrollTimer.current || !scrollQueue.current.length) return;
+    scrollTimer.current=setTimeout(()=>{
+      scrollTimer.current=undefined;
+      if (lock.current) return;
+      const next=scrollQueue.current.shift();
+      if (!next) return;
+      const delta=Math.round(next.delta);
+      if (delta) {
+        const applied=Math.max(-1600,Math.min(1600,delta));
+        if (delta!==applied) scrollQueue.current.unshift({...next,delta:delta-applied});
+        act(next.side,{action:'scroll',delta:applied,x:next.x,y:next.y});
+      } else pump.current();
+    },45);
+  };
+
+  function enqueueScroll(side:LiveSide,delta:number,point?:{x:number;y:number}) {
+    if (!Number.isFinite(delta) || !delta) return;
+    const queue=scrollQueue.current;
+    const tail=queue.at(-1);
+    if (tail?.side===side) Object.assign(tail,{...point,delta:Math.max(-6400,Math.min(6400,tail.delta+delta))});
+    else if (queue.length<8) queue.push({side,delta,...point});
+    pump.current();
+  }
+
+  const scrollInput=useRef(enqueueScroll);
+  scrollInput.current=enqueueScroll;
   useEffect(() => {
+    if (!session?.id) return;
     const cleanup = sides.map(side => {
       const screen = screens.current[side];
       const wheel = (event:WheelEvent) => {
+        if (!screen || event.ctrlKey || !event.deltaY || Math.abs(event.deltaY)<Math.abs(event.deltaX)) return;
+        const underPointer=document.elementFromPoint(event.clientX,event.clientY);
+        if (!screen.matches(':hover') || !screen.contains(underPointer)) return;
         event.preventDefault();
         const unit = event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? 700 : 1;
-        if (Math.abs(event.deltaY)>1) act(side,{action:'scroll',delta:Math.max(-1600,Math.min(1600,Math.round(event.deltaY*unit)))});
+        scrollInput.current(side,event.deltaY*unit,screenPoint(screen,event.clientX,event.clientY));
       };
       screen?.addEventListener('wheel',wheel,{passive:false});
       return () => screen?.removeEventListener('wheel',wheel);
     });
     return () => cleanup.forEach(remove=>remove());
-  }, [session,sync]);
+  }, [session?.id]);
 
   function scan(side:LiveSide) {
     if (!session) return;
@@ -139,23 +203,27 @@ export function LiveComparison({ project, left, right, names, start, current, on
   }
 
   return <section aria-label="双侧实时浏览器">
-    <div className="panorama-bar">
-      <label><input type="checkbox" checked={sync} onChange={event=>setSync(event.target.checked)} />同步操作</label>
+    <div className="live-toolbar panorama-bar">
+      {versions}
+      <label><input type="checkbox" checked={sync} onChange={event=>{
+        scrollQueue.current=[];
+        syncRef.current=event.target.checked;
+        setSync(event.target.checked);
+      }} />同步操作</label>
       <button type="button" className="secondary" disabled={busy||!session} onClick={()=>act('left',{action:'refresh'})}>刷新实时画面</button>
-      <button type="button" className="secondary" disabled={!Object.values(scans).some(Boolean)&&!Object.values(scanErrors).some(Boolean)} onClick={download}>下载当前检测证据</button>
+      {sides.map(side=><button key={side} type="button" className="secondary" disabled={busy||!session}
+        onClick={()=>scan(side)}>检测{label[side]}状态</button>)}
       <button type="button" className="secondary" onClick={onClose}>关闭实时浏览器</button>
+      <button type="button" className="secondary" aria-expanded={advanced} onClick={()=>setAdvanced(value=>!value)}>更多操作</button>
+      <span className="live-progress" role="status">{busy ? session?'更新中…':'连接中…' : ''}</span>
     </div>
-    <p className="muted">浏览器画面随操作更新。两侧在隔离 Chrome 中运行。输入使用固定测试值，表单只触发原生校验。实时会话最长 5 分钟。</p>
-    {busy && <p role="status">{session?'浏览器正在执行操作…':'正在打开两个隔离浏览器…'}</p>}
     {error && <div className="panorama-bar"><p role="alert">{error}</p>
       <button type="button" className="secondary" disabled={busy} onClick={()=>setRestart(value=>value+1)}>重开实时会话</button></div>}
     {session?.outcome?.matched === false && <p role="alert">操作匹配失败 · {session.outcome.reason}</p>}
-    {session?.outcome?.matched === true && <p role="status">已在两侧执行操作{session.outcome.target && ' · '+session.outcome.target}</p>}
-    {session && <p className="muted">当前有差异的证据 · {
-      (Object.keys(dimensions) as (keyof typeof dimensions)[]).filter(key=>session.differences[key]).map(key=>dimensions[key]).join('、') || '无'
-    }</p>}
-    {session && (scans.left || scans.right || session.observations.left.length > 0 || session.observations.right.length > 0) && <details>
+    {session && <details>
       <summary>交互证据与差异</summary>
+      <p>{(Object.keys(dimensions) as (keyof typeof dimensions)[]).filter(key=>session.differences[key]).map(key=>dimensions[key]).join('、') || '暂无可见差异'}</p>
+      <button type="button" className="secondary" disabled={!Object.values(scans).some(Boolean)&&!Object.values(scanErrors).some(Boolean)} onClick={download}>下载当前检测证据</button>
       <ul>{sides.flatMap(side=>session.observations[side].map((item,index)=><li key={side+index}>{label[side]} · 第 {item.step ?? '—'} 步 · {
         item.status==='confirmed'?'已确认异常':item.status==='observed'?'已观测':'待人工复核'
       } · {item.evidence}</li>))}</ul>
@@ -173,45 +241,58 @@ export function LiveComparison({ project, left, right, names, start, current, on
             {after.filter(line=>!before.includes(line)).slice(0,6).map((line,i)=><li key={'after'+i}>仅右侧 · <code>{line}</code></li>)}</ul></>;
       })() : <p>两侧路由或可核对的操作序列不同，暂不判定新增或消失的问题。</p>)}
     </details>}
-    {session && <div className="panorama-pair">
+    {session && <div className="panorama-pair live-pair">
       {sides.map(side=>{
         const frame = session[side];
         const target = frame.controls[Number(targets[side])];
         const report = scans[side];
         return <section key={side} aria-label={label[side]+'实时浏览器'}>
-          <h3>{label[side]} · {names[side]}</h3>
-          {session.modes[side]==='snapshot' && <p className="muted">受限快照 · 原网站脚本不执行，只支持本地导航与浏览器原生控件。</p>}
-          <p><code>{frame.path}</code>{frame.title && ' · '+frame.title} · 滚动 {frame.scroll}px · 焦点 {frame.focus||'文档'}</p>
-          <button type="button" className="live-screen" ref={element=>{screens.current[side]=element;}} aria-label={label[side]+'可操作网页画面'} aria-disabled={busy} onClick={event=>{
+          <h3>{label[side]} · {names[side]} <code title={frame.path}>{frame.path}</code></h3>
+          {session.modes[side]==='snapshot' && <small className="muted">静态快照</small>}
+          <button type="button" className="live-screen" ref={element=>{screens.current[side]=element;}} aria-label={label[side]+'可操作网页画面'} onClick={event=>{
+            if (dragged.current) {dragged.current=false;return;}
             if (event.detail===0) {act(side,{action:'activate'});return;}
-            const rect=event.currentTarget.getBoundingClientRect();
-            act(side,{action:'click',x:Math.min(899,Math.max(0,Math.floor((event.clientX-rect.left)/rect.width*900))),
-              y:Math.min(699,Math.max(0,Math.floor((event.clientY-rect.top)/rect.height*700)))});
-          }} onKeyDown={event=>{
+            act(side,{action:'click',...screenPoint(event.currentTarget,event.clientX,event.clientY)});
+          }} onPointerDown={event=>{
+            dragged.current=false;
+            if (event.pointerType!=='touch') return;
+            event.currentTarget.setPointerCapture(event.pointerId);
+            drag.current={id:event.pointerId,y:event.clientY,travel:0};
+          }} onPointerMove={event=>{
+            const gesture=drag.current;
+            if (gesture?.id!==event.pointerId) return;
+            const delta=gesture.y-event.clientY;
+            gesture.y=event.clientY;
+            gesture.travel+=Math.abs(delta);
+            if (gesture.travel<5) return;
+            dragged.current=true;
+            enqueueScroll(side,delta*700/event.currentTarget.clientHeight,screenPoint(event.currentTarget,event.clientX,event.clientY));
+          }} onLostPointerCapture={()=>{drag.current=undefined;}} onKeyDown={event=>{
             if (event.key==='Escape' && event.shiftKey) {event.preventDefault();setKeyboard(undefined);return;}
+            const delta=({ArrowUp:-48,ArrowDown:48,PageUp:-600,PageDown:600} as Record<string,number>)[event.key];
+            if (delta) {event.preventDefault();enqueueScroll(side,delta);return;}
             if (keyboard!==side || !['Tab','Escape','Enter',' '].includes(event.key)) return;
             event.preventDefault();
             act(side,{action:event.key==='Tab' ? event.shiftKey?'shift-tab':'tab' : event.key==='Escape'?'escape':'activate'});
           }}><img draggable={false} alt="" src={frame.image} width={900} height={700} /></button>
-          <div className="panorama-bar">
-            <label><input type="checkbox" checked={keyboard===side} onChange={event=>setKeyboard(event.target.checked?side:undefined)} />转发网页画面中的 Tab（Shift+Esc 退出）</label>
-            <button type="button" className="secondary" disabled={busy} onClick={()=>act(side,{action:'tab'})}>Tab</button>
-            <button type="button" className="secondary" disabled={busy} onClick={()=>act(side,{action:'escape'})}>Esc</button>
-            <button type="button" className="secondary" disabled={busy} onClick={()=>act(side,{action:'scroll',delta:-360})}>向上滚动</button>
-            <button type="button" className="secondary" disabled={busy} onClick={()=>act(side,{action:'scroll',delta:360})}>向下滚动</button>
-            <label>缩放<select disabled={busy} value={frame.zoom} onChange={event=>act(side,{action:'zoom',percent:Number(event.target.value) as 75|100|125|150})}>
-              {[75,100,125,150].map(percent=><option key={percent} value={percent}>{percent}%</option>)}
-            </select></label>
-          </div>
-          <div className="panorama-bar">
-            <label>语义控件<select value={targets[side]} disabled={busy} onChange={event=>setTargets({...targets,[side]:event.target.value})}>
-              <option value="">选择控件</option>
-              {frame.controls.map((control,index)=><option key={index} value={index}>{control.name} ({control.role})</option>)}
-            </select></label>
-            <button type="button" className="secondary" disabled={busy||!targets[side]||!target} onClick={()=>act(side,{action:'click',target})}>操作控件</button>
-            <button type="button" className="secondary" disabled={busy||!targets[side]||target?.role!=='textbox'} onClick={()=>act(side,{action:'fill',target})}>填入测试值</button>
-            <button type="button" className="secondary" disabled={busy} onClick={()=>scan(side)}>检测当前状态</button>
-          </div>
+          <details className="live-more" hidden={!advanced}>
+            <summary>{label[side]}更多操作</summary>
+            <p className="muted">焦点 {frame.focus||'文档'} · 滚动 {frame.scroll}px。聚焦画面后可用方向键或翻页键滚动。隔离浏览器使用固定测试值，禁止真实提交，会话最长 5 分钟。</p>
+            <div className="panorama-bar">
+              <label><input type="checkbox" checked={keyboard===side} onChange={event=>setKeyboard(event.target.checked?side:undefined)} />转发网页画面中的 Tab（Shift+Esc 退出）</label>
+              <button type="button" className="secondary" disabled={busy} onClick={()=>act(side,{action:'tab'})}>Tab</button>
+              <button type="button" className="secondary" disabled={busy} onClick={()=>act(side,{action:'escape'})}>Esc</button>
+              <label>缩放<select disabled={busy} value={frame.zoom} onChange={event=>act(side,{action:'zoom',percent:Number(event.target.value) as 75|100|125|150})}>
+                {[75,100,125,150].map(percent=><option key={percent} value={percent}>{percent}%</option>)}
+              </select></label>
+              <label>语义控件<select value={targets[side]} disabled={busy} onChange={event=>setTargets({...targets,[side]:event.target.value})}>
+                <option value="">选择控件</option>
+                {frame.controls.map((control,index)=><option key={index} value={index}>{control.name} ({control.role})</option>)}
+              </select></label>
+              <button type="button" className="secondary" disabled={busy||!targets[side]||!target} onClick={()=>act(side,{action:'click',target})}>操作控件</button>
+              <button type="button" className="secondary" disabled={busy||!targets[side]||target?.role!=='textbox'} onClick={()=>act(side,{action:'fill',target})}>填入测试值</button>
+            </div>
+          </details>
           {scanErrors[side] && <p role="alert">状态检测未完成 · {scanErrors[side].reason}</p>}
           {report && <p role="status">当前状态检测完成 · {report.violations.reduce((sum,rule)=>sum+rule.targets.length,0)} 项确定性违规 · {report.incomplete.reduce((sum,rule)=>sum+rule.count,0)} 项 axe 待复核 · {report.observations.filter(item=>item.status==='confirmed').length} 项已确认行为异常（会话累计） · {report.observations.filter(item=>item.status==='needs-review').length} 项操作待复核
             {Boolean(report.media.length) && ' · 已记录媒体轨道，请在证据中复核字幕与音频描述'}</p>}
@@ -227,6 +308,21 @@ export function LiveComparison({ project, left, right, names, start, current, on
       })}
     </div>}
   </section>;
+}
+
+function screenPoint(screen:HTMLElement,clientX:number,clientY:number) {
+  const rect=screen.getBoundingClientRect();
+  return {x:Math.min(899,Math.max(0,Math.floor((clientX-rect.left)/rect.width*900))),
+    y:Math.min(699,Math.max(0,Math.floor((clientY-rect.top)/rect.height*700)))};
+}
+
+async function decodeFrames(next:LiveResult,previous?:LiveResult) {
+  await Promise.all(sides.map(async side=>{
+    if (!next[side].image || next[side].image===previous?.[side].image) return;
+    const image=new Image();
+    image.src=next[side].image;
+    await image.decode();
+  }));
 }
 
 async function post<T>(path:string,body?:unknown):Promise<T> {

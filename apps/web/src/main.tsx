@@ -665,10 +665,10 @@ function App({account,signOut,openUpgrade,openVerification}:{account:Account;sig
                   openPage('workspace');
                 }}>在诊断中查看当前页面</button>}
             </div>
-            {page === 'live' && <ComparisonVersions state={state} pair={livePair} onPair={next=>setChosenLivePair({scope:projectScope,pair:next})} busy={working} />}
             {livePair.left && livePair.right && <LiveComparison project={state.project.id} left={livePair.left} right={livePair.right}
               names={{left:versionName(state,livePair.left),right:versionName(state,livePair.right)}} start={liveView.start}
               current={state.project.currentSnapshot} onInspection={setLiveInspection}
+              versions={<ComparisonVersions state={state} pair={livePair} onPair={next=>setChosenLivePair({scope:projectScope,pair:next})} busy={working} />}
               onClose={()=>{setLiveView(undefined);setLiveInspection(undefined);openPage('workspace');}}
               onRepair={({issue:item,stateId,version,path})=>{
                 setSelection(null);

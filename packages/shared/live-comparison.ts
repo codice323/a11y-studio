@@ -8,13 +8,14 @@ export type LiveAction =
   | { action:'click'; x:number; y:number }
   | { action:'click' | 'fill' | 'validate'; target:Control }
   | { action:'activate' | 'tab' | 'shift-tab' | 'escape' | 'refresh' }
-  | { action:'scroll'; delta:number }
+  | { action:'scroll'; delta:number; x?:number; y?:number }
   | { action:'zoom'; percent:75|100|125|150 };
 export type LiveFinding = { rule:string; evidence:string; status:InteractionFinding['status']; selector?:string; step?:number };
 export type LiveComparison = {
-  id:string; revision:number; left:LiveFrame; right:LiveFrame;
+  id:string; revision:number;
+  capture:{ count:number; elapsedMs:number }; left:LiveFrame; right:LiveFrame;
   modes:Record<LiveSide,'source'|'snapshot'>;
-  outcome?: { action:string; side:LiveSide; target?:string; role?:string; delta?:number; percent?:number; matched:boolean | null; reason?:string;
+  outcome?: { action:string; side:LiveSide; target?:string; role?:string; delta?:number; percent?:number; scroll?:Partial<Record<LiveSide,{container:string; position:number}>>; matched:boolean | null; reason?:string;
     executions?: Partial<Record<LiveSide,{status:'executed'|'failed'|'unmatched'; path?:string; focus?:string}>> };
   differences:{ route:boolean; dom:boolean; semantics:boolean; focus:boolean; visual:boolean };
   observations:Record<LiveSide,LiveFinding[]>;

@@ -590,3 +590,14 @@ footer { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 8p
 .account-project-row { min-width: 0; }
 .recent-list .account-project-actions { display: flex; gap: 12px; }
 .recent-list .account-project-actions button { width: auto; border-bottom: 0; min-height: 32px; color: var(--blue); }
+
+
+.live-workspace .live-toolbar { align-items: center; margin: 0; }
+.live-toolbar .version-comparison-toolbar { margin: 0; }
+.live-progress { min-width: 4.5em; color: var(--muted); font-size: 12px; }
+.live-workspace .live-pair > section { padding: 5px; }
+.live-pair h3 { display: flex; align-items: baseline; gap: 6px; min-width: 0; font-size: 13px; }
+.live-pair h3 code { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: normal; }
+.live-pair .live-screen { aspect-ratio: 900 / 700; touch-action: none; }
+.live-pair .live-screen img { height: 100%; object-fit: fill; }
+.live-more { font-size: 13px; margin: 4px 0 0; }
