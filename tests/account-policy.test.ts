@@ -85,14 +85,17 @@ test('Chrome 验证登录、注册边界、游客隔离、额度、过期和清�
       await title.waitFor();
       await form.getByRole('button',{name:'前往注册'}).click();
       await fillSignup('boundary@example.test','x'.repeat(8));
-      assert.equal(await form.getByRole('alert').innerText(),'该邮箱已注册，请直接登录');
+      await form.getByText(/注册请求已处理/).waitFor();
       await snap(form,'02-duplicate-email.png');
       const duplicate=await signup(' BOUNDARY@example.test ','x'.repeat(8));
-      assert.equal(duplicate.status(),409);
+      assert.equal(duplicate.status(),200);
+      assert.deepEqual(await duplicate.json(),{ok:true,verificationRequired:false});
+      await form.getByRole('button',{name:'前往注册'}).click();
       await fillSignup('second@example.test','x'.repeat(20));
       await title.waitFor();
       const simultaneous=await Promise.all([signup(' Race@example.test ','abcdefgh'),signup('race@example.test','abcdefgh')]);
-      assert.deepEqual(simultaneous.map(r=>r.status()).sort(),[200,409]);
+      assert.deepEqual(simultaneous.map(r=>r.status()),[200,200]);
+      assert.equal(db.prepare("SELECT count(*) FROM user WHERE email='race@example.test'").pluck().get(),1);
       assert.equal((await signup('limited@example.test','abcdefgh')).status(),429);
       assert.throws(()=>db.prepare("UPDATE user SET email=' Boundary@Example.test ' WHERE email='second@example.test'").run(),/UNIQUE/);
 

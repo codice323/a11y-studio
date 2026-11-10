@@ -245,7 +245,7 @@ test('全景工作台用真实 Chrome 采集静态多页和 React 路由，重�
             await delay(150);
           }
           await page.reload();
-          await page.locator('.recent-list').getByRole('button', {name:/workshop\.zip/}).click();
+          await page.getByRole('heading',{name:'网页无障碍工作台',exact:true}).waitFor();
           await ready();
           await panel.getByLabel('页面', {exact:true}).selectOption(scenario.page);
           await ready();

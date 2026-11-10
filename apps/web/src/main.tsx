@@ -18,6 +18,7 @@ import type { PageInspection, PanoramaJump } from './Panorama';
 import type { PanoramaIssue } from '../../../packages/shared/panorama';
 import { versionName, type HistoryItem, type Issue, type Proposal, type State, type Verification } from './types';
 import { AccountGate, type Account } from './AccountGate';
+import { projectFromLocation, rememberProject } from './project-location';
 import './style.css';
 
 const issueNames: Record<string, [string, string]> = {
@@ -65,7 +66,7 @@ async function request<T>(url: string, options?: RequestInit): Promise<T> {
   const response = await fetch(url, options);
   const data = await response.json().catch(() => null);
   if (!response.ok || (data === null && response.headers.get('content-type')?.includes('text/html'))) {
-    throw new Error(data?.error ?? `服务请求失败（HTTP ${response.status}）。`);
+    throw new Error(data?.error ?? `服务请求失败（HTTP ${response.status}）。`,{cause:response.status});
   }
   return data as T;
 }
@@ -74,7 +75,7 @@ function post<T>(url: string, data: unknown = {}) {
   return request<T>(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data) });
 }
 
-function App({account,signOut}:{account:Account;signOut:()=>Promise<void>}) {
+function App({account,signOut,openUpgrade,openVerification}:{account:Account;signOut:()=>Promise<void>;openUpgrade:()=>void;openVerification:()=>void}) {
   const [signingOut,setSigningOut] = useState(false);
   const [state, setState] = useState<State | null>(null);
   const [projects, setProjects] = useState<Project[]>([]);
@@ -122,6 +123,7 @@ function App({account,signOut}:{account:Account;signOut:()=>Promise<void>}) {
   const [confirmApply, setConfirmApply] = useState(false);
   const [knowledge, setKnowledge] = useState<Knowledge | null>(null);
   const running = useRef(false);
+  const mounted = useRef(true);
   const activePoll = useRef<AbortController>(null);
   const heading = useRef<HTMLHeadingElement>(null);
   const feedback = useRef<HTMLDivElement>(null);
@@ -168,7 +170,13 @@ function App({account,signOut}:{account:Account;signOut:()=>Promise<void>}) {
     }
   }
 
-  useEffect(() => { void loadHome(); }, []);
+  useEffect(() => {
+    mounted.current=true;
+    void loadHome();
+    const initialProject=projectFromLocation();
+    if (initialProject) openProject(initialProject);
+    return ()=>{mounted.current=false;};
+  }, []);
   useEffect(() => {
     const stopPolling = () => activePoll.current?.abort();
     window.addEventListener('pagehide', stopPolling);
@@ -234,7 +242,7 @@ function App({account,signOut}:{account:Account;signOut:()=>Promise<void>}) {
 
   async function refresh(pid: string) {
     const next = await request<State>('/api/projects/' + pid);
-    setState(next);
+    if (mounted.current) {setState(next);rememberProject(pid);}
     return next;
   }
 
@@ -275,13 +283,31 @@ function App({account,signOut}:{account:Account;signOut:()=>Promise<void>}) {
     run('正在加载项目…', async () => {
       resetSelection();
       openPage('workspace');
-      const next = await refresh(pid);
+      rememberProject(pid);
+      const next = await refresh(pid).catch(error=>{
+        if (mounted.current && projectFromLocation()===pid && [403,404].includes(error.cause)) rememberProject(null);
+        throw error;
+      });
       if (!next.current) {
         setBusy('正在扫描项目快照…');
         await runJob('audit', '/api/projects/' + pid + '/audits');
         await refresh(pid);
       }
     });
+  }
+
+  async function manageProject(projectId:string,change:{name:string}|{confirm:true}) {
+    const remove='confirm' in change;
+    await request('/api/projects/'+projectId,{method:remove?'DELETE':'PATCH',
+      headers:{'Content-Type':'application/json'},body:JSON.stringify(change)});
+    if (remove) {
+      setProjects(previous=>previous.filter(project=>project.id!==projectId));
+      if (projectFromLocation()===projectId) rememberProject(null);
+    } else {
+      setProjects(previous=>previous.map(project=>project.id===projectId?{...project,name:change.name.trim()}:project));
+    }
+    await loadHome();
+    setNotice(remove?'项目已删除。':'项目名称已更新。');
   }
 
   function createProject(data: FormData | UrlImport) {
@@ -599,21 +625,22 @@ function App({account,signOut}:{account:Account;signOut:()=>Promise<void>}) {
     </aside>
     <main className={state ? undefined : 'home-page'}>
       <header className="topbar"><div>工作空间 <span>/</span> <b>{state ? activeLabel : '我的项目'}</b></div><div className="topright">{account.isGuest && <span className="account-guest-label">游客模式</span>}<details className="account-menu"><summary>个人菜单</summary>
-        <div className="panel"><strong>个人资料</strong><p>{account.name}</p>{!account.isGuest && <p>{account.email}</p>}
+        <div className="panel"><strong>个人资料</strong><p>{account.name}</p>{!account.isGuest && <p>{account.email}</p>}{account.emailVerified===false && <button className="secondary" type="button" onClick={openVerification}>验证邮箱</button>}
           <button type="button" className="secondary" disabled={signingOut} onClick={()=>{
             setSigningOut(true);
             void signOut().catch(problem=>setError((problem as Error).message)).finally(()=>setSigningOut(false));
           }}>{signingOut?'正在退出…':'退出登录'}</button>
         </div></details></div></header>
       <div className={state ? 'content' : 'content home-content'}>
-        {account.isGuest && account.expiresAt && <p className="account-guest-notice">游客项目临时保存，可用至 {new Date(account.expiresAt).toLocaleString('zh-CN')}。请及时导出需要保留的内容。</p>}
+        {account.isGuest && account.expiresAt && <p className="account-guest-notice">游客项目临时保存，可用至 {new Date(account.expiresAt).toLocaleString('zh-CN')}。 <button
+          type="button" className="secondary" disabled={working} onClick={openUpgrade}>保存我的项目 / 注册账号</button></p>}
         <div className={'page-intro' + (state ? '' : ' hero')}>
           <div><div className="eyebrow"><span />ACCESSIBILITY WORKSPACE</div>
             <h1 id="page-title" tabIndex={-1} ref={heading}>{state ? page === 'workspace' ? '网页无障碍工作台' : activeLabel : '我的项目'}</h1>
             <p>{state ? page === 'report' ? '回顾检测覆盖、问题变化和验证证据。' : page === 'live' ? '同步操作两个版本，核对导航和交互状态。' : '定位问题、审核补丁并对比修复证据。' : '面向网页开发者、设计师和小型团队的 AI 无障碍检测与智能修复平台。用户上传自己的网页后，系统自动检测问题、可视化定位、解释影响、提供 AI 修复方案，并在用户确认后修改代码，重新验证修复效果，最终导出网页和检测报告。'}</p>
           </div>
           {state && <div className="intro-actions">
-            <button className="secondary" disabled={working} onClick={() => { setState(null); resetSelection(); openPage('workspace'); setError(''); setNotice(''); }}><Layers size={15} />切换项目</button>
+            <button className="secondary" disabled={working} onClick={() => { setState(null); rememberProject(null); void loadHome(); resetSelection(); openPage('workspace'); setError(''); setNotice(''); }}><Layers size={15} />切换项目</button>
             <ExportButton route={route} disabled={working} />
           </div>}
         </div>
@@ -622,7 +649,7 @@ function App({account,signOut}:{account:Account;signOut:()=>Promise<void>}) {
         {notice && <div className="alert success" role="status"><CheckCircle2 size={17} /><span>{notice}</span><button onClick={() => setNotice('')} aria-label="关闭操作提示"><X size={16} /></button></div>}
         {busy && <div className="busy"><span role="status"><LoaderCircle className="spin" size={16} />{busy}</span>{jobId && <button className="cancel-job" disabled={cancelRequested} onClick={() => void cancelJob()}>{cancelRequested ? '正在取消…' : '取消任务'}</button>}</div>}
 
-        {!state ? <Home fixtures={fixtures} projects={projects} busy={working} onCreate={createProject} onOpen={openProject} onError={setError} /> :
+        {!state ? <Home fixtures={fixtures} projects={projects} busy={working} onCreate={createProject} onOpen={openProject} onManage={manageProject} onError={setError} /> :
           <>
           {page === 'report' && <Report state={state} busy={working} onRollback={rollback} onOpen={(item) => chooseHistory(item, 'visual', true, true)} onWorkspace={() => openPage('workspace')} />}
           {liveView?.scope === projectScope && <section className="workspace-view live-workspace panel" hidden={page !== 'live'} aria-label="实时浏览器工作区">
@@ -753,10 +780,11 @@ function Blank({ icon, title, children }: { icon: ReactNode; title: string; chil
   return <div className="blank">{icon}<b>{title}</b><p>{children}</p></div>;
 }
 
-function Home({ fixtures, projects, busy, onCreate, onOpen, onError }: {
+function Home({ fixtures, projects, busy, onCreate, onOpen, onManage, onError }: {
   fixtures: Fixture[]; projects: Project[]; busy: boolean;
-  onCreate: (data: FormData | UrlImport) => void; onOpen: (id: string) => void; onError: (error: string) => void;
+  onCreate: (data: FormData | UrlImport) => void; onOpen: (id: string) => void; onManage:(id:string,change:{name:string}|{confirm:true})=>Promise<void>; onError: (error: string) => void;
 }) {
+  const [manage,setManage]=useState<{project:Project;remove:boolean}>();
   const [source, setSource] = useState<Source>('html');
   const [url, setUrl] = useState('');
   const [discover, setDiscover] = useState(false);
@@ -824,14 +852,21 @@ function Home({ fixtures, projects, busy, onCreate, onOpen, onError }: {
         onCreate(form);
       }}><span className="example-number">0{index + 1}</span><span><b>{fixture.name}</b><small>{fixture.description}</small></span><ArrowUpRight size={17} /></button>)}</div>
       <div className="section-title recent-title"><div><span className="section-tag">PERSONAL PROJECTS</span><h2>我的项目列表</h2></div></div>
-      {projects.length ? <div className="recent-list">{projects.map(project => <button key={project.id} aria-label={project.name} aria-describedby={'project-meta-'+project.id}
+      {projects.length ? <div className="recent-list">{projects.map(project => <div key={project.id} className="account-project-row"><button aria-label={project.name} aria-describedby={'project-meta-'+project.id}
         onClick={() => onOpen(project.id)} disabled={busy}>
         <FileCode2 size={16} /><span className="account-project-title"><b>{project.name}</b>
           <small id={'project-meta-'+project.id}>{project.mode==='react-source'?'React 源码':project.mode==='static-source'?'静态源码':'网页快照'}
             {' · V'+(project.versionNumber??0)}{project.versionName ? ' '+project.versionName : ''}
             {' · '+({completed:'检测完成',running:'检测中',failed:'检测失败',queued:'等待检测'}[project.scanStatus??'']??'未检测')}</small>
           {project.updatedAt && <small>最近更新 {dateText(project.updatedAt)}</small>}</span>
-        <ChevronRight size={15} /></button>)}</div> : <p className="muted">暂无项目。可导入网页或从示例创建。</p>}
+        <ChevronRight size={15} /></button>
+        <div className="account-project-actions">
+          <button type="button" disabled={busy} aria-label={'重命名 '+project.name} onClick={()=>setManage({project,remove:false})}>重命名</button>
+          <button type="button" disabled={busy} aria-label={'删除 '+project.name} onClick={()=>setManage({project,remove:true})}>删除</button>
+        </div>
+      </div>)}</div> : <p className="muted">暂无项目。可导入网页或从示例创建。</p>}
+      {manage && <ManageProjectDialog project={manage.project} remove={manage.remove}
+        onClose={()=>setManage(undefined)} onSave={onManage} />}
     </section>
     <section className="steps" aria-label="修复流程">
       <div><ScanSearch /><span>01</span><b>发现问题</b><small>运行真实扫描，定位页面元素</small></div>
@@ -839,6 +874,42 @@ function Home({ fixtures, projects, busy, onCreate, onOpen, onError }: {
       <div><ShieldCheck /><span>03</span><b>验证结果</b><small>复测、比较证据并导出报告</small></div>
     </section>
   </div>;
+}
+
+function ManageProjectDialog({project,remove,onClose,onSave}:{project:Project;remove:boolean;onClose:()=>void;
+  onSave:(id:string,change:{name:string}|{confirm:true})=>Promise<void>}) {
+  const dialog=useRef<HTMLDialogElement>(null);
+  const running=useRef(false);
+  const [name,setName]=useState(project.name);
+  const [error,setError]=useState('');
+  const [busy,setBusy]=useState(false);
+  useEffect(()=>{dialog.current?.showModal();},[]);
+  function close() {dialog.current?.close();onClose();}
+  async function submit(event:FormEvent) {
+    event.preventDefault();
+    if (running.current) return;
+    running.current=true;
+    setBusy(true);
+    setError('');
+    try {
+      await onSave(project.id,remove?{confirm:true}:{name});
+      close();
+    } catch (problem) {setError((problem as Error).message);}
+    finally {running.current=false;setBusy(false);}
+  }
+  return <dialog ref={dialog} className="account-upgrade-dialog" aria-labelledby="manage-project-title"
+    onCancel={event=>{event.preventDefault();if (!running.current) close();}}>
+    <form className="panel account-card" onSubmit={submit} aria-busy={busy}>
+      <h2 id="manage-project-title">{remove?'删除项目':'重命名项目'}</h2>
+      {remove ? <p>永久删除「{project.name}」及其版本、修复记录和文件？此操作无法撤销。</p>
+        : <label>项目名称<input required value={name} onChange={event=>setName(event.target.value)} /></label>}
+      {error && <p className="account-error" role="alert">{error}</p>}
+      <div className="account-entry-actions">
+        <button className="secondary" type="button" disabled={busy} onClick={close}>取消</button>
+        <button className={remove?'secondary account-error':'button dark'} disabled={busy} type="submit">{remove?'永久删除':'保存名称'}</button>
+      </div>
+    </form>
+  </dialog>;
 }
 
 function IssueButton({ issue, active, history, disabled, onClick }: {
@@ -1145,4 +1216,4 @@ function ConfirmDialog({ imagePurpose, sourceReview, onClose, onConfirm }: {
   </dialog>;
 }
 
-createRoot(document.getElementById('root')!).render(<AccountGate>{(account,signOut)=><App key={account.id} account={account} signOut={signOut} />}</AccountGate>);
+createRoot(document.getElementById('root')!).render(<AccountGate>{(account,signOut,openUpgrade,openVerification)=><App key={account.id+':'+Boolean(account.isGuest)} account={account} signOut={signOut} openUpgrade={openUpgrade} openVerification={openVerification} />}</AccountGate>);

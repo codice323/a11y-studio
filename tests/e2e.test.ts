@@ -137,7 +137,6 @@ test('静态项目的真实检测、审核修复、失败回滚、导出与异�
    await page.getByRole('button',{name:'取消',exact:true}).click();
    await page.reload();
    const requestsBeforeReopen=[...taskPolls];
-   await page.locator('.recent-list').getByRole('button',{name:'慢绿生活',exact:true}).first().click();
    await page.getByRole('button',{name:/表单控件缺少标签/}).click();
    assert.ok(taskPolls.slice(requestsBeforeReopen.length).every(url=>!requestsBeforeReopen.includes(url)));
    await analyze.click();

@@ -150,7 +150,7 @@ test('Chrome 实时双侧比较：校园 ZIP 导航及 React 独立状态、动�
         .run(next,project.id,project.currentSnapshot,'index.html',treeHash(nextDir),now(),'live test fixture');
       db.prepare('UPDATE projects SET current_snapshot=? WHERE id=?').run(next,project.id);
       await page.reload();
-      await page.locator('.recent-list').getByRole('button',{name:/field-station\.zip/}).click();
+      await page.getByRole('heading',{name:'网页无障碍工作台',exact:true}).waitFor();
       await openLive();
       assert.equal(await page.getByLabel('左侧版本').inputValue(),project.currentSnapshot);
       assert.equal(await page.getByLabel('右侧版本').inputValue(),next);

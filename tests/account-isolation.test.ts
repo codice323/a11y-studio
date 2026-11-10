@@ -172,7 +172,7 @@ test('注册登录、真实校园项目修复、双账号资源隔离及旧项�
       assert.equal((await json(a,route)).snapshots.length,3);
       await pageA.reload();
       await pageA.getByRole('heading',{name:'我的项目',exact:true}).waitFor();
-      assert.equal(await pageA.locator('.recent-list').getByRole('button',{name:/campus-multipage/}).count(),1);
+      assert.equal(await pageA.locator('.recent-list').getByRole('button',{name:project.name,exact:true}).count(),1);
 
       assert.deepEqual(await readFile(legacyPath),legacyFile);
       assert.equal(db.prepare('SELECT owner_user_id FROM projects WHERE id=?').pluck().get(legacy.id),null);

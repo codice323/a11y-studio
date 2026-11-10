@@ -6,10 +6,12 @@ import { collectPanorama, collectSite, panoramaInput, panoramaInventory, panoram
 import { imageVisionConfigured } from './ai/vision';
 import { missingImageEvidence } from './ai/visual-context';
 import { decideAiFinding, requestAiAudit } from './audit-ai';
-import {closeAccountSession,closeLive,operateLive,scanLive,startLive} from './live-comparison';
+import {closeAccountSession,closeLive,hasLiveProject,operateLive,scanLive,startLive} from './live-comparison';
 import {accountFor,authEndpoints,initializeAccounts,requireSession,verifyRequest} from './auth';
 import {cleanExpiredGuests,releaseGuestProject,useGuestBudget} from './guests';
-await initializeAccounts();
+import {eraseProjectRecords,flushProjectFiles,migrateProjectDeletion} from './project-deletion';
+await initializeAccounts(closeAccountSession);
+migrateProjectDeletion();
 const app = express();
 app.disable('x-powered-by');
 app.use(verifyRequest);
@@ -71,8 +73,41 @@ function guardResource(table:'audits'|'proposals'|'jobs') {
 app.use('/api/jobs/:id',guardResource('jobs'));
 app.use('/api/audits/:id',guardResource('audits'));
 app.use('/api/proposals/:id',guardResource('proposals'));
+class WorkspaceConflict extends Error {
+ constructor(message:string,readonly status:number) { super(message); }
+}
+const directWork = new Map<string,number>();
+const guestWork = new Map<string,number>();
+function hasQueuedWork(projectId:string) {
+ return Boolean(db.prepare("SELECT 1 FROM jobs WHERE project_id=? AND status IN ('queued','running')").get(projectId));
+}
+function ensureGuestCapacity(ownerId:string,lane:'direct'|'panorama'|'foreground') {
+ // The workspace preloads panorama evidence while users work on foreground repairs.
+ const busy=lane==='direct' ? (guestWork.get(ownerId)??0)>=2 : db.prepare(`SELECT 1 FROM jobs j JOIN projects p ON j.project_id=p.id
+   WHERE p.owner_user_id=? AND j.status IN ('queued','running') AND (j.type='panorama')=?`).get(ownerId,lane==='panorama'?1:0);
+ if (busy) throw new WorkspaceConflict('游客任务已达并发上限，请等待当前任务完成。',429);
+}
+async function projectWork<T>(projectId:string,res:express.Response,run:()=>Promise<T>) {
+ const user=accountFor(res).user;
+ if (user.isAnonymous) {ensureGuestCapacity(user.id,'direct');guestWork.set(user.id,(guestWork.get(user.id)??0)+1);}
+ directWork.set(projectId,(directWork.get(projectId)??0)+1);
+ try {return await run();}
+ finally {
+  const remaining=(directWork.get(projectId)??1)-1;
+  if (remaining) directWork.set(projectId,remaining);
+  else directWork.delete(projectId);
+  if (user.isAnonymous) {
+   const remainingGuest=(guestWork.get(user.id)??1)-1;
+   if (remainingGuest) guestWork.set(user.id,remainingGuest);
+   else guestWork.delete(user.id);
+  }
+ }
+}
 const controllers=new Map<string,AbortController>();
-function job(type:string,projectId:string,run:(signal:AbortSignal,progress:(message:string)=>void)=>Promise<any>){const jid=id(),controller=new AbortController();controllers.set(jid,controller);db.prepare('INSERT INTO jobs(id,type,status,result,error,created_at,project_id) VALUES(?,?,?,?,?,?,?)').run(jid,type,'queued',null,null,now(),projectId);setImmediate(async()=>{if(controller.signal.aborted){controllers.delete(jid);return;}db.prepare('UPDATE jobs SET status=? WHERE id=?').run('running',jid);try{const result=await run(controller.signal,message=>db.prepare("UPDATE jobs SET result=? WHERE id=? AND status='running'").run(JSON.stringify({progress:message}),jid));db.prepare('UPDATE jobs SET status=?,result=? WHERE id=?').run(controller.signal.aborted?'cancelled':'completed',JSON.stringify(result),jid)}catch(error){db.prepare('UPDATE jobs SET status=?,error=? WHERE id=?').run(controller.signal.aborted?'cancelled':'failed',(error as Error).message,jid)}finally{controllers.delete(jid)}});return {id:jid,kind:'job',type,status:'queued'};}
+function job(type:string,projectId:string,run:(signal:AbortSignal,progress:(message:string)=>void)=>Promise<any>){const owner=db.prepare(`SELECT u.id,u.isAnonymous FROM projects p
+ JOIN user u ON u.id=p.owner_user_id WHERE p.id=?`).get(projectId) as {id:string;isAnonymous:number}|undefined;
+ if (owner?.isAnonymous) ensureGuestCapacity(owner.id,type==='panorama'?'panorama':'foreground');
+ const jid=id(),controller=new AbortController();controllers.set(jid,controller);db.prepare('INSERT INTO jobs(id,type,status,result,error,created_at,project_id) VALUES(?,?,?,?,?,?,?)').run(jid,type,'queued',null,null,now(),projectId);setImmediate(async()=>{if(controller.signal.aborted){controllers.delete(jid);return;}db.prepare('UPDATE jobs SET status=? WHERE id=?').run('running',jid);try{const result=await run(controller.signal,message=>db.prepare("UPDATE jobs SET result=? WHERE id=? AND status='running'").run(JSON.stringify({progress:message}),jid));db.prepare('UPDATE jobs SET status=?,result=? WHERE id=?').run(controller.signal.aborted?'cancelled':'completed',JSON.stringify(result),jid)}catch(error){db.prepare('UPDATE jobs SET status=?,error=? WHERE id=?').run(controller.signal.aborted?'cancelled':'failed',(error as Error).message,jid)}finally{controllers.delete(jid)}});return {id:jid,kind:'job',type,status:'queued'};}
 app.get('/api/status',(_req,res)=>res.json({configured:!!process.env.AI_API_KEY,visionConfigured:imageVisionConfigured()}));
 app.get('/api/fixtures',(_req,res)=>res.json([{id:'demo-mixed',name:'慢绿生活',description:'图片、按钮、表单与对比度综合示例'},{id:'demo-form',name:'课程报名',description:'表单可访问名称示例'},{id:'demo-contrast',name:'自然笔记',description:'文字对比度示例'}]));
 app.get('/api/projects',(_req,res)=>res.json(db.prepare(`SELECT p.id,p.name,p.entry,p.mode,p.current_snapshot AS currentSnapshot,p.created_at AS createdAt,
@@ -112,6 +147,24 @@ app.use('/api/projects/:id/audits/:auditId',(req,res,next)=>{
  next();
 });
 app.get('/api/projects/:id',(req,res,next)=>{try{res.json(state(req.params.id));}catch(e){next(e)}});
+app.patch('/api/projects/:id',(req,res)=>{
+ const name=typeof req.body?.name==='string'?req.body.name.trim():'';
+ if (!name || [...name].length>120 || /[\u0000-\u001f\u007f]/.test(name)) return res.status(400).json({error:'项目名称须为 1–120 个字符。'});
+ db.prepare('UPDATE projects SET name=?,updated_at=? WHERE id=? AND owner_user_id=?')
+  .run(name,now(),req.params.id,accountFor(res).user.id);
+ res.json({name});
+});
+app.delete('/api/projects/:id',(req,res)=>{
+ const projectId=req.params.id;
+ if (hasQueuedWork(projectId) || directWork.has(projectId) || hasLiveProject(projectId)) {
+  return res.status(409).json({error:'请先结束项目任务并关闭实时对比，再删除项目。'});
+ }
+ if (req.body?.confirm!==true) return res.status(400).json({error:'请先确认删除项目。'});
+ if (!db.transaction(eraseProjectRecords).immediate(projectId,accountFor(res).user.id)) return denyResource(res);
+ flushProjectFiles();
+ console.info('[account-security] project-delete 204');
+ res.sendStatus(204);
+});
 app.get('/api/projects/:id/compare', (req, res, next) => {
  const { left, right, issueId, selector } = req.query;
  if (typeof left !== 'string' || typeof right !== 'string' ||
@@ -123,15 +176,16 @@ app.get('/api/projects/:id/compare', (req, res, next) => {
  catch (error) { next(error); }
 });
 app.post('/api/projects/:id/live',async(req,res,next)=>{
- try{res.set('Cache-Control','no-store').status(201).json(await startLive(req.params.id,req.body,accountFor(res).user.id,accountFor(res).session.id));}catch(error){next(error);}
+ try{res.set('Cache-Control','no-store').status(201).json(await projectWork(req.params.id,res,()=>startLive(req.params.id,req.body,accountFor(res).user.id,accountFor(res).session.id)));}catch(error){next(error);}
 });
 app.post('/api/projects/:id/live/:session/action',async(req,res,next)=>{
- try{res.set('Cache-Control','no-store').json(await operateLive(req.params.id,req.params.session,req.body,accountFor(res).session.id));}catch(error){next(error);}
+ try{res.set('Cache-Control','no-store').json(await projectWork(req.params.id,res,()=>operateLive(req.params.id,req.params.session,req.body,accountFor(res).session.id)));}catch(error){next(error);}
 });
 app.post('/api/projects/:id/live/:session/scan/:side',async(req,res,next)=>{
  try{
   if(req.params.side!=='left'&&req.params.side!=='right')return res.status(400).json({error:'无效的比较侧。'});
-  res.set('Cache-Control','no-store').json(await scanLive(req.params.id,req.params.session,req.params.side,accountFor(res).session.id));
+  const side=req.params.side;
+  res.set('Cache-Control','no-store').json(await projectWork(req.params.id,res,()=>scanLive(req.params.id,req.params.session,side,accountFor(res).session.id)));
  }catch(error){next(error);}
 });
 app.delete('/api/projects/:id/live/:session',(req,res)=>{
@@ -184,12 +238,12 @@ app.get('/api/projects/:id/audits/:auditId/semantics',guestRead, async (req,res,
  if (typeof selector !== 'string' || !selector.trim() || selector.length > 2048) return res.status(400).json({error:'元素选择器无效。'});
  const controller = new AbortController();
  res.on('close', () => { if (!res.writableEnded) controller.abort(); });
- try { res.json(await inspectAuditElement(req.params.id, req.params.auditId, selector, controller.signal)); }
+ try { res.json(await projectWork(req.params.id,res,()=>inspectAuditElement(req.params.id, req.params.auditId, selector, controller.signal))); }
  catch (error) { if (!controller.signal.aborted) next(error); }
 });
 app.post('/api/projects/:id/audits/:auditId/ai-review', guestAi, async (req,res,next) => {
  if (req.body?.consent !== true) return res.status(400).json({error:'请确认将候选元素名称和上下文文本发送给模型服务。'});
- try { res.json(await requestAiAudit(req.params.id, req.params.auditId)); }
+ try { res.json(await projectWork(req.params.id,res,()=>requestAiAudit(req.params.id, req.params.auditId))); }
  catch (error) { next(error); }
 });
 app.patch('/api/projects/:id/audits/:auditId/ai-review/:findingId', (req,res,next) => {
@@ -202,10 +256,10 @@ app.post('/api/projects/:id/issues/:issueId/proposals',(req,res,next)=>{
 },async(req,res,next)=>{try{if(req.body?.sourceRepair===true&&['agent','manual'].includes(req.body.source)){
   const {id,issueId}=req.params;
   return res.status(202).json(job('source-repair',id,signal=>createSourceProposal(id,issueId,req.body.snapshotId,req.body.intent,signal,req.body.source==='manual',req.body.imagePurpose)));
- }const result=await createProposal(req.params.id,req.params.issueId,req.body);res.status('patch' in result?201:200).json(result);}catch(e){next(e)}});
+ }const result=await projectWork(req.params.id,res,()=>createProposal(req.params.id,req.params.issueId,req.body));res.status('patch' in result?201:200).json(result);}catch(e){next(e)}});
 app.get('/api/projects/:id/issues/:issueId/image-preview',guestRead,async(req,res,next)=>{
  try {
-  const evidence=await previewIssueImage(req.params.id,req.params.issueId,String(req.query.snapshot??''));
+  const evidence=await projectWork(req.params.id,res,()=>previewIssueImage(req.params.id,req.params.issueId,String(req.query.snapshot??'')));
   if(!evidence)return res.status(404).json({error:missingImageEvidence});
   const [header,body]=evidence.pixels.split(',',2);
   const mime=header.slice(5,header.indexOf(';'));
@@ -215,7 +269,7 @@ app.get('/api/projects/:id/issues/:issueId/image-preview',guestRead,async(req,re
 app.get('/api/proposals/:id/preview',guestRead,async(req,res,next)=>{
  const controller=new AbortController();
  res.on('close',()=>{if(!res.writableEnded)controller.abort();});
- try{res.set('Cache-Control','no-store').json(await previewProposal(req.params.id,controller.signal));}
+ try{res.set('Cache-Control','no-store').json(await projectWork(res.locals.resourceProjectId,res,()=>previewProposal(req.params.id,controller.signal)));}
  catch(error){if(!controller.signal.aborted)next(error);}
 });
 app.post('/api/proposals/:id/apply',(req,res,next)=>{try{proposal(req.params.id);res.status(202).json(job('verification',res.locals.resourceProjectId,signal=>applyProposal(req.params.id,signal,req.body?.semanticReviewed===true,req.body?.sourceReviewed===true)));}catch(e){next(e)}});
@@ -246,5 +300,5 @@ app.get('/api/projects/:id/export',guestRead,(req,res,next)=>{try{const report=s
  <h2>人工复核</h2><p>自动检测不能替代键盘、屏幕阅读器及语义检查。</p><ul>${(report.current?.incomplete||[]).map((i:any)=>`<li>${escape(i.help)} · ${i.count} 项</li>`).join('')}</ul><h2>版本历史</h2><ul>${report.snapshots.map((item,index)=>`<li>V${index} · ${escape(item.name)}</li>`).join('')}</ul><h2>跨版本验证记录</h2><pre>${escape(JSON.stringify(report.verifications,null,2))}</pre></body></html>`;entries['report/report.html']=strToU8(html);entries['report/verification-log.json']=strToU8(JSON.stringify(report.verifications,null,2));res.attachment('a11y-studio-'+p.id.slice(0,8)+'.zip');res.send(Buffer.from(zipSync(entries,{level:6}))); }catch(e){next(e)}});
 app.use('/api',(_req,res)=>denyResource(res));
 app.use(express.static(path.join(ROOT,'dist'),{index:'index.html'}));
-app.use((error:any,_req:express.Request,res:express.Response,_next:express.NextFunction)=>{console.error(error.message);if(!res.headersSent)res.status(400).json({error:error.code==='LIMIT_FILE_SIZE'?'上传文件超过 8 MB 限制。':error.message||'处理失败。'});});
+app.use((error:any,_req:express.Request,res:express.Response,_next:express.NextFunction)=>{if (!(error instanceof WorkspaceConflict)) console.error(error.message);if(!res.headersSent)res.status(error instanceof WorkspaceConflict ? error.status : 400).json({error:error.code==='LIMIT_FILE_SIZE'?'上传文件超过 8 MB 限制。':error.message||'处理失败。'});});
 app.listen(port,'127.0.0.1',()=>console.log(`A11y Studio: http://127.0.0.1:${port}`));

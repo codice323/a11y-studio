@@ -92,6 +92,10 @@ export function closeLive(project:string,key:string,authSessionId:string) {
   if (session?.project === project && session.authSessionId === authSessionId) session.controller.abort();
 }
 
+export function hasLiveProject(projectId:string) {
+  return [...sessions.values()].some(session=>session.project===projectId);
+}
+
 export function closeAccountSession(authSessionId:string) {
   for (const session of sessions.values()) if (session.authSessionId === authSessionId) session.controller.abort();
 }

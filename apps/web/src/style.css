@@ -581,3 +581,12 @@ footer { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 8p
 .account-entry-actions { display: grid; grid-auto-flow: column; grid-auto-columns: 1fr; gap: 8px; }
 .account-guest-label { padding: 4px 8px; border-radius: 6px; background: #e8f0ff; color: #204782; font-size: 13px; }
 .account-guest-notice { margin: 0; padding: 8px 12px; border-radius: 8px; background: #e8f0ff; color: #204782; font-size: 13px; }
+
+.account-upgrade-dialog { padding: 0; border: 0; border-radius: 12px; background: transparent; width: min(420px, calc(100% - 32px)); }
+.account-upgrade-dialog::backdrop { background: rgb(15 23 42 / 55%); }
+.account-upgrade-dialog .account-card { width: 100%; }
+.account-password { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; align-items: end; }
+.account-guest-notice button { margin: 2px 0; min-height: 32px; }
+.account-project-row { min-width: 0; }
+.recent-list .account-project-actions { display: flex; gap: 12px; }
+.recent-list .account-project-actions button { width: auto; border-bottom: 0; min-height: 32px; color: var(--blue); }

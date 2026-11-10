@@ -354,7 +354,7 @@ test('真实快照可双向对比，分叉及切换项目后仍使用正确的�
       const images = page.locator('.shots img');
       const summary = page.getByRole('region', { name: '版本差异摘要' });
       const open = async (name: string) => {
-        await page.locator('.recent-list').getByRole('button', { name }).click();
+        await page.locator('.recent-list').getByRole('button', { name, exact:true }).click();
       };
       const show = async (name: string) => {
         if (name === '代码变更' && !await evidence.locator('.developer-options').evaluate(element => (element as HTMLDetailsElement).open)) {
@@ -422,7 +422,7 @@ test('真实快照可双向对比，分叉及切换项目后仍使用正确的�
       const branchState = await api(route);
       assert.equal(branchState.snapshots.find((snapshot: { id: string }) => snapshot.id === branch).parent_id, v1);
       await page.reload();
-      await open('慢绿生活');
+      await page.getByRole('heading',{name:'网页无障碍工作台',exact:true}).waitFor();
       assert.equal(await left.inputValue(), v0);
       assert.equal(await right.inputValue(), branch);
       assert.equal(await left.locator('option').count(), 5);
@@ -440,7 +440,7 @@ test('真实快照可双向对比，分叉及切换项目后仍使用正确的�
       const other = await create('demo-form');
       const otherRoot = (await api(other)).originalSnapshotId;
       assert.equal((await fetch(base + '/api' + other + `/compare?left=${v3}&right=${otherRoot}`)).status, 400);
-      await page.reload();
+      await page.goto(base);
       await open('课程报名');
       assert.equal(await left.inputValue(), otherRoot);
       assert.equal(await right.inputValue(), otherRoot);
