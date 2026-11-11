@@ -61,7 +61,8 @@ export type ExplorerGraph = {
   startedAt: string;
   elapsedMs: number;
   stop: 'running' | 'exhausted' | 'budget' | 'timeout' | 'cancelled';
-  planner: 'deterministic';
+  planner: 'deterministic' | 'deepseek';
+  planning?: {calls:number;elapsedMs:number;inputTokens:number;outputTokens:number;fallbacks:number};
   budget: {pages:number;states:number;actions:number;depth:number;durationMs:number};
   replayStepsReserved: number;
   maxContextConcurrency: number;

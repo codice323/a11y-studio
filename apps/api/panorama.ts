@@ -10,7 +10,7 @@ import { scanRules } from './scan-rules';
 import { inspectPageElement, withRepairPage, type ResourceFailure } from './scan';
 import { originAttribute, sourceSelector, type buildReactProject } from './project-build';
 import { DATA, db, hash, id, project, snapshot, snapshotDir, walk } from './storage';
-import { explorerBudget, explorerCandidates, explorerEligibility, explorerFingerprint } from './explorer';
+import { explorerBudget, explorerCandidates, explorerEligibility, explorerFingerprint, explorerPlanner, explorerPriority, stableExplorerFingerprint } from './explorer';
 import { latestSnapshotAudit, validSnapshots } from './version-state';
 
 const maxStates = 12;
@@ -30,7 +30,7 @@ const stepSchema = z.union([
 ]);
 
 type Checkpoint = { path: string; landmarks: string; interaction: string; focus: string; scrollY: number };
-type Recipe = { id: string; start: string; path: string; label: string; steps: PanoramaStep[]; checkpoints: Checkpoint[]; explorer?: true };
+type Recipe = { id: string; start: string; path: string; label: string; steps: PanoramaStep[]; checkpoints: Checkpoint[]; explorer?: true; stabilize?: true };
 type Captured = { capture: PanoramaCapture; checkpoints: Checkpoint[] };
 type Site = { dir: string; entry: string };
 
@@ -303,6 +303,7 @@ async function withReplay<T>(site: Site, recipe: Recipe, signal: AbortSignal, in
       const response = await page.goto(origin + documentPath(start), {waitUntil: 'load', timeout: 5000});
       if (!response?.ok()) throw new ReplayError('浏览器未成功加载页面。', 0);
     }
+    if (recipe.stabilize) await stableExplorerFingerprint(page,false,signal);
     const checkpoints = [await checkpoint(page)];
     if (recipe.checkpoints[0] && !checkpointMatches(recipe.checkpoints[0], checkpoints[0])) {
       throw new ReplayError('两个版本的起始页面无法可靠匹配。', 0);
@@ -314,6 +315,7 @@ async function withReplay<T>(site: Site, recipe: Recipe, signal: AbortSignal, in
       try {
         let activated = '';
         const invalid = await act(page, step, signal, selector => {activated = selector;});
+        if (recipe.stabilize) await stableExplorerFingerprint(page,step.action === 'tab' || step.action === 'shift-tab',signal);
         const actual = await checkpoint(page);
         if ('target' in step && step.navigationPath && actual.path !== step.navigationPath) throw new Error('导航后未到达所发现的页面。');
         const expected = recipe.checkpoints[index + 1];
@@ -775,24 +777,26 @@ function latestExploration(projectId:string, version:string): ExplorerGraph | un
 class KnownExplorerState extends Error {}
 
 export async function exploreSite(projectId:string, version:string, guest:boolean, signal:AbortSignal,
-  progress:(message:string, payload?:object)=>void) {
+  progress:(message:string, payload?:object)=>void, useAI=false) {
   const selected = site(projectId,version);
   const dynamic = project(projectId).mode === 'react-source';
   const budget = explorerBudget(guest);
+  const planner = explorerPlanner(useAI && !guest);
   const timeout = AbortSignal.timeout(budget.durationMs);
   const bounded = AbortSignal.any([signal,timeout]);
   const begin = performance.now();
   const graph: ExplorerGraph = {projectId,snapshotId:version,startedAt:new Date().toISOString(),elapsedMs:0,stop:'running',
-    planner:'deterministic',budget,replayStepsReserved:0,maxContextConcurrency:1,pages:[],nodes:[],edges:[],omitted:{},
+    planner:planner.enabled ? 'deepseek' : 'deterministic',planning:planner.stats,budget,replayStepsReserved:0,maxContextConcurrency:1,pages:[],nodes:[],edges:[],omitted:{},
     uncovered:[dynamic ? '未运行未标注的通用按钮、登录、远程请求、业务提交或跨站操作。'
       : '仅探索本地快照已保存的页面和原生交互，原站脚本及远程交互未覆盖。',
       '只探索能稳定识别的控件与状态；未发现的路由、超过候选限制的控件及人工体验检查不在覆盖范围内。']};
   const files = dynamic ? [selected.entry] : documents(selected);
   const pages = new Map<string,ExplorerGraph['pages'][number]>();
   const fingerprints = new Map<string,string>();
-  type Work = {recipe:Recipe;from:string|null;step?:PanoramaStep;depth:number};
+  const capturedPages = new Set<string>();
+  type Work = {recipe:Recipe;from:string|null;step?:PanoramaStep;depth:number;preferred?:boolean;retried?:boolean};
   const queue:Work[] = files.slice(0,budget.pages).map(start=>({from:null,depth:0,recipe:{
-    id:id(),start,path:documentPath(start),steps:[],checkpoints:[],label:'自主探索 · 初始页面',explorer:true,
+    id:id(),start,path:documentPath(start),steps:[],checkpoints:[],label:'自主探索 · 初始页面',explorer:true,stabilize:true,
   }}));
   const discover = (url:string) => {
     if (!pages.has(url)) {
@@ -813,12 +817,22 @@ export async function exploreSite(projectId:string, version:string, guest:boolea
   const pageSlots = new Set<string>();
   const queueLimit = budget.actions + budget.pages;
   const navigationSeen = new Set<string>();
-  for (const work of queue) {
+  let scheduled = queue.length;
+  while (queue.length) {
     if (bounded.aborted) break;
+    queue.sort((a,b)=>Number(Boolean(b.preferred))-Number(Boolean(a.preferred)) ||
+      (a.recipe.steps.length + explorerPriority(a.step)) - (b.recipe.steps.length + explorerPriority(b.step)));
+    const work = queue.shift()!;
     const {recipe,step,from,depth} = work;
     const pageRecord = discover(recipe.path);
     const edge:ExplorerGraph['edges'][number] = {from,path:recipe.path,step,status:'skipped'};
     graph.edges.push(edge);
+    if (!dynamic && step && 'navigationPath' in step && step.navigationPath &&
+        !step.navigationPath.includes('#') && capturedPages.has(recipe.path)) {
+      edge.reason = '同一静态页面已完成入口采集。';
+      graph.omitted['static-entry-covered'] = (graph.omitted['static-entry-covered'] ?? 0)+1;
+      continue;
+    }
     if (depth > budget.depth || graph.nodes.length >= budget.states || graph.replayStepsReserved + recipe.steps.length > budget.actions ||
         (!pageSlots.has(recipe.path) && pageAttempts >= budget.pages)) {
       edge.reason = '超出页面、状态、深度或操作预算。';
@@ -851,30 +865,40 @@ export async function exploreSite(projectId:string, version:string, guest:boolea
       save(projectId,version,recipe,evidence);
       recordAttempt(projectId,version,recipe.steps.length ? recipe.id : recipe.path,recipe.path,'completed');
       fingerprints.set(fingerprint,recipe.id);
+      capturedPages.add(recipe.path);
       graph.nodes.push({id:recipe.id,pageId:pageRecord.pageId,path:recipe.path,fingerprint,title:evidence.capture.title,
         captureId:shot,scannedAt:evidence.capture.scan?.completedAt,steps:recipe.steps});
       edge.to = recipe.id;
       edge.status = 'captured';
       for (const [name,count] of Object.entries(candidates!.omitted)) graph.omitted[name] = (graph.omitted[name] ?? 0)+count;
+      const added:Work[] = [];
       for (const candidate of candidates!.steps) {
-        const navigation = 'target' in candidate ? candidate.navigationPath : undefined;
+        if (step?.action === 'tab' && candidate.action !== 'tab') continue;
+        if ((candidate.action === 'fill' || candidate.action === 'validate') &&
+          recipe.steps.some(item=>JSON.stringify(item)===JSON.stringify(candidate))) continue;
+        if (recipe.steps.length >= 6) {budgetHit = true; break;}
+        if (candidate.action === 'tab' && recipe.steps.filter(item=>item.action === 'tab').length >= 3) continue;
+        const navigation = 'navigationPath' in candidate ? candidate.navigationPath : undefined;
         // Repeating the same route transition from every open menu or tab is not useful coverage.
         if (navigation) {
-          const key = dynamic ? JSON.stringify([recipe.path,navigation]) : navigation;
+          if (!dynamic && !navigation.includes('#') && capturedPages.has(navigation)) {
+            graph.omitted['static-entry-covered'] = (graph.omitted['static-entry-covered'] ?? 0)+1;
+            continue;
+          }
+          const key = dynamic ? JSON.stringify([recipe.path,navigation,'target' in candidate && candidate.target.name]) : navigation;
           if (navigation === recipe.path || !dynamic && !pages.has(navigation) || navigationSeen.has(key)) continue;
           navigationSeen.add(key);
         }
-        if (step?.action === 'tab' && candidate.action !== 'tab') continue;
-        if ((candidate.action === 'fill' || candidate.action === 'validate') &&
-          recipe.steps.some(item=>item.action === candidate.action)) continue;
-        if (recipe.steps.length >= 6) {budgetHit = true; break;}
-        if (candidate.action === 'tab' && recipe.steps.filter(item=>item.action === 'tab').length >= 3) continue;
         if (navigation) discover(navigation);
-        if (queue.length >= queueLimit) {budgetHit = true; break;}
-        queue.push({from:recipe.id,step:candidate,depth:depth+(navigation ? 1 : 0),recipe:{id:id(),start:recipe.start,
+        if (scheduled >= queueLimit) {budgetHit = true; break;}
+        scheduled++;
+        added.push({from:recipe.id,step:candidate,depth:depth+(navigation ? 1 : 0),recipe:{id:id(),start:recipe.start,
           path:navigation ?? recipe.path,steps:[...recipe.steps,candidate],checkpoints:recipe.checkpoints,
-          label:'自主探索 · '+('target' in candidate ? candidate.target.name : candidate.action === 'toggle-details' ? candidate.name : candidate.action),explorer:true}});
+          label:'自主探索 · '+('target' in candidate ? candidate.target.name : candidate.action === 'toggle-details' ? candidate.name : candidate.action),explorer:true,stabilize:true}});
       }
+      const preferred = await planner.choose(added.map(item=>item.step!),bounded);
+      if (preferred !== undefined) added[preferred].preferred = true;
+      queue.push(...added);
     } catch (error) {
       for (const kind of ['viewport','full']) fs.rmSync(screenshotPath(shot,kind),{force:true});
       if (error instanceof KnownExplorerState) {
@@ -883,6 +907,11 @@ export async function exploreSite(projectId:string, version:string, guest:boolea
         edge.status = bounded.aborted ? 'skipped' : 'failed';
         edge.reason = bounded.aborted ? '探索已停止，未完成此操作。' : safeText((error as Error).message.split('\n')[0].slice(0,300));
         if (!bounded.aborted && pageRecord.status !== 'visited') {pageRecord.status = 'failed';pageRecord.reason = edge.reason;}
+        const recoverable = /Target page, context or browser has been closed|Browser closed|持续变化/.test(edge.reason);
+        if (!bounded.aborted && !work.retried && recoverable && scheduled < queueLimit) {
+          scheduled++;
+          queue.push({...work,retried:true,recipe:{...recipe,id:id()}});
+        }
         if (fingerprint && !bounded.aborted) graph.nodes.push({id:recipe.id,pageId:pageRecord.pageId,path:recipe.path,
           fingerprint,title:recipe.label,error:edge.reason,steps:recipe.steps});
       }

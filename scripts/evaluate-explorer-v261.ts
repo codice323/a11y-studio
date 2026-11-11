@@ -37,8 +37,23 @@ createRoot(document.getElementById('root')!).render(<Dispatch/>);`
   labels:[['/dispatch','#dispatch-positive',true],['/dispatch','#dispatch-negative',false]]},
 ] satisfies {set:string;name:string;mode:string;files:Record<string,string>;pages:string[];states:[string,string][];labels:[string,string,boolean][]}[];
 
+const mockComparison=process.argv.includes('--planner-mock');
+const development=samples[0];
+const plannerSample={...development,name:'municipal-media-planning',files:{...development.files,
+  'films.html':development.files['films.html']!.replace('</main>','<details><summary>Credits</summary><p>Municipal media office</p></details></main>')},
+  states:[...development.states,['/films.html','Municipal media office']] as [string,string][]};
+const runs=mockComparison ? [{sample:plannerSample,model:false},{sample:plannerSample,model:true}]
+  : samples.map(sample=>({sample,model:false}));
+if (mockComparison) {
+  process.env.AI_API_KEY='benchmark-mock';
+  process.env.A11Y_EXPLORER_AI_CALLS='1';
+  globalThis.fetch=async ()=>Response.json({
+    choices:[{message:{content:'{"index":1}'}}],usage:{prompt_tokens:40,completion_tokens:5},
+  });
+}
+
 try {
-  for (const sample of samples) {
+  for (const {sample,model} of runs) {
     const project=id(),snapshot=id(),dir=snapshotDir(project,snapshot);
     for (const [name,value] of Object.entries(sample.files)) {
       fs.mkdirSync(path.dirname(path.join(dir,name)),{recursive:true});
@@ -46,7 +61,7 @@ try {
     }
     db.prepare('INSERT INTO projects (id,name,entry,current_snapshot,mode) VALUES(?,?,?,?,?)').run(project,sample.name,'index.html',snapshot,sample.mode);
     db.prepare('INSERT INTO snapshots (id,project_id,entry,hash) VALUES(?,?,?,?)').run(snapshot,project,'index.html',treeHash(dir));
-    const {graph}=await exploreSite(project,snapshot,false,new AbortController().signal,()=>{});
+    const {graph}=await exploreSite(project,snapshot,false,new AbortController().signal,()=>{},model);
     const evidence=(db.prepare('SELECT data FROM panorama_captures WHERE project_id=?').all(project) as {data:string}[])
       .map(row=>JSON.parse(row.data).capture);
     const labeled={tp:0,tn:0,fp:0,fn:0};
@@ -54,7 +69,7 @@ try {
       const found=evidence.some(item=>item.path===url && item.issues.some((issue:{ruleId:string;selector:string})=>issue.ruleId==='button-name' && issue.selector===selector));
       labeled[expected ? (found?'tp':'fn') : (found?'fp':'tn')]++;
     }
-    console.log(JSON.stringify({name:sample.name,set:sample.set,pages:[sample.pages.filter(url=>graph.pages.some(p=>p.path===url && p.status==='visited')).length,sample.pages.length],
+    console.log(JSON.stringify({name:sample.name,set:sample.set,planner:graph.planner,planning:graph.planning,pages:[sample.pages.filter(url=>graph.pages.some(p=>p.path===url && p.status==='visited')).length,sample.pages.length],
       states:[sample.states.filter(([url,ax])=>evidence.some(item=>item.path===url && item.ax.includes(ax))).length,sample.states.length],
       attempts:graph.edges.filter(edge=>edge.status!=='skipped').length,duplicates:graph.edges.filter(edge=>edge.status==='duplicate').length,
       failed:graph.edges.filter(edge=>edge.status==='failed').length,scanned:evidence.length,labeled,elapsedMs:graph.elapsedMs,stop:graph.stop,

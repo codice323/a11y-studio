@@ -1,3 +1,4 @@
+import { explorerPlanner } from './explorer';
 import express from 'express';import multer from 'multer';import fs from 'node:fs';import path from 'node:path';import {zipSync,strToU8} from 'fflate';import 'dotenv/config';
 import {db,id,now,ROOT,DATA,project,proposal,audit,snapshotDir,walk,safePath} from './storage';import {createProject} from './import';import {captureUrlSnapshot} from './url-snapshot';import {runAudit,inspectAuditElement} from './scan';import {createProposal,createSourceProposal,createPanoramaProposal,previewProposal,previewIssueImage,applyProposal,rejectProposal,rollback,getKnowledge} from './repair';
 import { projectState as state, renameSnapshot } from './version-state';
@@ -108,7 +109,7 @@ function job(type:string,projectId:string,run:(signal:AbortSignal,progress:(mess
  JOIN user u ON u.id=p.owner_user_id WHERE p.id=?`).get(projectId) as {id:string;isAnonymous:number}|undefined;
  if (owner?.isAnonymous) ensureGuestCapacity(owner.id,type==='panorama'?'panorama':'foreground');
  const jid=id(),controller=new AbortController();controllers.set(jid,controller);db.prepare('INSERT INTO jobs(id,type,status,result,error,created_at,project_id) VALUES(?,?,?,?,?,?,?)').run(jid,type,'queued',null,null,now(),projectId);setImmediate(async()=>{if(controller.signal.aborted){controllers.delete(jid);return;}db.prepare('UPDATE jobs SET status=? WHERE id=?').run('running',jid);try{const result=await run(controller.signal,(message,payload)=>db.prepare("UPDATE jobs SET result=? WHERE id=? AND status='running'").run(JSON.stringify({progress:message,...payload}),jid));db.prepare('UPDATE jobs SET status=?,result=? WHERE id=?').run(controller.signal.aborted?'cancelled':'completed',JSON.stringify(result),jid)}catch(error){db.prepare('UPDATE jobs SET status=?,error=? WHERE id=?').run(controller.signal.aborted?'cancelled':'failed',(error as Error).message,jid)}finally{controllers.delete(jid)}});return {id:jid,kind:'job',type,status:'queued'};}
-app.get('/api/status',(_req,res)=>res.json({configured:!!process.env.AI_API_KEY,visionConfigured:imageVisionConfigured()}));
+app.get('/api/status',(_req,res)=>res.json({configured:!!process.env.AI_API_KEY,visionConfigured:imageVisionConfigured(),explorerPlanning:explorerPlanner(true).enabled}));
 app.get('/api/fixtures',(_req,res)=>res.json([{id:'demo-mixed',name:'慢绿生活',description:'图片、按钮、表单与对比度综合示例'},{id:'demo-form',name:'课程报名',description:'表单可访问名称示例'},{id:'demo-contrast',name:'自然笔记',description:'文字对比度示例'}]));
 app.get('/api/projects',(_req,res)=>res.json(db.prepare(`SELECT p.id,p.name,p.entry,p.mode,p.current_snapshot AS currentSnapshot,p.created_at AS createdAt,
  COALESCE(s.name,s.description) AS versionName,
@@ -231,7 +232,7 @@ app.post('/api/projects/:id/explore',(req,res,next)=>{
   }
   const version = project(projectId).current_snapshot;
   const guest = Boolean(accountFor(res).user.isAnonymous);
-  res.status(202).json(job('explorer',projectId,(signal,progress)=>exploreSite(projectId,version,guest,signal,progress)));
+  res.status(202).json(job('explorer',projectId,(signal,progress)=>exploreSite(projectId,version,guest,signal,progress,req.body?.planner === 'deepseek')));
  } catch (error) { next(error); }
 });
 app.post('/api/projects/:id/panorama/proposals',(req,res,next)=>{

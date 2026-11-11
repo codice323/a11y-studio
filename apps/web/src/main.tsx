@@ -121,7 +121,7 @@ function App({account,signOut,openUpgrade,openVerification}:{account:Account;sig
     setCollapsed(next);
     try { localStorage.setItem(sidebarPreference,String(next)); } catch { /* This browser can still collapse the sidebar. */ }
   }
-  const [ai, setAi] = useState({ configured: false, visionConfigured: false });
+  const [ai, setAi] = useState({ configured: false, visionConfigured: false, explorerPlanning: false });
   const [versionNameDraft, setVersionNameDraft] = useState<string | null>(null);
   const renameButton = useRef<HTMLButtonElement>(null);
   const versionNameInput = useRef<HTMLInputElement>(null);
@@ -354,11 +354,13 @@ function App({account,signOut,openUpgrade,openVerification}:{account:Account;sig
     });
   }
 
+  const [useExplorerAI,setUseExplorerAI] = useState(false);
+
   function startExploration() {
     if (!state) return;
     run('正在启动自动探索…', async () => {
       try {
-        const {graph} = await runJob<{graph:import('../../../packages/shared/panorama').ExplorerGraph}>('explorer',route + '/explore');
+        const {graph} = await runJob<{graph:import('../../../packages/shared/panorama').ExplorerGraph}>('explorer',route + '/explore',{planner:useExplorerAI ? 'deepseek' : 'deterministic'});
         if (!graph.nodes.some(node=>node.captureId)) {
           throw new Error('本轮未完成任何状态检测。请在结果报告查看失败原因后重试。');
         }
@@ -722,6 +724,10 @@ function App({account,signOut,openUpgrade,openVerification}:{account:Account;sig
                       });
                     }}>重命名</button>
                 </div>
+                {!account.isGuest && ai.explorerPlanning && <label className="explorer-planning">
+                  <input type="checkbox" checked={useExplorerAI} disabled={working} onChange={event=>setUseExplorerAI(event.target.checked)} />
+                  DeepSeek 优先排序
+                </label>}
                 {versionNameDraft !== null && <form className="version-rename" onSubmit={renameCurrentVersion}
                   onKeyDown={event => { if (event.key === 'Escape' && !working) { event.preventDefault(); closeRename(); } }}>
                   <input id="version-name" aria-label="版本名称" value={versionNameDraft} onChange={event => setVersionNameDraft(event.target.value)}
@@ -1149,7 +1155,8 @@ function Report({ state, onRollback, onOpen, onWorkspace, onExploreIssue, busy }
       {siteError ? <p role="status">页面与状态报告暂不可用。</p> : !site ? <p role="status">正在读取页面检测证据…</p> : <>
         {site.exploration && <details>
           <summary>自动探索记录 · {site.exploration.pages.length} 个已发现页面 · {site.exploration.nodes.filter(node=>node.captureId).length} 个已检测状态</summary>
-          <p>确定性探索 · {{running:'未结束',exhausted:'已处理候选操作',budget:'达到探索预算',timeout:'达到时间限制',cancelled:'用户停止'}[site.exploration.stop]} · {(site.exploration.elapsedMs / 1000).toFixed(1)} 秒</p>
+          <p>{site.exploration.planner === 'deepseek' ? 'DeepSeek 排序' : '确定性探索'} · {{running:'未结束',exhausted:'已处理候选操作',budget:'达到探索预算',timeout:'达到时间限制',cancelled:'用户停止'}[site.exploration.stop]} · {(site.exploration.elapsedMs / 1000).toFixed(1)} 秒</p>
+          {site.exploration.planning && site.exploration.planning.calls > 0 && <p>模型调用 {site.exploration.planning.calls} 次 · {site.exploration.planning.elapsedMs} ms · 回退 {site.exploration.planning.fallbacks} 次</p>}
           <ul>{site.exploration.uncovered.map(reason=><li key={reason}>{reason}</li>)}</ul>
           <ul>{site.exploration.pages.map(item=><li key={item.pageId}><code>{item.path}</code> · {{discovered:'已发现，未访问',visited:'浏览器已访问',failed:'访问失败'}[item.status]} {item.reason}</li>)}</ul>
           <ol>{site.exploration.edges.map((edge,index)=><li key={index}><code>{edge.path}</code> · {edge.step

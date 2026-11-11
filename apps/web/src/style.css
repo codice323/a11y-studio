@@ -144,6 +144,7 @@ input, select { min-width: 0; max-width: 100%; background: white; border: 1px so
 .project-title span { font-size: 12px; color: var(--muted); }
 .version-controls { display: grid; gap: 8px; min-width: 0; max-width: 100%; }
 .project-actions { display: grid; grid-template-columns: auto minmax(0, auto) auto; align-items: center; gap: 8px; }
+.explorer-planning { display: flex; align-items: center; gap: 6px; font-size: 13px; }
 .project-actions > :is(button, select) {
   height: 40px; min-height: 40px; border: 1px solid #cad7e9; border-radius: 8px;
   padding: 0 12px; font-size: 14px; font-weight: 670; line-height: 1.4; color: #244065; white-space: nowrap;

@@ -3,14 +3,16 @@ import { spawn } from 'node:child_process';
 import { once } from 'node:events';
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import net from 'node:net';
+import http from 'node:http';
+import {randomBytes} from 'node:crypto';
 import os from 'node:os';
 import path from 'node:path';
 import { test } from 'node:test';
 import { setTimeout as delay } from 'node:timers/promises';
-import { strToU8, zipSync } from 'fflate';
+import { strToU8, strFromU8, unzipSync, zipSync } from 'fflate';
 import { chromium } from 'playwright-core';
 import { campusFixtures } from '../scripts/campus-fixtures';
-import { attachTestAccount, registerTestAccount, testFetch } from './helpers/account';
+import { registerTestAccount, testFetch } from './helpers/account';
 import type { ExplorerGraph, PanoramaCapture } from '../packages/shared/panorama';
 
 const html = (body:string) => '<!doctype html><html lang="en"><head><title>Exhibit reservations</title></head><body>'+body+'</body></html>';
@@ -58,12 +60,28 @@ test('Chrome Explorer follows real campus and React paths, blocks unsafe actions
   const port = (probe.address() as net.AddressInfo).port;
   await new Promise<void>(resolve=>probe.close(()=>resolve()));
   const origin = 'http://127.0.0.1:'+port;
+  let mockCalls=0;
+  const mock=http.createServer(async (req,res)=>{
+    const chunks:Buffer[]=[];
+    for await (const chunk of req) chunks.push(chunk);
+    const request=JSON.parse(Buffer.concat(chunks).toString());
+    mockCalls++;
+    const tool = (id:string,name:string,args:object)=>({id,type:'function',function:{name,arguments:JSON.stringify(args)}});
+    const message=request.messages.some((item:{role:string})=>item.role==='tool')
+      ? {content:JSON.stringify({value:'Print terms',reason:'按钮用于打印弹窗中的票务条款。',needsReview:true})}
+      : {tool_calls:[tool('inspect','inspect_issue',{}),tool('search','search_wcag',{query:'button accessible name'})]};
+    res.setHeader('Content-Type','application/json');
+    res.end(JSON.stringify({choices:[{message}]}));
+  });
+  mock.listen(0,'127.0.0.1');
+  await once(mock,'listening');
   const service = spawn(process.execPath,['--import','tsx','apps/api/server.ts'],{env:{...process.env,
-    PORT:String(port),A11Y_DATA_DIR:data,AI_API_KEY:''},stdio:['ignore','ignore','pipe']});
+    PORT:String(port),A11Y_DATA_DIR:data,AI_API_KEY:'local-mock',AI_BASE_URL:'http://127.0.0.1:'+(mock.address() as net.AddressInfo).port},stdio:['ignore','ignore','pipe']});
   let errors='';
   service.stderr.on('data',part=>{errors+=part;});
   const browser = await chromium.launch({headless:true,executablePath:process.env.CHROME_PATH || '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome'});
   const context = await browser.newContext({viewport:{width:1440,height:1000}});
+  if(output) await context.tracing.start({screenshots:true,snapshots:true});
   const page = await context.newPage();
   const save = async (file:string,content:unknown) => {if(output) await writeFile(path.join(output,file),JSON.stringify(content,null,2));};
   const network:{path:string;method:string;status:number}[] = [];
@@ -102,8 +120,13 @@ test('Chrome Explorer follows real campus and React paths, blocks unsafe actions
       if(i>100 || service.exitCode!==null) throw new Error(errors || '启动超时');
       await delay(100);
     }
-    await registerTestAccount(origin);
-    await attachTestAccount(context,origin);
+    const credentials={email:'explorer-'+randomBytes(6).toString('hex')+'@example.test',password:randomBytes(9).toString('hex'),name:'Explorer test'};
+    await registerTestAccount(origin,credentials);
+    await page.goto(origin);
+    await page.getByLabel('邮箱',{exact:true}).fill(credentials.email);
+    await page.getByLabel('密码',{exact:true}).fill(credentials.password);
+    await page.getByRole('button',{name:'登录',exact:true}).click();
+    await page.getByRole('heading',{name:'我的项目',exact:true}).waitFor();
     const campus=await campusFixtures(path.join(data,'campus'));
     const campusId=await upload('campus-multipage.zip',await readFile(campus.zip),'ZIP');
     const campusResult=await explore(campusId);
@@ -138,7 +161,9 @@ test('Chrome Explorer follows real campus and React paths, blocks unsafe actions
     const detail=page.locator('details').filter({has:page.locator('summary').filter({hasText:'自主探索 · Ticket terms'})}).last();
     await detail.locator('summary').first().click();
     await detail.getByRole('button',{name:'在诊断中查看'}).first().click();
-    await page.locator('#repair-value').fill('Print terms');
+    await page.getByRole('button',{name:'AI 分析与修复'}).click();
+    await page.waitForFunction(()=>document.querySelector<HTMLInputElement>('#repair-value')?.value==='Print terms');
+    assert.equal(mockCalls,2);
     await page.getByRole('button',{name:'生成补丁预览'}).click();
     await page.getByRole('button',{name:'确认应用修复'}).click({timeout:55_000});
     await page.getByLabel('我已核对修复内容和页面用途，确认适合应用').check();
@@ -152,6 +177,13 @@ test('Chrome Explorer follows real campus and React paths, blocks unsafe actions
       !replay.issues.some(i=>i.ruleId==='button-name' && i.selector==='#print-terms'));
     assert.ok(replay.scan?.interaction?.findings.some(item=>item.ruleId==='modal-focus-entry'));
     if(output) await page.screenshot({path:path.join(output,'verified-repair.png'),fullPage:false});
+    const exported=await page.request.get(origin+'/api/projects/'+dynamicId+'/export');
+    assert.ok(exported.ok());
+    const zip=await exported.body();
+    const entries=unzipSync(zip);
+    assert.match(strFromU8(entries['source/src/index.tsx']),/aria-label\s*=\s*(?:["']Print terms["']|\{\s*["']Print terms["']\s*\})/);
+    assert.ok(entries['report/report.json']);
+    if(output) await writeFile(path.join(output,'verified-project.zip'),zip);
     const holdoutId=await upload('archive-holdout.zip',archive({
       'index.html':html('<main><h1>Local history</h1><a href="guides/index.html">Reading guides</a></main>'),
       'guides/index.html':html('<main><h1>Reading guides</h1><a href="../index.html">Local history</a>'+
@@ -188,6 +220,9 @@ test('Chrome Explorer follows real campus and React paths, blocks unsafe actions
     throw error;
   } finally {
     await save('network.json',network);
+    await save('model-mock.json',{calls:mockCalls,externalCalls:0});
+    mock.close();
+    if(output) await context.tracing.stop({path:path.join(output,'exploration-trace.zip')});
     await browser.close();
     if (service.exitCode===null) {service.kill();await once(service,'exit');}
     await rm(data,{recursive:true,force:true});

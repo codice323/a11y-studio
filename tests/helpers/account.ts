@@ -17,9 +17,8 @@ export function testFetch(input:string | URL, options:RequestInit = {}) {
   return plainFetch(input,{...options,headers});
 }
 
-export async function registerTestAccount(base:string) {
+export async function registerTestAccount(base:string, credentials = {email:'test-'+randomBytes(8).toString('hex')+'@example.test',password:randomBytes(9).toString('hex'),name:'Test workspace'}) {
   if (sessions.has(base)) return;
-  const credentials = {email:'test-'+randomBytes(8).toString('hex')+'@example.test',password:randomBytes(9).toString('hex'),name:'Test workspace'};
   const post = (endpoint:string) => plainFetch(base+'/api/auth/'+endpoint,{method:'POST',headers:{
     'content-type':'application/json',origin:base,
   },body:JSON.stringify(credentials)});

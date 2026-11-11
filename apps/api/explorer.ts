@@ -84,11 +84,12 @@ export async function explorerCandidates(page: Page, controls: Control[], dynami
 }
 
 export async function explorerFingerprint(page: Page, includeFocus: boolean) {
-  const evidence = await page.evaluate(focus => {
+  return page.evaluate(focus => {
     const groups = [
       'h1,h2,main,nav,form', 'dialog[open],[role=dialog],[role=alertdialog]', 'details[open]',
       '[popover]:popover-open', '[aria-expanded=true]', '[role=tab][aria-selected=true]',
       '[role=tabpanel]', '[aria-invalid=true],:user-invalid', '[role=status],[role=alert]',
+      'a[href],button,input,select,textarea,[tabindex],[aria-current],[aria-pressed]',
     ];
     const locator = { position(node:Element) {
       const parts:string[] = [];
@@ -101,11 +102,74 @@ export async function explorerFingerprint(page: Page, includeFocus: boolean) {
       if (!node.getClientRects().length || getComputedStyle(node).visibility === 'hidden') return [];
       // Avoid unstable IDs, input values, long content and volatile numeric fragments.
       const text = node.matches('details') ? node.querySelector(':scope > summary')?.textContent
-        : node.matches('h1,h2,summary,[role=tab],[role=status],[role=alert]') ? node.textContent : '';
+        : node.matches('h1,h2,summary,a,button,[role=tab],[role=tabpanel],[role=status],[role=alert]') ? node.textContent : '';
       const name = (node.getAttribute('aria-label') || text || '').trim().replace(/\s+/g,' ').replace(/\d+/g,'#').slice(0,90);
-      return [[locator.position(node),node.getAttribute('role'),name]];
+      return [[locator.position(node),node.getAttribute('role'),name,
+        ...['href','aria-expanded','aria-selected','aria-pressed','aria-current','disabled','aria-disabled'].map(attr=>node.getAttribute(attr))]];
     }));
-    return [states,focus && document.activeElement ? locator.position(document.activeElement) : ''];
+    return JSON.stringify([states,focus && document.activeElement ? locator.position(document.activeElement) : '']);
   }, includeFocus);
-  return JSON.stringify(evidence);
+
+}
+
+// Wait for two consecutive matching DOM samples after the existing interaction delay.
+export async function stableExplorerFingerprint(page: Page, focus: boolean, signal: AbortSignal) {
+  let previous = await explorerFingerprint(page,focus);
+  for (let attempt=0;attempt<4;attempt++) {
+    signal.throwIfAborted();
+    await page.waitForTimeout(75);
+    const next = await explorerFingerprint(page,focus);
+    if (previous === next) return next;
+    previous = next;
+  }
+  throw new Error('页面交互状态持续变化，无法稳定采集。');
+}
+
+export function explorerPriority(step?: PanoramaStep) {
+  if (!step) return 0;
+  if ('navigationPath' in step && step.navigationPath) return 1;
+  if (step.action === 'fill') return 3;
+  if (step.action === 'tab' || step.action === 'shift-tab' || step.action === 'escape') return 4;
+  return 2;
+}
+
+type PlanningStats = {calls:number;elapsedMs:number;inputTokens:number;outputTokens:number;fallbacks:number};
+const configuredCalls = () => Math.min(10,Math.max(0,Math.floor(Number(process.env.A11Y_EXPLORER_AI_CALLS) || 0)));
+let processCalls = 0;
+
+export function explorerPlanner(requested:boolean) {
+  const key = process.env.AI_API_KEY;
+  const enabled = requested && Boolean(key) && processCalls < configuredCalls();
+  const stats:PlanningStats = {calls:0,elapsedMs:0,inputTokens:0,outputTokens:0,fallbacks:0};
+  return {enabled,stats,async choose(steps:PanoramaStep[],signal:AbortSignal) {
+    if (!enabled || stats.calls || processCalls >= configuredCalls() || steps.length < 2) return;
+    const candidates = steps.slice(0,24).map((step,index)=>({
+      index,action:step.action,role:'target' in step ? step.target.role : undefined,
+      navigation:'navigationPath' in step && Boolean(step.navigationPath),
+    }));
+    stats.calls++;
+    processCalls++;
+    const start = performance.now();
+    try {
+      const base = (process.env.AI_BASE_URL || 'https://api.deepseek.com').replace(/\/$/,'');
+      const response = await fetch(base+'/chat/completions',{
+        method:'POST',redirect:'error',headers:{'Authorization':'Bearer '+key,'Content-Type':'application/json'},
+        signal:AbortSignal.any([signal,AbortSignal.timeout(4000)]),
+        body:JSON.stringify({model:process.env.AI_MODEL || 'deepseek-chat',max_tokens:32,temperature:0,
+          messages:[{role:'system',content:'Choose the next interaction most likely to expose a distinct accessibility state. Return only a JSON object with an integer index.'},
+            {role:'user',content:JSON.stringify(candidates)}]}),
+      });
+      if (!response.ok) throw new Error('Planner response unavailable');
+      const result = await response.json();
+      stats.inputTokens = Number(result.usage?.prompt_tokens) || 0;
+      stats.outputTokens = Number(result.usage?.completion_tokens) || 0;
+      const index:unknown = JSON.parse(result.choices?.[0]?.message?.content ?? '').index;
+      if (typeof index !== 'number' || !Number.isInteger(index) || index<0 || index>=candidates.length) throw new Error('Invalid candidate index');
+      return index;
+    } catch {
+      stats.fallbacks++;
+    } finally {
+      stats.elapsedMs += Math.round(performance.now()-start);
+    }
+  }};
 }
