@@ -27,9 +27,9 @@ export type PageInspection = {
 };
 export type PanoramaJump = {stateId: string; left: string; right: string; key: string};
 
-export function Panorama({state, onInspection, disabled, jump, pair: versions, view, onScope, targetId, scopeTargetId, viewTools, pageRequest, autoScanning}: {
+export function Panorama({state, onInspection, disabled, jump, pair: versions, view, onScope, targetId, scopeTargetId, viewTools, screenshotTools, pageRequest, autoScanning}: {
   autoScanning?:boolean; state: State; onInspection: (value: PageInspection) => void; disabled: boolean; jump?: PanoramaJump;
-  pair: VersionPair; view: EvidenceView; onScope:(scoped:boolean)=>void; targetId?:string; scopeTargetId?:string; viewTools?:ReactNode; pageRequest?:{path:string};
+  pair: VersionPair; view: EvidenceView; onScope:(scoped:boolean)=>void; targetId?:string; scopeTargetId?:string; viewTools?:(options:ReactNode)=>ReactNode; screenshotTools?:ReactNode; pageRequest?:{path:string};
 }) {
   const {project} = state;
   const {left, right} = versions;
@@ -261,13 +261,7 @@ export function Panorama({state, onInspection, disabled, jump, pair: versions, v
   }
 
   return <section className="panorama" aria-label="页面与状态">
-    <div className="panorama-bar page-comparison-toolbar" role="group" aria-label="页面和扫描操作">
-        <label>页面<select aria-label="页面" value={page} disabled={busy} onChange={event => choosePage(event.target.value)}>
-          {paths.map(path => <option key={path} value={path}>{pathNames.get(path) ? pathNames.get(path) + ' · ' : ''}{path}</option>)}
-        </select></label>
-    </div>
-    {viewTools}
-    <details className="comparison-advanced"><summary>高级选项</summary>
+    {viewTools?.(<div className="comparison-developer-controls">
       <label>交互状态<select aria-label="交互状态" value={active?.id ?? ''} disabled={busy || !states.length} onChange={event => selectRequest({stateId: event.target.value})}>
         {!active && <option value="">{listError ? '状态列表加载失败' : '尚未采集'}</option>}
         {states.map(recipe => {
@@ -290,7 +284,13 @@ export function Panorama({state, onInspection, disabled, jump, pair: versions, v
             {[50, 75, 100, 125, 150, 200].map(value => <option key={value} value={value}>{value}%</option>)}
           </select></label>
         </div>}
-    </details>
+    </div>)}
+    <div className="shot-options page-comparison-toolbar" role="group" aria-label="页面和截图排列">
+        {screenshotTools}
+        <select aria-label="页面" value={page} disabled={busy} onChange={event => choosePage(event.target.value)}>
+          {paths.map(path => <option key={path} value={path}>{pathNames.get(path) ? pathNames.get(path) + ' · ' : ''}{path}</option>)}
+        </select>
+    </div>
     {batchFailures.length > 0 && <details><summary>未完成 {batchFailures.length} 个页面检查</summary>
       <ul>{batchFailures.map(({page,reason},index)=><li key={index}>{page} · {reason}</li>)}</ul>
     </details>}

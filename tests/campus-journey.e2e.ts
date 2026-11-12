@@ -300,7 +300,7 @@ test('校园综合服务平台按用户操作顺序验收公开导入入口及�
         assert.equal(await panel.getByRole('region',{name:'当前状态问题'}).count(),0);
         await panel.locator('.shots img').nth(1).waitFor();
         await page.getByRole('tab',{name:'问题与历史'}).click();
-        await panel.getByText('高级选项',{exact:true}).click();
+        await panel.getByText('开发者选项',{exact:true}).click();
         await panel.getByRole('button',{name:'检测已发现页面'}).click();
         const expected = s.mode.id==='html'?1:6;
         await page.getByText(new RegExp('已检测 '+expected+'/'+expected+' 个已发现页面')).waitFor({timeout:125000});

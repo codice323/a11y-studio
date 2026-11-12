@@ -142,23 +142,22 @@ export function VersionComparison({ state, target, pair, onPair, view, onView, o
     </div>
     {versionsVisible && <ComparisonVersions state={state} pair={pair} onPair={onPair} busy={busy} />}
     <Panorama state={state} autoScanning={autoScanning} pair={pair} jump={jump} onInspection={onInspection} scopeTargetId={scopeTargetId} disabled={busy}
-      onScope={setScoped} targetId={target?.id} view={view} pageRequest={pageRequest} viewTools={<>
+      onScope={setScoped} targetId={target?.id} view={view} pageRequest={pageRequest} screenshotTools={!scoped && view === 'visual' && <>
+        {layouts.map(([id, label]) => <button key={id} type="button" aria-pressed={layout === id} onClick={() => setLayout(id)}>{label}</button>)}
+        <EnlargedComparison left={screenshot('left')} right={screenshot('right')} />
+      </>} viewTools={options => <>
         <div className="evidence-tabs comparison-view-tabs" role="group" aria-label="修复效果视图">
           {views.map(([id, label]) => <button key={id} type="button" aria-pressed={view === id} onClick={() => onView(id)}>{label}</button>)}
-          <details className="developer-options" data-active={view === 'diff'}><summary>开发者选项</summary><button type="button" aria-pressed={view === 'diff'} onClick={event => {
+          <details className="developer-options" data-active={view === 'diff'}><summary>开发者选项</summary><div className="developer-menu"><button type="button" aria-pressed={view === 'diff'} onClick={event => {
             event.currentTarget.closest('details')!.open = false;
             onView('diff');
-          }}>代码变更</button></details>
+          }}>代码变更</button>{options}</div></details>
         </div>
         {target && <details className="evidence-target"><summary>查看定位详情</summary><span>{target.ruleId}</span><code>{selector || '页面级问题'}</code></details>}
         {request?.error && <p className="comparison-status" role="status">{request.error} <button type="button" className="secondary" onClick={() => setRetry(retry + 1)}>重试对比</button></p>}
         {(!scoped || view === 'diff') && !request?.error && (left === right || same) && <p className="comparison-status muted">这两个版本暂无可检测差异。{left === right && '左右选择了同一版本。'}</p>}
       </>} />
     {!scoped && view === 'visual' && <>
-      <div className="shot-options" role="group" aria-label="截图排列">
-        {layouts.map(([id, label]) => <button key={id} type="button" aria-pressed={layout === id} onClick={() => setLayout(id)}>{label}</button>)}
-        <EnlargedComparison left={screenshot('left')} right={screenshot('right')} />
-      </div>
       <div className={layout === 'both' ? 'shots' : 'shots single-shot'}>
         {sides.filter(side => layout === 'both' || layout === side).map(side => {
           const shot = screenshot(side);

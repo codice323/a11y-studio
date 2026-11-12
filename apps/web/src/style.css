@@ -195,7 +195,7 @@ input, select { min-width: 0; max-width: 100%; background: white; border: 1px so
 .evidence-tabs button:hover:not(:disabled) { color: var(--blue); }
 .developer-options { position: relative; flex: 0 0 auto; }
 .developer-options summary { cursor: pointer; border-radius: 6px; padding: 9px 10px; font-size: 12px; font-weight: 650; color: #3b5072; }
-.developer-options > button { position: absolute; z-index: 3; top: 100%; right: 0; min-width: 120px; background: white; border: 1px solid var(--line); box-shadow: 0 3px 10px #223f6f24; }
+.developer-menu { position: absolute; z-index: 3; top: 100%; right: 0; width: min(300px, 75vw); padding: 6px; border-radius: 7px; background: white; border: 1px solid var(--line); box-shadow: 0 3px 10px #223f6f24; }
 .import-tabs { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); margin: 8px 0; }
 .list-tabs button span { font-variant-numeric: tabular-nums; }
 .filter-row { display: flex; align-items: center; justify-content: space-between; gap: 6px; padding: 0 12px 8px; font-size: 12px; color: var(--muted); }
@@ -614,9 +614,13 @@ footer { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 8p
 .project-title { flex-direction: row; justify-content: flex-start; align-items: center; flex-wrap: wrap; gap: 4px 10px; }
 .project-actions { grid-template-columns: minmax(0, auto) auto; }
 .project-more { position: relative; }
-.project-more summary, .comparison-advanced summary { padding: 6px 8px; cursor: pointer; }
-.project-more > div { position: absolute; z-index: 3; right: 0; display: grid; gap: 4px; padding: 6px; background: white; border: 1px solid var(--line); border-radius: 7px; white-space: nowrap; }
+.project-more summary { padding: 6px 8px; cursor: pointer; }
+.project-more > div { position: absolute; z-index: 3; right: 0; display: flex; width: max-content; gap: 4px; padding: 6px; background: white; border: 1px solid var(--line); border-radius: 7px; white-space: nowrap; }
 .diagnostic-status { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; margin-bottom: 8px; font-size: 13px; }
-.comparison-advanced { padding: 0 8px; font-size: 13px; }
+.project-more > div button { white-space: nowrap; }
+.comparison-developer-controls { padding: 6px 8px; font-size: 13px; }
+.shot-options.page-comparison-toolbar { display: flex; flex-wrap: wrap; align-items: center; padding: 4px 0; }
+.page-comparison-toolbar:has(.enlarge-comparison) { padding-inline: 12px; }
+.page-comparison-toolbar > select { margin-inline-start: auto; flex: 0 1 250px; width: auto; min-width: 0; max-width: 100%; text-overflow: ellipsis; }
 @media (min-width: 901px) { .workbench { --workbench-height: clamp(440px, calc(100dvh - 155px), 900px); } }
 @media (max-width: 600px) { .project-strip { grid-template-columns: minmax(0, 1fr); } }
