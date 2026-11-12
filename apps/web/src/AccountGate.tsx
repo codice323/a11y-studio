@@ -175,6 +175,7 @@ function SignIn({statusError,onSignIn,onCancel,onMail}:{statusError:string;onSig
         switchMode(false);
         setVerificationSent(Boolean(result.verificationRequired));
         setNotice(result.verificationRequired?'注册请求已处理。若邮箱可用于注册，请查收验证邮件。':'注册请求已处理，请使用邮箱和密码登录。');
+        if(result.verificationRequired)onMail?.({mode:'resend',email:address});
       } else {
         await accountRequest('sign-in/email',{email:address,password,rememberMe:true});
         const session = await accountRequest('get-session');
@@ -239,7 +240,7 @@ function SignIn({statusError,onSignIn,onCancel,onMail}:{statusError:string;onSig
       </div>
       {!register && <div className="account-entry-actions">
         <button className="secondary" type="button" disabled={Boolean(busy)} onClick={()=>onMail?.({mode:'forgot',email})}>忘记密码</button>
-        {verificationSent && <button className="secondary" type="button" disabled={Boolean(busy)} onClick={()=>onMail?.({mode:'resend',email})}>重发验证邮件</button>}
+        {verificationSent && <button className="secondary" type="button" disabled={Boolean(busy)} onClick={()=>onMail?.({mode:'resend',email})}>验证邮箱</button>}
       </div>}
       {!register && <small className="muted">游客数据临时保存 {guestLifetimeHours} 小时。</small>}
     </section>;

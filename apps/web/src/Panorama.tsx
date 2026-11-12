@@ -294,7 +294,7 @@ export function Panorama({state, onInspection, disabled, jump, pair: versions, v
     {batchFailures.length > 0 && <details><summary>未完成 {batchFailures.length} 个页面检查</summary>
       <ul>{batchFailures.map(({page,reason},index)=><li key={index}>{page} · {reason}</li>)}</ul>
     </details>}
-        {progress && scoped && <p role="status">正在准备页面… {job && <button type="button" className="secondary"
+        {progress && scoped && <p role="status" className="panorama-progress"><span>{progress}…</span> {job && <button type="button" className="secondary"
           onClick={() => void fetch('/api/jobs/' + job + '/cancel', {method: 'POST'})}>取消全景采集</button>}</p>}
         {listError && <p role="alert">{listError}</p>}
         {captureError && <p role="alert">全景采集未完成。{captureError}</p>}

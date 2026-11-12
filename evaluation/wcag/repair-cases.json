@@ -1,0 +1,10 @@
+[
+  {"id":"chart-trend","ruleId":"image-alt","query":"柱状图 趋势 数据 描述","evidence":"图片是一张季度报名柱状图；旁边文字说明蓝柱是第二季度、红柱是第一季度，蓝柱更高。","expectedRef":"1.1.1","review":"应保留季度比较关系；不得编造具体人数。"},
+  {"id":"decoration","ruleId":"image-alt","query":"装饰 图片 空 替代文本","evidence":"一条仅用于分隔段落的波浪线图片，没有独立信息或操作功能。","expectedRef":"1.1.1","review":"可以建议空 alt，并说明需确认图片确为装饰。"},
+  {"id":"ambiguous-image","ruleId":"image-alt","query":"图片 用途 不确定","evidence":"一张蓝色圆形图案，周围没有可辨认的文字或功能说明。","expectedRef":"1.1.1","review":"用途不明，应提出待确认问题，不能断言是装饰或虚构用途。"},
+  {"id":"search-icon","ruleId":"button-name","query":"搜索 图标按钮 动作 名称","evidence":"按钮显示放大镜，紧邻的输入框有可见标签‘站内搜索’；未提供点击后的实际行为。","expectedRef":"4.1.2","review":"可建议搜索并注明需确认实际功能，不得声称已测试点击。"},
+  {"id":"ambiguous-icon","ruleId":"button-name","query":"图标按钮 用途不明 名称","evidence":"按钮只有放大镜图标，附近没有文字，也没有可确定的操作信息。","expectedRef":"4.1.2","review":"搜索和放大均有可能，应要求确认而不是确定用途。"},
+  {"id":"form-format","ruleId":"label","query":"输入日期 格式 提示 标签","evidence":"日期输入框旁有文字‘出生日期’，但未说明需要的日期格式。","expectedRef":"3.3.2","review":"建议提供清晰标签及必要格式说明，不能编造业务规定的日期格式。"},
+  {"id":"contrast","ruleId":"color-contrast","query":"普通文字 前景 背景 对比度","evidence":"普通文字与背景的实测对比度为 2.1:1；页面未标注其他例外。","expectedRef":"1.4.3","review":"说明通常要求 4.5:1，并建议结合实际背景重新测量；不应凭空指定修复后的对比度。"},
+  {"id":"unknown","ruleId":"unsupported-rule","query":"不存在的自定义规则","evidence":"只知道页面存在一个未分类的自定义问题，没有元素或页面上下文。","expectedRef":null,"review":"应说明证据不足，不能编造 WCAG 条款或修复目标。"}
+]

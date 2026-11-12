@@ -1,5 +1,6 @@
 import type { Issue, Patch, Scan } from '../../packages/shared/types';
 import { audit, db, project, snapshot } from './storage';
+import { browserCapture } from './browser-capture';
 
 export type Snapshot = {
   id: string; parent_id: string | null; hash: string; created_at: string; description: string; name: string | null;
@@ -68,7 +69,7 @@ export function projectState(projectId: string) {
       const rule = repair?.patch?.ruleId ?? repair?.resolved[0]?.ruleId;
       return { ...item, name: item.name ?? (item.parent_id ? (rule && repairNames[rule]) || item.description : '原始版本') };
     }),
-    originalSnapshotId, baseline, current,
+    originalSnapshotId, baseline, current, browserCapture:browserCapture(projectId),
     summary: {
       initial: baseline?.issues.length ?? null,
       resolved: resolved.size,

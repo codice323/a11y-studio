@@ -6,6 +6,7 @@ import ipaddr from 'ipaddr.js';
 import * as cheerio from 'cheerio';
 import postcss from 'postcss';
 import fs from 'node:fs';
+import { brotliDecompressSync, gunzipSync, inflateSync } from 'node:zlib';
 import { chromium, type Browser } from 'playwright-core';
 
 const MAX_HTML = 2 * 1024 * 1024;
@@ -22,6 +23,7 @@ const redirects = new Set([301, 302, 303, 307, 308]);
 type Address = { address: string; family: number };
 type Resource = { url: URL; type: string; contentType: string; body: Buffer };
 type Budget = { remaining: number };
+export type PublicBrowserBudget = { remaining: number; dnsFallbackCache?: DnsFallbackCache };
 
 export function isPublicAddress(address: string) {
   if (!isIP(address) || address.includes('%')) return false;
@@ -46,6 +48,77 @@ function parseUrl(input: string | URL) {
   return url;
 }
 
+export function parsePublicUrl(input: string | URL) {
+  const url=parseUrl(input);
+  try { url.hash=new URL(input).hash; } catch {}
+  return url;
+}
+
+export async function requestPublicBrowserResource(input:string, method:string, headers:Record<string,string>, body:Buffer|undefined,
+  budget:PublicBrowserBudget, total:AbortSignal, retryConnection = false) {
+  const url=parseUrl(input);
+  if (!['GET','HEAD','POST','PUT','PATCH','DELETE','OPTIONS'].includes(method)) throw new Error('采集浏览器暂不支持此类网络操作。');
+  if (body && body.length>2*1024*1024) throw new Error('网页请求内容超过采集限制。');
+  let addresses: Address[] | undefined;
+  const attempts = retryConnection && (method === 'GET' || method === 'HEAD') ? 2 : 1;
+  for (let attempt = 0; attempt < attempts; attempt++) {
+    total.throwIfAborted();
+    const signal = AbortSignal.any([total, AbortSignal.timeout(8000)]);
+    try {
+      budget.dnsFallbackCache ??= new Map();
+      addresses ??= await selectAddresses(url, signal, budget.dnsFallbackCache, true);
+      return await readBrowserResource(url, addresses[attempt % addresses.length], method, headers, body, budget, signal);
+    } catch (error) {
+      total.throwIfAborted();
+      const failure = error as {code?: string; cause?: {code?: string}};
+      const code = failure.code ?? failure.cause?.code ?? '';
+      if (!signal.aborted && !/^(?:ECONNRESET|ECONNREFUSED|ETIMEDOUT|EHOSTUNREACH|ENETUNREACH|EPIPE|UND_ERR_CONNECT_TIMEOUT|UND_ERR_SOCKET)$/.test(code)) throw error;
+      if (attempt + 1 === attempts) {
+        throw new Error(addresses ? '暂时无法连接目标网站，请点击重试。' : '公网 DNS 查询暂时失败，请点击重试。', { cause:error });
+      }
+    }
+  }
+  throw new Error('暂时无法加载目标网页，请点击重试。');
+}
+
+function readBrowserResource(url:URL, selected:Address, method:string, headers:Record<string,string>, body:Buffer|undefined,
+  budget:PublicBrowserBudget, signal:AbortSignal) {
+  const client=url.protocol==='https:'?https:http;
+  const allowed:Record<string,string>={accept:'*/*','accept-encoding':'identity','user-agent':'Mozilla/5.0 (compatible; A11yStudio/0.1)'};
+  for (const [name,value] of Object.entries(headers)) {
+    const key=name.toLowerCase();
+    if (/^(?:accept|accept-language|content-type|cookie|authorization|origin|referer|user-agent|sec-fetch-(?:dest|mode|site|user)|sec-ch-ua(?:-[a-z-]+)?|x-[a-z0-9-]{1,60})$/.test(key)) allowed[key]=value;
+  }
+  allowed['accept-encoding']='identity';
+  return new Promise<{status:number;headers:import('node:http').IncomingHttpHeaders;body:Buffer}>((resolve,reject)=>{
+    const request=client.request(url,{method,agent:false,family:selected.family,
+      lookup:(_host,_options,callback)=>callback(null,selected.address,selected.family),headers:allowed,signal},response=>{
+      const status=response.statusCode??502;
+      const rawLimit=5*1024*1024;
+      if(Number(response.headers['content-length'])>rawLimit){response.destroy();reject(new Error('网页响应超过采集限制。'));return;}
+      let bytes=0;const chunks:Buffer[]=[];
+      response.on('data',(chunk:Buffer)=>{bytes+=chunk.length;if(bytes>rawLimit){response.destroy();reject(new Error('网页响应超过采集限制。'));}else chunks.push(chunk);});
+      response.on('error',reject);
+      response.on('end',()=>{
+        try{
+          let result=Buffer.concat(chunks);
+          const encoding=String(response.headers['content-encoding']??'').toLowerCase();
+          if(encoding==='gzip')result=gunzipSync(result,{maxOutputLength:4*1024*1024});
+          else if(encoding==='deflate')result=inflateSync(result,{maxOutputLength:4*1024*1024});
+          else if(encoding==='br')result=brotliDecompressSync(result,{maxOutputLength:4*1024*1024});
+          else if(encoding&&encoding!=='identity')throw new Error('网页返回了暂不支持的压缩内容。');
+          if(result.length>4*1024*1024||budget.remaining-result.length<0)throw new Error('采集浏览器的网络流量已达上限。');
+          budget.remaining-=result.length;
+          resolve({status,headers:response.headers,body:result});
+        }catch(error){reject(error);}
+      });
+    });
+    request.on('error',reject);
+    if(body&&method!=='GET'&&method!=='HEAD')request.write(body);
+    request.end();
+  });
+}
+
 async function withAbort<T>(promise: Promise<T>, signal: AbortSignal) {
   signal.throwIfAborted();
   let abort: () => void = () => {};
@@ -65,12 +138,12 @@ async function withAbort<T>(promise: Promise<T>, signal: AbortSignal) {
 // Local proxy clients sometimes return synthetic 198.18/15 addresses for every domain.
 // Query a trusted public resolver only in that case; the resulting real IPs are still
 // checked and pinned. IP literals and ordinary private/mixed answers never fall back.
-async function resolveSyntheticHostname(hostname: string, signal: AbortSignal): Promise<Address[]> {
+async function resolveSyntheticHostname(hostname: string, signal: AbortSignal, provider = 'https://dns.alidns.com/resolve'): Promise<Address[]> {
   const records = await Promise.all(['A', 'AAAA'].map(async type => {
-    const url = new URL('https://dns.alidns.com/resolve');
+    const url = new URL(provider);
     url.searchParams.set('name', hostname);
     url.searchParams.set('type', type);
-    const response = await fetch(url, { signal, redirect: 'error', headers: { Accept: 'application/json' } });
+    const response = await fetch(url, { signal, redirect: 'error', headers: { Accept: 'application/dns-json, application/json' } });
     if (!response.ok) throw new Error('无法通过公共 DNS 解析网页地址。');
     const body = await response.arrayBuffer();
     if (body.byteLength > 65536) throw new Error('公共 DNS 响应过大。');
@@ -86,7 +159,7 @@ async function resolveSyntheticHostname(hostname: string, signal: AbortSignal): 
 }
 
 type DnsFallbackCache = Map<string, Promise<Address[]>>;
-async function selectAddress(url: URL, signal: AbortSignal, fallbackCache: DnsFallbackCache): Promise<Address> {
+async function selectAddresses(url: URL, signal: AbortSignal, fallbackCache: DnsFallbackCache, multipleResolvers = false): Promise<Address[]> {
   const hostname = url.hostname.replace(/^\[|\]$/g, '');
   const family = isIP(hostname);
   let addresses = family ? [{ address: hostname, family }]
@@ -99,13 +172,33 @@ async function selectAddress(url: URL, signal: AbortSignal, fallbackCache: DnsFa
     return ip instanceof ipaddr.IPv4 && ip.match(ipaddr.IPv4.parse('198.18.0.0'), 15);
   })) {
     let fallback = fallbackCache.get(hostname);
-    if (!fallback) { fallback = resolveSyntheticHostname(hostname, signal); fallbackCache.set(hostname, fallback); }
+    if (!fallback) {
+      fallback = multipleResolvers ? (async () => {
+        const results = await Promise.allSettled([
+          resolveSyntheticHostname(hostname, AbortSignal.any([signal, AbortSignal.timeout(4000)])),
+          resolveSyntheticHostname(hostname, AbortSignal.any([signal, AbortSignal.timeout(4000)]), 'https://doh.pub/dns-query'),
+        ]);
+        const lists = results.flatMap(result => result.status === 'fulfilled' ? [result.value] : []);
+        if (!lists.length) throw new Error('公网 DNS 查询暂时失败，请点击重试。');
+        const combined: Address[] = [];
+        for (let i = 0; i < Math.max(...lists.map(list => list.length)); i++) {
+          for (const list of lists) if (list[i] && !combined.some(item => item.address === list[i].address)) combined.push(list[i]);
+        }
+        return combined;
+      })() : resolveSyntheticHostname(hostname, signal);
+      fallbackCache.set(hostname, fallback);
+      void fallback.catch(() => { if (fallbackCache.get(hostname) === fallback) fallbackCache.delete(hostname); });
+    }
     addresses = await withAbort(fallback, signal);
   }
   if (!addresses.length || addresses.some(item => !item.family || !isPublicAddress(item.address))) {
     throw new Error('网页地址解析到内网、保留或其他非公网地址。');
   }
-  return addresses.find(item => item.family === 4) ?? addresses[0];
+  return [...addresses.filter(item => item.family === 4), ...addresses.filter(item => item.family !== 4)];
+}
+
+async function selectAddress(url: URL, signal: AbortSignal, fallbackCache: DnsFallbackCache): Promise<Address> {
+  return (await selectAddresses(url, signal, fallbackCache))[0];
 }
 
 function readResource(url: URL, selected: Address, maxBytes: number, budget: Budget, signal: AbortSignal) {

@@ -1,12 +1,14 @@
 import { workspaceFetch as fetch } from './workspace-fetch';
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import { Activity } from 'lucide-react';
 import type { compareSnapshots } from '../../api/version-compare';
 import { Panorama, type PageInspection, type PanoramaJump } from './Panorama';
 import type { EvidenceView } from './Evidence';
-import { EnlargedComparison, Screenshot, SemanticTable, type ScreenshotData } from './EvidenceDetails';
+import { EnlargedComparison, Screenshot, SemanticTable, syncScreenshotScroll, type ScreenshotData } from './EvidenceDetails';
 import { diffFile, PatchReview } from './PatchReview';
 import { inspectAudit, type Semantics } from './semantics';
 import { versionName, type Issue, type State } from './types';
+import { IssueImpactCard } from './IssueImpactCard';
 
 export type VersionPair = { left: string; right: string };
 type Comparison = ReturnType<typeof compareSnapshots>;
@@ -58,16 +60,19 @@ export function ComparisonVersions({state,pair,onPair,busy}: {
   </div>;
 }
 
-export function VersionComparison({ state, target, pair, onPair, view, onView, onHistory, jump, onInspection, scopeTargetId, busy, pageRequest, versionsVisible, autoScanning }: {
+export function VersionComparison({ state, target, pair, onPair, view, onView, onHistory, jump, onInspection, scopeTargetId, busy, pageRequest, versionsVisible, autoScanning, problem, impact }: {
   autoScanning?:boolean; state: State; target?: Issue; pair: VersionPair; onPair: (pair: VersionPair) => void;
   view: EvidenceView; onView: (view: EvidenceView) => void; onHistory?: () => void;
   jump?: PanoramaJump; onInspection:(value:PageInspection)=>void; scopeTargetId?:string; busy:boolean; versionsVisible:boolean; pageRequest?: {path:string};
+  problem: string; impact: string;
 }) {
   const [scoped, setScoped] = useState(Boolean(jump));
   const { left, right } = pair;
   const { id: projectId, currentSnapshot } = state.project;
   const { id: issueId, selector } = target ?? {};
   const [layout, setLayout] = useState<(typeof layouts)[number][0]>('both');
+  const [syncScroll, setSyncScroll] = useState(true);
+  const shotPanes = useRef<{left:HTMLDivElement|null;right:HTMLDivElement|null}>({left:null,right:null});
   const [retry, setRetry] = useState(0);
   const key = JSON.stringify([projectId, left, right, issueId, selector, state.current?.id, state.baseline?.id, retry]);
   const [result, setResult] = useState<{ key: string; data?: Comparison; error?: string }>();
@@ -137,13 +142,17 @@ export function VersionComparison({ state, target, pair, onPair, view, onView, o
   }
 
   return <section className="preview panel" aria-labelledby="evidence-title">
-    <div className="panel-head"><h2 id="evidence-title">修复效果对比</h2>
+    <div className="panel-head"><h2 id="evidence-title">修复效果对比</h2><div className="evidence-head-actions">
+      <a className="secondary evidence-live-link" href="#original-live"><Activity size={16} />实时操作原网页</a>
       {onHistory && <button type="button" className="secondary comparison-switch" onClick={onHistory}>返回本次修复证据</button>}
-    </div>
+    </div></div>
+    {target && <IssueImpactCard problem={problem} impact={impact} />}
+    <p className="evidence-state-note">当前画面是扫描时的证据。需要检查登录后、点击或滚动后的状态？进入实时操作后采集，系统会将该状态作为新项目导入。</p>
     {versionsVisible && <ComparisonVersions state={state} pair={pair} onPair={onPair} busy={busy} />}
     <Panorama state={state} autoScanning={autoScanning} pair={pair} jump={jump} onInspection={onInspection} scopeTargetId={scopeTargetId} disabled={busy}
       onScope={setScoped} targetId={target?.id} view={view} pageRequest={pageRequest} screenshotTools={!scoped && view === 'visual' && <>
         {layouts.map(([id, label]) => <button key={id} type="button" aria-pressed={layout === id} onClick={() => setLayout(id)}>{label}</button>)}
+        <label className="sync-scroll"><input type="checkbox" checked={syncScroll} disabled={layout !== 'both'} onChange={event => setSyncScroll(event.target.checked)} />同步滚动{layout !== 'both' && '（并排时生效）'}</label>
         <EnlargedComparison left={screenshot('left')} right={screenshot('right')} />
       </>} viewTools={options => <>
         <div className="evidence-tabs comparison-view-tabs" role="group" aria-label="修复效果视图">
@@ -161,7 +170,11 @@ export function VersionComparison({ state, target, pair, onPair, view, onView, o
       <div className={layout === 'both' ? 'shots' : 'shots single-shot'}>
         {sides.filter(side => layout === 'both' || layout === side).map(side => {
           const shot = screenshot(side);
-          return <Screenshot key={`${side}:${pair[side]}:${shot.src}`} {...shot} />;
+          return <Screenshot key={`${side}:${pair[side]}:${shot.src}`} {...shot}
+            onViewport={node => { shotPanes.current[side] = node; }}
+            onScroll={event => {
+              if (syncScroll && layout === 'both') syncScreenshotScroll(event.currentTarget, shotPanes.current[side === 'left' ? 'right' : 'left']);
+            }} />;
         })}
       </div>
     </>}

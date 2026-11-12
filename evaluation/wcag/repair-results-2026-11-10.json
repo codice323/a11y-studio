@@ -1,0 +1,672 @@
+{
+  "generatedAt": "2026-11-10T02:00:21.277Z",
+  "model": "deepseek-flash",
+  "live": true,
+  "failedRequests": 0,
+  "cases": [
+    {
+      "id": "chart-trend",
+      "ruleId": "image-alt",
+      "query": "柱状图 趋势 数据 描述",
+      "evidence": "图片是一张季度报名柱状图；旁边文字说明蓝柱是第二季度、红柱是第一季度，蓝柱更高。",
+      "expectedRef": "1.1.1",
+      "review": "应保留季度比较关系；不得编造具体人数。",
+      "retrieved": [
+        {
+          "id": "non-text-complex-chart",
+          "refs": [
+            "1.1.1"
+          ],
+          "url": "https://www.w3.org/WAI/WCAG22/Understanding/non-text-content.html"
+        },
+        {
+          "id": "non-text-functional",
+          "refs": [
+            "1.1.1"
+          ],
+          "url": "https://www.w3.org/WAI/WCAG22/Understanding/non-text-content.html"
+        },
+        {
+          "id": "non-text-content",
+          "refs": [
+            "1.1.1"
+          ],
+          "url": "https://www.w3.org/WAI/WCAG22/Understanding/non-text-content.html"
+        }
+      ],
+      "withoutRetrieval": {
+        "answer": {
+          "suggestion": "为图表图片提供替代文本，说明图表类型、比较对象和关键结论，例如 alt=\"季度报名柱状图：蓝色柱表示第二季度，红色柱表示第一季度，第二季度报名人数高于第一季度\"；若图表数据在相邻文字中已完整给出，可将图片标记为装饰性（alt=\"\"），避免重复朗读。",
+          "reason": "证据显示图片承载季度报名对比信息，且相邻文字仅说明颜色含义与高低关系，未完整呈现数据；需要为读屏用户提供等价信息。具体采用描述性 alt 还是装饰性 alt，取决于相邻文字是否已完整传达图表全部信息，需确认。",
+          "refs": [
+            "WCAG 1.1.1"
+          ]
+        },
+        "sourceIds": [],
+        "elapsedMs": 2071,
+        "usage": {
+          "prompt_tokens": 115,
+          "completion_tokens": 152,
+          "total_tokens": 267,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          },
+          "prompt_cache_hit_tokens": 0,
+          "prompt_cache_miss_tokens": 115
+        },
+        "referenceMatched": true,
+        "humanReview": {
+          "appropriate": null,
+          "reason": null
+        }
+      },
+      "withRetrieval": {
+        "answer": {
+          "suggestion": "为该柱状图提供能传达等价信息的文本替代，至少说明图表主题（季度报名）、两个数据系列（蓝柱为第二季度、红柱为第一季度）及比较关系（蓝柱高于红柱）；若图表包含具体数值或更多数据关系，应在替代文本或相邻正文中补充，具体数值需确认。",
+          "reason": "证据表明这是有信息含义的复杂图表，简短名称不足以覆盖数据关系；现有相邻文字仅说明颜色对应季度和蓝柱更高，未给出具体数值，因此替代文本应覆盖已知信息，数值部分需确认。",
+          "refs": [
+            "1.1.1"
+          ]
+        },
+        "sourceIds": [
+          "non-text-complex-chart",
+          "non-text-functional",
+          "non-text-content"
+        ],
+        "elapsedMs": 1748,
+        "usage": {
+          "prompt_tokens": 273,
+          "completion_tokens": 136,
+          "total_tokens": 409,
+          "prompt_tokens_details": {
+            "cached_tokens": 128
+          },
+          "prompt_cache_hit_tokens": 128,
+          "prompt_cache_miss_tokens": 145
+        },
+        "referenceMatched": true,
+        "humanReview": {
+          "appropriate": null,
+          "reason": null
+        }
+      }
+    },
+    {
+      "id": "decoration",
+      "ruleId": "image-alt",
+      "query": "装饰 图片 空 替代文本",
+      "evidence": "一条仅用于分隔段落的波浪线图片，没有独立信息或操作功能。",
+      "expectedRef": "1.1.1",
+      "review": "可以建议空 alt，并说明需确认图片确为装饰。",
+      "retrieved": [
+        {
+          "id": "non-text-content",
+          "refs": [
+            "1.1.1"
+          ],
+          "url": "https://www.w3.org/WAI/WCAG22/Understanding/non-text-content.html"
+        },
+        {
+          "id": "non-text-decorative",
+          "refs": [
+            "1.1.1"
+          ],
+          "url": "https://www.w3.org/WAI/WCAG22/Understanding/non-text-content.html"
+        },
+        {
+          "id": "non-text-functional",
+          "refs": [
+            "1.1.1"
+          ],
+          "url": "https://www.w3.org/WAI/WCAG22/Understanding/non-text-content.html"
+        }
+      ],
+      "withRetrieval": {
+        "answer": {
+          "suggestion": "若该波浪线图片确认为纯装饰（仅用于分隔段落、不传达信息、不可操作），建议为其提供空替代文本（alt=\"\"），使辅助技术忽略该图片；若该图片在页面语境中承载信息或功能，则需按实际用途提供等价替代文本，需人工确认其用途。",
+          "reason": "证据表明该图片仅用于分隔段落，没有独立信息或操作功能，符合装饰性图片特征，按规范可使用空 alt 让辅助技术忽略；但图片是否属于装饰需结合页面语境人工判断，故最终替代文本取决于确认结果。",
+          "refs": [
+            "1.1.1"
+          ]
+        },
+        "sourceIds": [
+          "non-text-content",
+          "non-text-decorative",
+          "non-text-functional"
+        ],
+        "elapsedMs": 2306,
+        "usage": {
+          "prompt_tokens": 267,
+          "completion_tokens": 140,
+          "total_tokens": 407,
+          "prompt_tokens_details": {
+            "cached_tokens": 128
+          },
+          "prompt_cache_hit_tokens": 128,
+          "prompt_cache_miss_tokens": 139
+        },
+        "referenceMatched": true,
+        "humanReview": {
+          "appropriate": null,
+          "reason": null
+        }
+      },
+      "withoutRetrieval": {
+        "answer": {
+          "suggestion": "将该图片视为装饰性图片：为其添加空的 alt 属性（alt=\"\"），并确保它不会被辅助技术朗读；如果该图片由 CSS 背景实现，则无需添加 alt。",
+          "reason": "证据表明该图片仅用于视觉分隔，不承载独立信息或操作功能，因此属于装饰性图片；按无障碍实践应使用空 alt 避免冗余朗读。给出的 WCAG 条款列表为空，故不引用具体条款编号。",
+          "refs": []
+        },
+        "sourceIds": [],
+        "elapsedMs": 1192,
+        "usage": {
+          "prompt_tokens": 105,
+          "completion_tokens": 103,
+          "total_tokens": 208,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          },
+          "prompt_cache_hit_tokens": 0,
+          "prompt_cache_miss_tokens": 105
+        },
+        "referenceMatched": false,
+        "humanReview": {
+          "appropriate": null,
+          "reason": null
+        }
+      }
+    },
+    {
+      "id": "ambiguous-image",
+      "ruleId": "image-alt",
+      "query": "图片 用途 不确定",
+      "evidence": "一张蓝色圆形图案，周围没有可辨认的文字或功能说明。",
+      "expectedRef": "1.1.1",
+      "review": "用途不明，应提出待确认问题，不能断言是装饰或虚构用途。",
+      "retrieved": [
+        {
+          "id": "non-text-functional",
+          "refs": [
+            "1.1.1"
+          ],
+          "url": "https://www.w3.org/WAI/WCAG22/Understanding/non-text-content.html"
+        },
+        {
+          "id": "non-text-content",
+          "refs": [
+            "1.1.1"
+          ],
+          "url": "https://www.w3.org/WAI/WCAG22/Understanding/non-text-content.html"
+        },
+        {
+          "id": "non-text-redundant-image",
+          "refs": [
+            "1.1.1"
+          ],
+          "url": "https://www.w3.org/WAI/WCAG22/Understanding/non-text-content.html"
+        }
+      ],
+      "withoutRetrieval": {
+        "answer": {
+          "suggestion": null,
+          "reason": "证据仅描述了一张蓝色圆形图案，未说明其用途、是否承载信息、是否为装饰性、是否位于链接/按钮内，也未提供周边文本或代码上下文，无法判断应提供替代文本还是标记为装饰性；需要确认该图像的功能与上下文（例如是否纯装饰、是否表达状态/品牌/操作含义、是否有相邻文字说明）。",
+          "refs": [
+            "1.1.1"
+          ]
+        },
+        "sourceIds": [],
+        "elapsedMs": 1614,
+        "usage": {
+          "prompt_tokens": 102,
+          "completion_tokens": 95,
+          "total_tokens": 197,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          },
+          "prompt_cache_hit_tokens": 0,
+          "prompt_cache_miss_tokens": 102
+        },
+        "referenceMatched": true,
+        "humanReview": {
+          "appropriate": null,
+          "reason": null
+        }
+      },
+      "withRetrieval": {
+        "answer": {
+          "suggestion": null,
+          "reason": "证据仅描述图片外观（蓝色圆形图案），未说明其用途、是否可点击、是否与相邻文字或控件重复，无法判断应提供描述性替代文本还是空 alt。需要确认该图片的功能角色（装饰、信息性还是控件）及其上下文。",
+          "refs": [
+            "1.1.1"
+          ]
+        },
+        "sourceIds": [
+          "non-text-functional",
+          "non-text-content",
+          "non-text-redundant-image"
+        ],
+        "elapsedMs": 1312,
+        "usage": {
+          "prompt_tokens": 265,
+          "completion_tokens": 76,
+          "total_tokens": 341,
+          "prompt_tokens_details": {
+            "cached_tokens": 128
+          },
+          "prompt_cache_hit_tokens": 128,
+          "prompt_cache_miss_tokens": 137
+        },
+        "referenceMatched": true,
+        "humanReview": {
+          "appropriate": null,
+          "reason": null
+        }
+      }
+    },
+    {
+      "id": "search-icon",
+      "ruleId": "button-name",
+      "query": "搜索 图标按钮 动作 名称",
+      "evidence": "按钮显示放大镜，紧邻的输入框有可见标签‘站内搜索’；未提供点击后的实际行为。",
+      "expectedRef": "4.1.2",
+      "review": "可建议搜索并注明需确认实际功能，不得声称已测试点击。",
+      "retrieved": [
+        {
+          "id": "button-icon-purpose",
+          "refs": [
+            "4.1.2"
+          ],
+          "url": "https://www.w3.org/WAI/WCAG22/Understanding/name-role-value.html"
+        },
+        {
+          "id": "name-role-value",
+          "refs": [
+            "4.1.2"
+          ],
+          "url": "https://www.w3.org/WAI/WCAG22/Understanding/name-role-value.html"
+        },
+        {
+          "id": "name-role-value-state",
+          "refs": [
+            "4.1.2"
+          ],
+          "url": "https://www.w3.org/WAI/WCAG22/Understanding/name-role-value.html"
+        }
+      ],
+      "withRetrieval": {
+        "answer": {
+          "suggestion": "为放大镜按钮提供可访问名称，名称需说明其实际执行的操作（例如“搜索”或“提交站内搜索”）；由于未提供点击后的实际行为，需先向作者确认该按钮是提交搜索、展开搜索框还是其他操作，再据此确定名称，避免仅凭图标猜测用途。",
+          "reason": "按钮仅有放大镜图标且无可访问名称，辅助技术无法获取其用途；相邻输入框的可见标签“站内搜索”只能说明界面上下文，不能替代按钮自身的名称，且点击后的实际行为未知，因此名称内容需向作者确认。",
+          "refs": [
+            "4.1.2"
+          ]
+        },
+        "sourceIds": [
+          "button-icon-purpose",
+          "name-role-value",
+          "name-role-value-state"
+        ],
+        "elapsedMs": 2273,
+        "usage": {
+          "prompt_tokens": 261,
+          "completion_tokens": 140,
+          "total_tokens": 401,
+          "prompt_tokens_details": {
+            "cached_tokens": 127
+          },
+          "prompt_cache_hit_tokens": 127,
+          "prompt_cache_miss_tokens": 134
+        },
+        "referenceMatched": true,
+        "humanReview": {
+          "appropriate": null,
+          "reason": null
+        }
+      },
+      "withoutRetrieval": {
+        "answer": {
+          "suggestion": "为按钮提供可访问名称，例如 aria-label=\"站内搜索\"（或与输入框标签一致的名称）；若按钮仅用于提交该搜索表单，也可使用 type=\"submit\" 并确保名称明确。不要仅依赖放大镜图标。",
+          "reason": "按钮的可访问名称缺失（仅有图标），屏幕阅读器无法获知用途；紧邻输入框的可见标签不能自动成为按钮名称。证据未说明点击行为，因此建议采用与可见标签一致的通用名称，避免编造具体功能。",
+          "refs": [
+            "WCAG 4.1.2",
+            "WCAG 1.1.1"
+          ]
+        },
+        "sourceIds": [],
+        "elapsedMs": 2163,
+        "usage": {
+          "prompt_tokens": 114,
+          "completion_tokens": 135,
+          "total_tokens": 249,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          },
+          "prompt_cache_hit_tokens": 0,
+          "prompt_cache_miss_tokens": 114
+        },
+        "referenceMatched": true,
+        "humanReview": {
+          "appropriate": null,
+          "reason": null
+        }
+      }
+    },
+    {
+      "id": "ambiguous-icon",
+      "ruleId": "button-name",
+      "query": "图标按钮 用途不明 名称",
+      "evidence": "按钮只有放大镜图标，附近没有文字，也没有可确定的操作信息。",
+      "expectedRef": "4.1.2",
+      "review": "搜索和放大均有可能，应要求确认而不是确定用途。",
+      "retrieved": [
+        {
+          "id": "button-icon-purpose",
+          "refs": [
+            "4.1.2"
+          ],
+          "url": "https://www.w3.org/WAI/WCAG22/Understanding/name-role-value.html"
+        },
+        {
+          "id": "name-role-value",
+          "refs": [
+            "4.1.2"
+          ],
+          "url": "https://www.w3.org/WAI/WCAG22/Understanding/name-role-value.html"
+        },
+        {
+          "id": "name-role-value-state",
+          "refs": [
+            "4.1.2"
+          ],
+          "url": "https://www.w3.org/WAI/WCAG22/Understanding/name-role-value.html"
+        }
+      ],
+      "withoutRetrieval": {
+        "answer": {
+          "suggestion": "为按钮提供可访问名称：若按钮用途确为搜索，添加 aria-label=\"搜索\"（或可见文字/视觉隐藏文字）；若用途无法确认，先向产品/设计确认按钮功能后再命名，不要猜测。",
+          "reason": "按钮仅含图标且无可访问名称，屏幕阅读器无法获知用途；需依据实际功能提供名称，证据不足以确定具体用途。",
+          "refs": [
+            "4.1.2",
+            "1.1.1"
+          ]
+        },
+        "sourceIds": [],
+        "elapsedMs": 1864,
+        "usage": {
+          "prompt_tokens": 104,
+          "completion_tokens": 103,
+          "total_tokens": 207,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          },
+          "prompt_cache_hit_tokens": 0,
+          "prompt_cache_miss_tokens": 104
+        },
+        "referenceMatched": true,
+        "humanReview": {
+          "appropriate": null,
+          "reason": null
+        }
+      },
+      "withRetrieval": {
+        "answer": {
+          "suggestion": "为按钮提供可访问名称，例如在按钮内添加视觉隐藏文本或设置 aria-label；名称需说明实际执行的操作（如“搜索”），但具体用途需向作者确认后再确定。",
+          "reason": "证据显示按钮仅有放大镜图标且附近无文字，辅助技术无法获取可确定的名称和用途；放大镜通常暗示搜索，但页面证据不足以确认该按钮的实际操作，因此名称内容需作者确认。",
+          "refs": [
+            "4.1.2"
+          ]
+        },
+        "sourceIds": [
+          "button-icon-purpose",
+          "name-role-value",
+          "name-role-value-state"
+        ],
+        "elapsedMs": 2099,
+        "usage": {
+          "prompt_tokens": 251,
+          "completion_tokens": 106,
+          "total_tokens": 357,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          },
+          "prompt_cache_hit_tokens": 0,
+          "prompt_cache_miss_tokens": 251
+        },
+        "referenceMatched": true,
+        "humanReview": {
+          "appropriate": null,
+          "reason": null
+        }
+      }
+    },
+    {
+      "id": "form-format",
+      "ruleId": "label",
+      "query": "输入日期 格式 提示 标签",
+      "evidence": "日期输入框旁有文字‘出生日期’，但未说明需要的日期格式。",
+      "expectedRef": "3.3.2",
+      "review": "建议提供清晰标签及必要格式说明，不能编造业务规定的日期格式。",
+      "retrieved": [
+        {
+          "id": "form-input-format",
+          "refs": [
+            "3.3.2"
+          ],
+          "url": "https://www.w3.org/WAI/WCAG22/Understanding/labels-or-instructions.html"
+        },
+        {
+          "id": "labels-or-instructions",
+          "refs": [
+            "3.3.2"
+          ],
+          "url": "https://www.w3.org/WAI/WCAG22/Understanding/labels-or-instructions.html"
+        },
+        {
+          "id": "info-and-relationships",
+          "refs": [
+            "1.3.1"
+          ],
+          "url": "https://www.w3.org/WAI/WCAG22/Understanding/info-and-relationships.html"
+        }
+      ],
+      "withRetrieval": {
+        "answer": {
+          "suggestion": "为“出生日期”输入框提供可见的格式说明（例如在标签或说明文字中写明期望的日期格式），并确保该说明与输入框在程序上关联（如通过 aria-describedby 或等效方式），使辅助技术用户也能获知格式要求。",
+          "reason": "证据显示输入框旁仅有“出生日期”文字，未说明所需日期格式；用户需要知道格式才能正确输入，因此应补充格式说明并与控件关联。具体格式文案和现有标签关联方式需结合表单实际代码确认。",
+          "refs": [
+            "3.3.2",
+            "1.3.1"
+          ]
+        },
+        "sourceIds": [
+          "form-input-format",
+          "labels-or-instructions",
+          "info-and-relationships"
+        ],
+        "elapsedMs": 1959,
+        "usage": {
+          "prompt_tokens": 251,
+          "completion_tokens": 133,
+          "total_tokens": 384,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          },
+          "prompt_cache_hit_tokens": 0,
+          "prompt_cache_miss_tokens": 251
+        },
+        "referenceMatched": true,
+        "humanReview": {
+          "appropriate": null,
+          "reason": null
+        }
+      },
+      "withoutRetrieval": {
+        "answer": {
+          "suggestion": "在“出生日期”标签或输入框的辅助说明中明确日期格式（例如“格式：YYYY-MM-DD”），并确保该说明与输入框通过 aria-describedby 关联；若使用占位符提示格式，需同时提供可见说明，避免仅依赖 placeholder。",
+          "reason": "证据仅表明标签旁有“出生日期”文字但未说明日期格式，属于对输入预期格式的提示缺失；建议补充可见格式说明并与输入框关联，以便所有用户（包括使用辅助技术的用户）获知格式要求。",
+          "refs": [
+            "3.3.2"
+          ]
+        },
+        "sourceIds": [],
+        "elapsedMs": 1704,
+        "usage": {
+          "prompt_tokens": 104,
+          "completion_tokens": 130,
+          "total_tokens": 234,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          },
+          "prompt_cache_hit_tokens": 0,
+          "prompt_cache_miss_tokens": 104
+        },
+        "referenceMatched": true,
+        "humanReview": {
+          "appropriate": null,
+          "reason": null
+        }
+      }
+    },
+    {
+      "id": "contrast",
+      "ruleId": "color-contrast",
+      "query": "普通文字 前景 背景 对比度",
+      "evidence": "普通文字与背景的实测对比度为 2.1:1；页面未标注其他例外。",
+      "expectedRef": "1.4.3",
+      "review": "说明通常要求 4.5:1，并建议结合实际背景重新测量；不应凭空指定修复后的对比度。",
+      "retrieved": [
+        {
+          "id": "contrast-minimum",
+          "refs": [
+            "1.4.3"
+          ],
+          "url": "https://www.w3.org/WAI/WCAG22/Understanding/contrast-minimum.html"
+        },
+        {
+          "id": "contrast-large-text",
+          "refs": [
+            "1.4.3"
+          ],
+          "url": "https://www.w3.org/WAI/WCAG22/Understanding/contrast-minimum.html"
+        }
+      ],
+      "withoutRetrieval": {
+        "answer": {
+          "suggestion": "提高普通文字与其背景之间的对比度，使对比度至少达到 4.5:1（例如加深文字颜色或调亮背景），并重新实测确认。",
+          "reason": "普通文字实测对比度仅 2.1:1，低于 WCAG AA 对普通文字 4.5:1 的最低要求；页面未标注大字号、装饰性文字等可适用例外，因此需按普通文字标准修复。",
+          "refs": [
+            "1.4.3"
+          ]
+        },
+        "sourceIds": [],
+        "elapsedMs": 1463,
+        "usage": {
+          "prompt_tokens": 111,
+          "completion_tokens": 107,
+          "total_tokens": 218,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          },
+          "prompt_cache_hit_tokens": 0,
+          "prompt_cache_miss_tokens": 111
+        },
+        "referenceMatched": true,
+        "humanReview": {
+          "appropriate": null,
+          "reason": null
+        }
+      },
+      "withRetrieval": {
+        "answer": {
+          "suggestion": "将普通文字与背景的对比度提高到至少 4.5:1（若该文字符合大文本定义，则至少 3:1），例如调整文字颜色或背景颜色；若认为存在标准例外，需提供并核验相应依据。",
+          "reason": "实测对比度为 2.1:1，低于普通文本通常要求的 4.5:1，也低于大文本通常要求的 3:1；页面未标注其他例外，因此需要提高对比度或确认并记录适用的例外。",
+          "refs": [
+            "1.4.3"
+          ]
+        },
+        "sourceIds": [
+          "contrast-minimum",
+          "contrast-large-text"
+        ],
+        "elapsedMs": 1852,
+        "usage": {
+          "prompt_tokens": 238,
+          "completion_tokens": 124,
+          "total_tokens": 362,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          },
+          "prompt_cache_hit_tokens": 0,
+          "prompt_cache_miss_tokens": 238
+        },
+        "referenceMatched": true,
+        "humanReview": {
+          "appropriate": null,
+          "reason": null
+        }
+      }
+    },
+    {
+      "id": "unknown",
+      "ruleId": "unsupported-rule",
+      "query": "不存在的自定义规则",
+      "evidence": "只知道页面存在一个未分类的自定义问题，没有元素或页面上下文。",
+      "expectedRef": null,
+      "review": "应说明证据不足，不能编造 WCAG 条款或修复目标。",
+      "retrieved": [],
+      "withRetrieval": {
+        "answer": {
+          "suggestion": null,
+          "reason": "证据仅说明存在未分类的自定义问题，缺少元素、页面上下文和具体表现，无法判断应如何修复；需要确认该问题的具体元素、触发条件、用户影响及期望行为后再提出建议。",
+          "refs": []
+        },
+        "sourceIds": [],
+        "elapsedMs": 1356,
+        "usage": {
+          "prompt_tokens": 106,
+          "completion_tokens": 58,
+          "total_tokens": 164,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          },
+          "prompt_cache_hit_tokens": 0,
+          "prompt_cache_miss_tokens": 106
+        },
+        "referenceMatched": true,
+        "humanReview": {
+          "appropriate": null,
+          "reason": null
+        }
+      },
+      "withoutRetrieval": {
+        "answer": {
+          "suggestion": null,
+          "reason": "证据仅说明存在未分类的自定义问题，缺少元素、页面上下文和具体表现，无法判断应如何修复；需要确认该问题的具体规则、涉及的元素及其可访问性影响。",
+          "refs": []
+        },
+        "sourceIds": [],
+        "elapsedMs": 1308,
+        "usage": {
+          "prompt_tokens": 106,
+          "completion_tokens": 54,
+          "total_tokens": 160,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          },
+          "prompt_cache_hit_tokens": 0,
+          "prompt_cache_miss_tokens": 106
+        },
+        "referenceMatched": true,
+        "humanReview": {
+          "appropriate": null,
+          "reason": null
+        }
+      }
+    }
+  ],
+  "limitations": [
+    "案例为团队构造的文本场景，并非独立盲测或实际图片评测。",
+    "条款编号匹配只是辅助检查；建议的语义正确性、规范适用性和拒答合理性需要人工审阅。",
+    "真实模型调用存在波动，单次结果不能证明统计显著性。"
+  ]
+}

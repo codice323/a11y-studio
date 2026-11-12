@@ -1,12 +1,13 @@
 import type { PageInspection, PanoramaJump } from './Panorama';
-import { useEffect, useState } from 'react';
-import { Info, ListChecks, LoaderCircle } from 'lucide-react';
+import { useEffect, useRef, useState } from 'react';
+import { Activity, Info, ListChecks, LoaderCircle } from 'lucide-react';
 import { inspectAudit, inspectProposal, type ProposalPreview } from './semantics';
 import { versionName, type HistoryItem, type Issue, type Proposal, type State } from './types';
 
-import { EnlargedComparison, Screenshot, SemanticTable, type ScreenshotData, type SemanticResult } from './EvidenceDetails';
+import { EnlargedComparison, Screenshot, SemanticTable, syncScreenshotScroll, type ScreenshotData, type SemanticResult } from './EvidenceDetails';
 import { VersionComparison, type VersionPair } from './VersionComparison';
 import { PatchReview } from './PatchReview';
+import { IssueImpactCard } from './IssueImpactCard';
 
 export type EvidenceView = 'visual' | 'diff' | 'semantics';
 type EvidenceProps = {
@@ -29,7 +30,7 @@ function ProjectEvidence(props: EvidenceProps) {
     return <RepairEvidence {...props} onCompare={proposal ? undefined : () => setFreeFor(historyKey)} />;
   }
   return <VersionComparison state={state} autoScanning={props.autoScanning} target={props.stateScoped ? undefined : history?.issue ?? issue} pair={props.pair} onPair={props.onPair} versionsVisible={props.versionsVisible} pageRequest={props.pageRequest} jump={props.jump} onInspection={props.onInspection} scopeTargetId={props.scopeTargetId} busy={props.busy}
-    view={view} onView={onView} onHistory={historyKey ? () => setFreeFor(undefined) : undefined} />;
+    view={view} onView={onView} onHistory={historyKey ? () => setFreeFor(undefined) : undefined} problem={props.problem} impact={props.impact} />;
 }
 
 function RepairEvidence({ state, stateScoped, issue, history, proposal, view, onView, busy, applying, archivedEvidence, patchReady, onConfirm, onReject, problem, impact, onCompare }: EvidenceProps & { onCompare?: () => void }) {
@@ -46,6 +47,8 @@ function RepairEvidence({ state, stateScoped, issue, history, proposal, view, on
   const layoutKey = `${projectId}:${state.project.currentSnapshot}:${verification?.id}:${target?.id}`;
   const [layoutChoice, setLayoutChoice] = useState<{ key: string; mode: 'both' | 'before' | 'after' }>();
   const layout = layoutChoice?.key === layoutKey ? layoutChoice.mode : 'both';
+  const [syncScroll, setSyncScroll] = useState(true);
+  const shotPanes = useRef<{left:HTMLDivElement|null;right:HTMLDivElement|null}>({left:null,right:null});
   const [attempt, setAttempt] = useState(0);
   const key = `${projectId}:${beforeId}:${afterId}:${selector}:${afterSelector}:${attempt}`;
   const [semantic, setSemantic] = useState<{ key: string; result?: SemanticResult; error?: string }>();
@@ -111,7 +114,12 @@ function RepairEvidence({ state, stateScoped, issue, history, proposal, view, on
   const reviewing = view === 'diff' && Boolean(proposal);
   const reviewEvidenceReady = view === 'diff' || (view === 'visual' ? Boolean(previewData && beforeSrc && afterSrc) : Boolean(displaySemantics));
   return <section className={'preview panel' + (reviewing ? ' preview-reviewing' : '')} aria-labelledby="evidence-title">
-    <div className="panel-head"><h2 id="evidence-title">修复效果对比</h2>{onCompare && <button type="button" className="secondary comparison-switch" onClick={onCompare}>自由版本对比</button>}</div>
+    <div className="panel-head"><h2 id="evidence-title">修复效果对比</h2><div className="evidence-head-actions">
+      <a className="secondary evidence-live-link" href="#original-live"><Activity size={16} />实时操作原网页</a>
+      {onCompare && <button type="button" className="secondary comparison-switch" onClick={onCompare}>自由版本对比</button>}
+    </div></div>
+    {target && <IssueImpactCard problem={problem} impact={impact} />}
+    <p className="evidence-state-note">当前画面是扫描时的证据。需要检查登录后、点击或滚动后的状态？进入实时操作后采集，系统会将该状态作为新项目导入。</p>
     <div className="evidence-tabs" role="group" aria-label="修复效果视图">
       {tabs.map(({ id, name }) => <button key={id} aria-pressed={view === id} onClick={() => onView(id)}>{name}</button>)}
       <details className="developer-options"><summary>开发者选项</summary><button type="button" aria-pressed={view === 'diff'} onClick={() => onView('diff')}>代码变更</button></details>
@@ -137,12 +145,17 @@ function RepairEvidence({ state, stateScoped, issue, history, proposal, view, on
         <button aria-pressed={layout === 'both'} onClick={() => setLayoutChoice({ key: layoutKey, mode: 'both' })}>并排对比</button>
         <button aria-pressed={layout === 'before'} onClick={() => setLayoutChoice({ key: layoutKey, mode: 'before' })}>仅修复前</button>
         <button aria-pressed={layout === 'after'} onClick={() => setLayoutChoice({ key: layoutKey, mode: 'after' })}>{verification ? '仅修复后' : proposal ? '仅候选页面' : '仅当前版本'}</button>
+        <label className="sync-scroll"><input type="checkbox" checked={syncScroll} disabled={layout !== 'both'} onChange={event => setSyncScroll(event.target.checked)} />同步滚动{layout !== 'both' && '（并排时生效）'}</label>
         <EnlargedComparison left={leftShot} right={rightShot} />
       </div>
       {nonVisual && (proposal || verification) && <p className="comparison-status">此修改主要影响辅助技术读取。<button type="button" className="secondary" onClick={() => onView('semantics')}>查看语义变化</button></p>}
       <div className={layout === 'both' ? 'shots' : 'shots single-shot'}>
-        {layout !== 'after' && <Screenshot key={`before:${beforeSrc}`} {...leftShot} />}
-        {layout !== 'before' && <Screenshot key={`after:${afterSrc}`} {...rightShot} />}
+        {layout !== 'after' && <Screenshot key={`before:${beforeSrc}`} {...leftShot}
+          onViewport={node => { shotPanes.current.left = node; }}
+          onScroll={event => { if (syncScroll && layout === 'both') syncScreenshotScroll(event.currentTarget, shotPanes.current.right); }} />}
+        {layout !== 'before' && <Screenshot key={`after:${afterSrc}`} {...rightShot}
+          onViewport={node => { shotPanes.current.right = node; }}
+          onScroll={event => { if (syncScroll && layout === 'both') syncScreenshotScroll(event.currentTarget, shotPanes.current.left); }} />}
       </div>
       {verification && computed?.error && <p className="shot-location-error">无法复算元素位置。可打开完整截图查看扫描证据。</p>}
       <p className="preview-tip"><Info size={15} />{proposal ? '候选截图来自隔离副本。' : '截图来自真实扫描。'} 名称和角色的变化可在「无障碍语义」中查看。</p>

@@ -5,7 +5,7 @@ import http from 'node:http';
 import { syncBuiltinESMExports } from 'node:module';
 import { Readable } from 'node:stream';
 import { test, type TestContext } from 'node:test';
-import { captureUrlSnapshot, isPublicAddress } from '../apps/api/url-snapshot';
+import { captureUrlSnapshot, isPublicAddress, requestPublicBrowserResource } from '../apps/api/url-snapshot';
 
 const upstream = 'http://public-source.net';
 const publicIp = '93.184.216.34';
@@ -44,6 +44,39 @@ function upstreamResponses(t: TestContext, replies: Record<string, Reply>, dnsOv
   });
   return { visited, resolutions };
 }
+
+test('采集首页连接重置时改用另一个已校验的 IP，提交请求只发送一次', async t => {
+  const alternateIp = '93.184.216.35';
+  const resolver = t.mock.method(dns, 'lookup', async () =>
+    [publicIp, alternateIp].map(address => ({address, family:4})));
+  syncBuiltinESMExports();
+  t.after(() => { resolver.mock.restore(); syncBuiltinESMExports(); });
+  const attempted: string[] = [];
+  t.mock.method(http, 'request', (url: URL, options: http.RequestOptions, callback: (response: http.IncomingMessage) => void) => {
+    const request = new EventEmitter();
+    options.lookup?.(url.hostname, { family:4 }, (error, address) => {
+      assert.ifError(error);
+      assert.equal(typeof address, 'string');
+      attempted.push(address as string);
+    });
+    return Object.assign(request, {end() {
+      process.nextTick(() => {
+        if (attempted.at(-1) === publicIp) {
+          request.emit('error', Object.assign(new Error('Connection reset'), {code:'ECONNRESET'}));
+        } else {
+          callback(Object.assign(Readable.from([Buffer.from('<html>ok</html>')]), {statusCode:200, headers:{}}) as unknown as http.IncomingMessage);
+        }
+      });
+    }});
+  });
+  const signal = new AbortController().signal;
+  const response = await requestPublicBrowserResource(upstream, 'GET', {}, undefined, {remaining:1000}, signal, true);
+  assert.equal(response.status, 200);
+  assert.deepEqual(attempted, [publicIp, alternateIp]);
+  attempted.length = 0;
+  await assert.rejects(requestPublicBrowserResource(upstream, 'POST', {}, undefined, {remaining:1000}, signal, true), /暂时无法连接/);
+  assert.deepEqual(attempted, [publicIp]);
+});
 
 test('URL 地址校验拒绝非公网、保留地址及替代写法', async () => {
   for (const address of ['127.0.0.1', '10.0.0.1', '100.64.0.1', '169.254.169.254', '172.20.0.1', '192.168.1.1', '198.18.0.1', '192.0.2.5', '224.0.0.1', '::1', '::ffff:8.8.8.8', 'fc00::1', 'fe80::1', '2001:db8::1', '64:ff9b::a9fe:a9fe']) {
@@ -138,4 +171,32 @@ test('代理合成 DNS 的公网解析结果包含私网时仍拒绝连接', asy
   });
   await assert.rejects(captureUrlSnapshot(upstream + '/page'), /非公网/);
   assert.deepEqual(visited, []);
+});
+
+test('采集浏览器在虚拟 DNS 环境中轮换公网解析结果并拒绝私网地址', async t => {
+  const resolver = t.mock.method(dns, 'lookup', async () => [{address:'198.18.0.25',family:4}]);
+  syncBuiltinESMExports();
+  t.after(() => { resolver.mock.restore(); syncBuiltinESMExports(); });
+  let privateResult = false;
+  t.mock.method(globalThis, 'fetch', async (input: string | URL | Request) => {
+    const url = new URL(String(input));
+    const address = url.hostname === 'doh.pub' ? '93.184.216.35' : publicIp;
+    const values = url.searchParams.get('type') === 'A' ? [{type:1,data:address}, ...(privateResult ? [{type:1,data:'10.0.0.1'}] : [])] : [];
+    return new Response(JSON.stringify({Status:0,Answer:values}), {status:200});
+  });
+  const attempted: string[] = [];
+  t.mock.method(http, 'request', (url:URL, options:http.RequestOptions, callback:(response:http.IncomingMessage)=>void) => {
+    const request = new EventEmitter();
+    options.lookup?.(url.hostname, {family:4}, (error, address) => {assert.ifError(error);attempted.push(address as string);});
+    return Object.assign(request,{end(){process.nextTick(()=>{
+      if (attempted.at(-1) === publicIp) request.emit('error',Object.assign(new Error('reset'),{code:'ECONNRESET'}));
+      else callback(Object.assign(Readable.from([Buffer.from('ok')]),{statusCode:200,headers:{}}) as unknown as http.IncomingMessage);
+    });}});
+  });
+  await requestPublicBrowserResource(upstream,'GET',{},undefined,{remaining:1000},new AbortController().signal,true);
+  assert.deepEqual(attempted,[publicIp,'93.184.216.35']);
+  privateResult = true;
+  attempted.length = 0;
+  await assert.rejects(requestPublicBrowserResource(upstream,'GET',{},undefined,{remaining:1000},new AbortController().signal,true),/非公网/);
+  assert.deepEqual(attempted,[]);
 });

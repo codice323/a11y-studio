@@ -6,6 +6,15 @@ export type SemanticResult = { before: Semantics; after: Semantics | null };
 
 export type ScreenshotData = { title: string; src?: string; bounds?: Bounds | null; size?: { width: number; height: number }; location?: string; locationStatus?: string; emptyText?: string };
 
+export function syncScreenshotScroll(source: HTMLDivElement, target: HTMLDivElement | null) {
+  if (!target) return;
+  const sourceRange = source.scrollHeight - source.clientHeight;
+  const targetRange = target.scrollHeight - target.clientHeight;
+  const ratio = sourceRange > 0 ? source.scrollTop / sourceRange : 0;
+  const top = ratio * targetRange;
+  if (Math.abs(target.scrollTop - top) > 1) target.scrollTo({ top });
+}
+
 export function Screenshot({ title, src, bounds, size, location, locationStatus = '暂无元素定位', emptyText = '此版本暂无截图。', scale, onViewport, onScroll }: ScreenshotData & {
   scale?: number; onViewport?: (node: HTMLDivElement | null) => void; onScroll?: (event: UIEvent<HTMLDivElement>) => void;
 }) {

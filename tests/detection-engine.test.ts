@@ -67,13 +67,18 @@ test('AI 是可选复核流程，失败不改变扫描，人工决定不升级�
     const fetcher = t.mock.method(globalThis, 'fetch', async () => new Response('{}', { status: 429 }));
     await assert.rejects(requestAiAudit('project1', 'audit1'), /429/);
     assert.deepEqual(audit('audit1').result, original);
-    fetcher.mock.mockImplementation(async () => Response.json({
+    let sent:any;
+    fetcher.mock.mockImplementation(async (_url,options) => {sent=JSON.parse(String(options?.body));return Response.json({
       choices: [{ message: { content: JSON.stringify({ findings: [{ index: 0, explanation: '链接名称未交代目标。' }] }) } }],
-    }));
+    });});
     const batch = await requestAiAudit('project1', 'audit1');
     const [finding] = batch.findings;
     assert.equal(finding.decision, 'needs-review');
     assert.equal(finding.candidate.selector, '#vague');
+    assert.ok(finding.sources?.some(source=>source.refs.includes('2.4.4')));
+    const [modelCandidate]=JSON.parse(sent.messages[1].content);
+    assert.ok(modelCandidate.standards.some((source:any)=>source.refs.includes('2.4.4')));
+    assert.equal(audit('audit1').result.detection.ai.findings[0].sources[0].id,finding.sources?.[0].id);
     assert.throws(() => decideAiFinding('other-project', 'audit1', finding.id, 'accepted'), /未找到/);
     for (const decision of ['accepted', 'rejected', 'needs-review']) {
       assert.equal(decideAiFinding('project1', 'audit1', finding.id, decision).decision, decision);
@@ -83,6 +88,18 @@ test('AI 是可选复核流程，失败不改变扫描，人工决定不升级�
     assert.equal(fetcher.mock.callCount(), 2);
     await requestAiAudit('project1', 'audit1');
     assert.equal(fetcher.mock.callCount(), 2);
+    db.prepare('INSERT INTO audits VALUES(?,?,?,?,?,?,?)').run('audit2', 'project1', 'snapshot1', 'completed', JSON.stringify(original), null, new Date().toISOString());
+    let attempts=0;
+    fetcher.mock.mockImplementation(async (_url,options) => {
+      attempts++;
+      const body=JSON.parse(String(options?.body));
+      if(attempts===2)assert.match(body.messages.at(-1).content,/编号只能/);
+      return Response.json({choices:[{message:{content:JSON.stringify({findings:attempts===1
+        ? [{index:7,explanation:'编号错误'}]
+        : [{index:0,explanation:'链接名称未交代目标。'}]})}}]});
+    });
+    assert.equal((await requestAiAudit('project1','audit2')).findings.length,1);
+    assert.equal(attempts,2);
   } finally {
     if (apiKey === undefined) delete process.env.AI_API_KEY;
     else process.env.AI_API_KEY = apiKey;

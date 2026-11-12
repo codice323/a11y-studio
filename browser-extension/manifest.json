@@ -1,0 +1,10 @@
+{
+  "manifest_version": 3,
+  "name": "A11y Studio 页面采集",
+  "version": "0.2.6",
+  "description": "经用户操作采集当前页面的无障碍检测结果和本地修复副本。",
+  "permissions": ["activeTab", "scripting", "downloads", "debugger", "webNavigation"],
+  "background": {"service_worker": "background.js"},
+  "content_scripts": [{"matches": ["http://127.0.0.1/*"], "js": ["bridge.js"], "run_at": "document_start"}],
+  "action": { "default_title": "采集当前页面", "default_popup": "popup.html" }
+}

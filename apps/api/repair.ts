@@ -88,10 +88,19 @@ export async function createProposal(pid:string,issueId:string,input:{source?:st
   const target={projectId:pid,snapshotId:sid,selector:issue.selector};
   const issueHtml=String(issue.html).slice(0,1500);
   if(operation==='set-alt'||(issue.ruleId==='button-name'&&/<(?:svg|img)\b|aria-hidden\s*=|\bicon[-_]/i.test(issueHtml))){
-   sources=searchWcag(issue.ruleId,issue.help).map(({keywords:_keywords,...passage})=>passage);
+   sources=searchWcag(issue.ruleId,operation==='set-alt' ? '图片 装饰 内容 功能 替代文本' : '图标 按钮 名称 用途').map(({keywords:_keywords,...passage})=>passage);
    const context={wcag:sources.map(({refs,text})=>({refs,text}))};
-   if(operation==='set-alt')return {...await suggestImageAlt(target,context),sources};
+   if(operation==='set-alt'){
+    const image = await suggestImageAlt(target,context);
+    const query = image.purpose==='decorative' ? '装饰 图片 空 替代文本' : image.purpose==='informative' ? '图片 内容 功能 用途 替代文本' : '图片 内容 装饰 功能 替代文本';
+    sources=searchWcag(issue.ruleId,query).map(({keywords:_keywords,...passage})=>passage);
+    return {...image,sources,agentTrace:[{tool:'visual_evidence',summary:image.media ? '读取实际图片像素与页面语境并调用视觉模型' : '无法获取视觉分析，需要人工确认'},
+      {tool:'search_wcag',summary:'按图片用途检索相关规范摘要'}]};
+   }
    analysis={...await suggestIconLabel(target,context),sources};
+   agentTrace=[{tool:'search_wcag',summary:'检索图标按钮的名称与用途规范'},
+    {tool:'visual_evidence',summary:analysis.media ? '分析按钮截图与邻近语境' : '视觉证据不可用，需要人工确认'}];
+   analysis.agentTrace=agentTrace;
    value=analysis.suggestedValue??undefined;reason=analysis.reason;
   }else{
    const doc=cheerio.load(before);let surrounding='';try{const selected=doc(issue.selector);if(selected.length===1)surrounding=doc.html(selected.parent()).slice(0,2500)}catch{}

@@ -52,6 +52,7 @@ test('图片建议使用浏览器实际像素，区分信息图、装饰图和�
     assert.ok('description' in uncertain);
     assert.equal(uncertain.description,result.description);
     assert.ok(uncertain.sources?.length);
+    assert.ok(uncertain.agentTrace?.some(item => item.tool === 'visual_evidence'));
     assert.equal((db.prepare('SELECT COUNT(*) AS count FROM proposals').get() as {count:number}).count,0);
     const browser = await chromium.launch({executablePath:process.env.CHROME_PATH || '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',headless:true});
     try {
@@ -73,6 +74,16 @@ test('图片建议使用浏览器实际像素，区分信息图、装饰图和�
 
     result = {purpose:'informative',description:'蓝柱高于红柱',contentAlt:'蓝柱高于红柱',reason:'用于比较季度报名人数。'};
     assert.equal((await createProposal(project.id, issue.id, {source:'ai'})).status,'image-analysis');
+    fetcher.mock.mockImplementationOnce(async () => Response.json({choices:[{message:{content:JSON.stringify({
+      purpose:'informative',description:null,contentAlt:'猜测的图像内容',reason:'无法看清图片。',
+    })}}]}));
+    const missingEvidence = await createProposal(project.id,issue.id,{source:'ai'});
+    assert.equal(missingEvidence.status,'needs-manual-review');
+    assert.equal('contentAlt' in missingEvidence && missingEvidence.contentAlt,null);
+    fetcher.mock.mockImplementationOnce(async () => new Response('', {status:503}));
+    const unavailable = await createProposal(project.id, issue.id, {source:'ai'});
+    assert.equal(unavailable.status,'needs-manual-review');
+    assert.match(unavailable.reason,/503/);
     await assert.rejects(createProposal(project.id, issue.id, {source:'manual',value:' ',imagePurpose:'informative'}), /非空/);
     const suggested = await createProposal(project.id, issue.id, {source:'manual',value:result.contentAlt,imagePurpose:'informative'});
     assert.ok('patch' in suggested);
@@ -118,6 +129,26 @@ test('图片建议使用浏览器实际像素，区分信息图、装饰图和�
     const calls = fetcher.mock.callCount();
     assert.equal((await createProposal(broken.id,brokenIssue.id,{source:'ai'})).status,'needs-manual-review');
     assert.equal(fetcher.mock.callCount(),calls);
+
+    const icon = await createProject({captured:{name:'图标按钮',files:new Map([
+      ['index.html',Buffer.from('<!doctype html><html lang="zh-CN"><title>搜索</title><main><p>站内搜索 联系 xiaoli@example.com</p><button id="search"><svg width="24" height="24" aria-hidden="true"><circle cx="10" cy="10" r="6"/></svg></button></main></html>')],
+    ])}});
+    const iconScan = await runAudit(icon.id,icon.currentSnapshot);
+    const iconIssue = iconScan.issues.find(item=>item.ruleId==='button-name')!;
+    assert.ok(iconIssue);
+    fetcher.mock.mockImplementationOnce(async (_url: string, options: RequestInit) => {
+      const body = JSON.parse(options.body as string);
+      const [text, visual] = body.messages[1].content;
+      assert.match(text.text,/站内搜索/);
+      assert.ok(!text.text.includes('xiaoli@example.com'));
+      assert.match(visual.image_url.url,/^data:image\/png;base64,/);
+      return Response.json({choices:[{message:{content:JSON.stringify({description:'放大镜',value:'搜索',reason:'按钮旁有站内搜索说明。'})}}]});
+    });
+    const iconProposal = await createProposal(icon.id,iconIssue.id,{source:'ai'});
+    assert.ok('patch' in iconProposal);
+    assert.equal(iconProposal.patch.value,'搜索');
+    assert.equal(iconProposal.analysis?.media?.source,'surroundings-screenshot');
+    assert.ok(iconProposal.agentTrace?.some(item=>item.tool==='visual_evidence'));
   } finally {
     db.close();
     fs.rmSync(data,{recursive:true,force:true});

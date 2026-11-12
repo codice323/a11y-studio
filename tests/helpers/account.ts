@@ -4,6 +4,9 @@ import type { BrowserContext } from 'playwright-core';
 
 // Test workers spawn real servers with isolated SQLite databases.
 process.env.BETTER_AUTH_SECRET ??= randomBytes(48).toString('base64');
+// Existing unrelated tests use an explicitly unverified development account.
+process.env.NODE_ENV ??= 'test';
+process.env.A11Y_ALLOW_UNVERIFIED_REGISTRATION ??= 'true';
 const sessions = new Map<string,string>();
 const plainFetch = globalThis.fetch;
 

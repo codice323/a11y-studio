@@ -75,6 +75,9 @@ export type State = {
   originalSnapshotId: string | null;
   baseline: Scan | null;
   current: Scan | null;
+  browserCapture?: {title:string;capturedAt:string;viewport:{width:number;height:number};screenshot:string;
+    screenshotFullPage?:boolean;
+    violations:{id:string;help:string;impact:string|null;count:number}[];incomplete:number;limitations:string[]} | null;
   summary: { initial: number | null; resolved: number; remaining: number; added: number };
   resolved: { issue: Issue; verificationId: string }[];
   verifications: Verification[];

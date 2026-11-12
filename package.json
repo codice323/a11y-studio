@@ -7,10 +7,12 @@
     "start": "npm run build && tsx apps/api/server.ts",
     "dev": "vite",
     "build": "vite build",
+    "build:extension": "node scripts/build-browser-extension.mjs",
     "typecheck": "tsc --noEmit",
     "test": "tsx --test --test-concurrency=3 tests/*.test.ts",
     "test:campus": "tsx --test tests/campus-journey.e2e.ts",
-    "eval:wcag": "tsx scripts/evaluate-wcag-rag.ts"
+    "eval:wcag": "tsx scripts/evaluate-wcag-rag.ts",
+    "eval:repair-rag": "tsx scripts/evaluate-repair-rag.ts"
   },
   "dependencies": {
     "@axe-core/playwright": "^4.13.0",

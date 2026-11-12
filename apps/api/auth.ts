@@ -186,7 +186,11 @@ export function verifyRequest(req:Request,res:Response,next:NextFunction) {
   const host = req.get('host');
   const origin = req.get('origin');
   if (!host || !allowedHosts.has(host)) return res.status(403).json({error:'请求主机无效。'});
-  if ((origin && !trustedOrigins.includes(origin)) || ['cross-site','same-site'].includes(req.get('sec-fetch-site')??'') ||
+  // The browser extension opens the public application shell as a top-level navigation.
+  // API requests, subresources and requests with an untrusted Origin remain protected.
+  const publicNavigation=req.method==='GET' && req.path==='/' && !origin &&
+    req.get('sec-fetch-mode')==='navigate' && req.get('sec-fetch-dest')==='document';
+  if ((origin && !trustedOrigins.includes(origin)) || (!publicNavigation && ['cross-site','same-site'].includes(req.get('sec-fetch-site')??'')) ||
       (!['GET','HEAD','OPTIONS'].includes(req.method) && !origin)) {
     return res.status(403).json({error:'请求来源无效。'});
   }
@@ -202,7 +206,8 @@ export function authEndpoints(onSignOut:(sessionId:string)=>void) {
     res.set('Cache-Control','private, no-store');
     if (!authMethods.has(req.method+' '+req.path)) return res.status(404).json({error:'接口不存在。'});
     try {
-      if (production && !mailEnabled && [signupPath,upgradePath].includes(req.path)) {
+      const testBypass=process.env.NODE_ENV==='test' && process.env.A11Y_ALLOW_UNVERIFIED_REGISTRATION==='true';
+      if (!mailEnabled && !testBypass && [signupPath,upgradePath].includes(req.path)) {
         return res.status(503).json({error:'账号邮件服务尚未配置。'});
       }
       if ([signupPath,'/api/auth/sign-in/email',guestPath,upgradePath,completeUpgradePath,...mailPaths].includes(req.path)) {

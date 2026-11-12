@@ -55,7 +55,7 @@ export function AccountMail({view,send,onBack,onVerified,onSignOut,pending}:{vie
   return <main className="account-shell"><section className="panel account-card" aria-labelledby="mail-title">
     <div className="account-brand">A11y Studio</div>
     <h1 id="mail-title">{title}</h1>
-    {view.mode==='resend' && <p className="muted">请打开邮件中的验证链接，也可以在这里重新申请。</p>}
+    {view.mode==='resend' && <p className="muted">请查收邮箱中的验证链接；如果没有收到，可以在这里重新发送。</p>}
     {view.mode==='upgrade' && <p className="muted">请在申请时使用的游客会话中确认此操作。</p>}
     {view.mode==='verify' && <p className="muted">确认使用本邮件链接验证邮箱。</p>}
     <form onSubmit={submit} aria-busy={busy}>

@@ -36,6 +36,7 @@ export type AiAuditFinding = {
   candidate: SemanticCandidate;
   explanation: string;
   decision: 'needs-review' | 'accepted' | 'rejected';
+  sources?: RepairSource[];
 };
 
 export type DetectionEvidence = {
@@ -72,6 +73,7 @@ export type ImageAltAnalysis = {
   contentAlt: string | null;
   reason: string;
   sources?: RepairSource[];
+  agentTrace?: { tool: string; summary: string }[];
   detail?: string;
   media?: VisualMedia;
 };

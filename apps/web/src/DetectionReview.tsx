@@ -47,7 +47,7 @@ export function DetectionReview({ detection, report = false, aiConfigured = fals
     </details>}
     {!report && !ai && <div className="ai-review-controls">
       <h4>AI 语义辅助复核</h4>
-      <p>DeepSeek 将检查最多 20 个候选元素的名称、角色和附近文本；结果是疑点，需人工确认，不计入确定违规。</p>
+      <p>模型结合相关 WCAG 摘要，检查最多 20 个候选元素的名称、角色和附近文本；结果需人工确认。</p>
       <label><input type="checkbox" checked={consent} disabled={busy || !aiConfigured} onChange={event => setConsent(event.target.checked)} /> 我同意将上述页面文本发送给模型服务</label>
       <button type="button" className="secondary" disabled={busy || !aiConfigured || !consent || !behavior.semanticCandidates.length} onClick={onReview}>开始 AI 辅助复核</button>
       {!aiConfigured && <p>请先配置模型服务。</p>}
@@ -60,6 +60,11 @@ export function DetectionReview({ detection, report = false, aiConfigured = fals
       {ai.findings.length > 0 && <ul>{ai.findings.map(item => <li key={item.id}>
         <strong>{aiDecision[item.decision]}</strong> · {item.explanation}
         <br /><code>{item.candidate.selector}</code>
+        {item.sources && item.sources.length > 0 && <details>
+          <summary>关联的规范参考</summary>
+          <p>以下摘要按元素类型检索，具体是否适用需要人工核对。</p>
+          <ul>{item.sources.map(source=><li key={source.id}>{source.title} · WCAG {source.refs.join('、')}：{source.text} <a href={source.url} target="_blank" rel="noreferrer">查看规范原文</a></li>)}</ul>
+        </details>}
         {!report && onDecision && <div className="ai-review-actions" aria-label="人工复核结果">
           <button type="button" className="secondary" disabled={busy || item.decision === 'accepted'} onClick={() => onDecision(item.id, 'accepted')}>确认疑点</button>
           <button type="button" className="secondary" disabled={busy || item.decision === 'rejected'} onClick={() => onDecision(item.id, 'rejected')}>排除此项</button>

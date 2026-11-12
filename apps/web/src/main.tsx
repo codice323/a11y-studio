@@ -1,3 +1,4 @@
+import { normalizeCaptureUrl } from '../../../packages/shared/capture-url';
 import { workspaceFetch as fetch } from './workspace-fetch';
 import { JobRecoveryError, startJob, waitJob, type JobType } from './jobs';
 import type { ImageAltAnalysis, ImagePurpose, RepairAnalysis } from '../../../packages/shared/types';
@@ -13,6 +14,8 @@ import { DetectionReview } from './DetectionReview';
 import type { AiAuditFinding } from '../../../packages/shared/types';
 import { Evidence, type EvidenceView } from './Evidence';
 import { LiveComparison } from './LiveComparison';
+import { OriginalLive } from './OriginalLive';
+import { ManagedBrowserCapture } from './ManagedBrowserCapture';
 import { ComparisonVersions, type VersionPair } from './VersionComparison';
 import type { PageInspection, PanoramaJump } from './Panorama';
 import type { PanoramaIssue } from '../../../packages/shared/panorama';
@@ -20,6 +23,7 @@ import { versionName, type HistoryItem, type Issue, type Proposal, type State, t
 import { AccountGate, type Account } from './AccountGate';
 import { projectFromLocation, rememberProject } from './project-location';
 import './style.css';
+import './editorial-theme.css';
 
 const issueNames: Record<string, [string, string]> = {
   'image-alt': ['图片缺少替代文本', '屏幕阅读器用户无法了解这张图片的内容。'],
@@ -50,7 +54,7 @@ type Diagnostics = {
   limited: boolean;
   states: {stateId:string;path:string;issues:PanoramaIssue[];findings:import('../../../packages/shared/panorama').InteractionFinding[]}[];
 };
-type Source = 'zip' | 'url';
+type Source = 'html' | 'zip' | 'source' | 'url';
 type Selection = { issueId: string } | { history: HistoryItem; archived: boolean } | null;
 const controlTabs = [
   { id: 'issues', label: '问题与历史' },
@@ -363,11 +367,12 @@ function App({account,signOut,openUpgrade,openVerification}:{account:Account;sig
   }
 
   function createProject(data: FormData | UrlImport) {
+
     run(data instanceof FormData ? '正在导入项目…' : '正在采集公开网页…', async () => {
       const demo=data instanceof FormData && data.has('fixture');
       if (data instanceof FormData && !demo) data.set('diagnostics','true');
       const project = data instanceof FormData
-        ? await request<Project>('/api/projects', {method:'POST',body:data})
+        ? await request<Project>(data.get('mode') === 'browser-capture' ? '/api/projects/import-browser-capture' : '/api/projects', {method:'POST',body:data})
         : await post<Project>('/api/projects/import-url',{...data,diagnostics:true});
       setProjects(previous=>[project,...previous.filter(item=>item.id!==project.id)]);
       resetSelection();
@@ -378,11 +383,19 @@ function App({account,signOut,openUpgrade,openVerification}:{account:Account;sig
         await refresh(project.id);
         setNotice('项目已导入并完成真实检测。');
       }
+      if (data instanceof FormData && data.get('mode') === 'browser-capture') setNotice('浏览器采集已导入，正在检测本地副本。');
       if (project.rendering?.empty) setError('网页采集结果为空。请检查网站是否需要登录或验证。');
       else if (project.discovery?.failed.length || project.discovery?.unchecked) {
         setError('部分同源页面未能采集。可在结果报告中查看已检测范围。');
+
       }
     });
+  }
+
+  function openManagedUrlCapture(url:string) {
+    sessionStorage.setItem('a11y-studio:url-capture',url);
+    if(location.hash==='#url-capture')window.dispatchEvent(new Event('hashchange'));
+    else location.hash='#url-capture';
   }
 
   function scanAgain() {
@@ -659,7 +672,7 @@ function App({account,signOut,openUpgrade,openVerification}:{account:Account;sig
     }
   }
 
-  return <div className={collapsed ? 'app sidebar-collapsed' : 'app'}>
+  return <div className={collapsed ? 'app editorial sidebar-collapsed' : 'app editorial'}>
     <a className="skip-link" href="#page-title">跳到主要内容</a>
     <aside className="sidebar">
       <a className="logo" href="/" aria-label="A11y Studio 首页">
@@ -696,10 +709,12 @@ function App({account,signOut,openUpgrade,openVerification}:{account:Account;sig
       <div className={state ? 'content' : 'content home-content'}>
         {account.isGuest && account.expiresAt && <p className="account-guest-notice">游客项目临时保存，可用至 {new Date(account.expiresAt).toLocaleString('zh-CN')}。 <button
           type="button" className="secondary" disabled={working} onClick={openUpgrade}>保存我的项目 / 注册账号</button></p>}
+
         <div className={'page-intro' + (state ? page==='workspace' ? ' compact-intro' : '' : ' hero')}>
-          <div><div className="eyebrow"><span />ACCESSIBILITY WORKSPACE</div>
-            <h1 id="page-title" tabIndex={-1} ref={heading}>{state ? page === 'workspace' ? '网页无障碍工作台' : activeLabel : '我的项目'}</h1>
-            <p>{state ? page === 'report' ? '回顾检测覆盖、问题变化和验证证据。' : page === 'live' ? '同步操作两个版本，核对导航和交互状态。' : '定位问题、审核补丁并对比修复证据。' : '面向网页开发者、设计师和小型团队的 AI 无障碍检测与智能修复平台。用户上传自己的网页后，系统自动检测问题、可视化定位、解释影响、提供 AI 修复方案，并在用户确认后修改代码，重新验证修复效果，最终导出网页和检测报告。'}</p>
+          <div><div className="eyebrow"><span />A11y Studio · 网页无障碍</div>
+            <h1 id="page-title" tabIndex={-1} ref={heading}>{state ? page === 'workspace' ? '网页无障碍审阅' : activeLabel : '我的项目'}</h1>
+            <p>{state ? page === 'report' ? '回顾检测覆盖、问题变化和验证证据。' : page === 'live' ? '同步操作两个版本，核对导航和交互状态。' : '先看使用者受到什么影响，再核对修复是否真正有效。' : '面向网页开发者、设计师和小型团队的 AI 无障碍检测与智能修复平台。用户上传自己的网页后，系统自动检测问题、可视化定位、解释影响、提供 AI 修复方案，并在用户确认后修改代码，重新验证修复效果，最终导出网页和检测报告。'}</p>
+
           </div>
           {state && <div className="intro-actions">
             <button className="secondary" disabled={working} onClick={() => { setState(null); rememberProject(null); void loadHome(); resetSelection(); openPage('workspace'); setError(''); setNotice(''); }}><Layers size={15} />切换项目</button>
@@ -711,7 +726,7 @@ function App({account,signOut,openUpgrade,openVerification}:{account:Account;sig
         {notice && <div className="alert success" role="status"><CheckCircle2 size={17} /><span>{notice}</span><button onClick={() => setNotice('')} aria-label="关闭操作提示"><X size={16} /></button></div>}
         {busy && <div className="busy"><span role="status"><LoaderCircle className="spin" size={16} />{busy}</span>{jobId && <button className="cancel-job" disabled={cancelRequested} onClick={() => void cancelJob()}>{cancelRequested ? '正在取消…' : '取消任务'}</button>}</div>}
 
-        {!state ? <Home fixtures={fixtures} projects={projects} busy={working} onCreate={createProject} onOpen={openProject} onManage={manageProject} onError={setError} /> :
+        {!state ? <Home fixtures={fixtures} projects={projects} busy={working} onCreate={createProject} onUrlCapture={openManagedUrlCapture} onOpen={openProject} onManage={manageProject} onError={setError} /> :
           <>
           {page === 'report' && <Report key={scanRevision} state={state} busy={working} onRollback={rollback} onOpen={(item) => chooseHistory(item, 'visual', true, true)} onWorkspace={() => openPage('workspace')} onExploreIssue={openStateIssue} />}
           {liveView?.scope === projectScope && <section className="workspace-view live-workspace panel" hidden={page !== 'live'} aria-label="网页交互对比工作区">
@@ -763,6 +778,7 @@ function App({account,signOut,openUpgrade,openVerification}:{account:Account;sig
                 </form>}
               </div>
             </div>
+
             {scanning && <div className="diagnostic-status"><span role="status">正在检查网站</span>
               <button className="secondary" onClick={()=>void post('/api/jobs/'+diagnosticJob?.id+'/cancel').catch(error=>setError(error.message))}>取消检测</button></div>}
             {(scanConnectionError || diagnosticJob?.status==='failed' || diagnosticJob?.status==='cancelled') && <div className="diagnostic-status" role="alert">
@@ -770,7 +786,17 @@ function App({account,signOut,openUpgrade,openVerification}:{account:Account;sig
               <button className="secondary" disabled={working} onClick={scanAgain}>重试检测</button>
             </div>}
             {currentDiagnostics?.limited && !scanning && <details><summary>检测范围受限</summary><p>部分页面或状态未完成检查。详细范围可在结果报告中查看。</p></details>}
-            {Boolean(state.current?.resourceFailures?.length) && <details className="panel import-resource-warning">
+
+            {state.browserCapture && <details className="panel import-resource-warning" open>
+              <summary>浏览器原始页面证据 · {state.browserCapture.title}</summary>
+              <p>这是已登录浏览器中采集时的{state.browserCapture.screenshotFullPage ? '整页画面' : '可见区域'}。原页面发现 {state.browserCapture.violations.reduce((sum,item)=>sum+item.count,0)} 处问题；下方工作台使用本地副本重新检测，结果和画面可能不同。</p>
+              <a href={state.browserCapture.screenshot} target="_blank" rel="noreferrer">打开原始页面截图</a>
+              <img src={state.browserCapture.screenshot} alt={`采集时浏览器${state.browserCapture.screenshotFullPage ? '整页' : '可见区域'}截图`} style={{display:'block',maxWidth:'100%',maxHeight:480,objectFit:'contain',margin:'12px 0'}} />
+              {state.browserCapture.violations.length > 0 && <details><summary>查看原始页面检测结果</summary><ul>{state.browserCapture.violations.map(item=><li key={item.id}>{item.help} · {item.count} 处 · {item.id}</li>)}</ul></details>}
+              <p>原页面待人工复核规则：{state.browserCapture.incomplete} 项。</p><ul>{state.browserCapture.limitations.map(item=><li key={item}>{item}</li>)}</ul>
+            </details>}
+            {Boolean(state.current?.resourceFailures?.length) && <details className="panel import-resource-warning" open>
+
               <summary>部分页面资源未加载</summary>
               <ul>{state.current!.resourceFailures!.map(item => <li key={item.type + item.path}>
                 <code>{item.path}</code>{item.status ? ` · HTTP ${item.status}` : ''} · {item.reason}
@@ -779,6 +805,9 @@ function App({account,signOut,openUpgrade,openVerification}:{account:Account;sig
             </details>}
             <div className="workbench">
               <div className="workbench-controls panel">
+                <header className="review-rail-heading"><div><span>当前项目</span><h2>问题与修复</h2></div>
+                  <span className="review-rail-count">{listed.length} 个问题</span>
+                </header>
                 <div className="evidence-tabs control-tabs" role="tablist" aria-label="诊断工作台操作">
                   {controlTabs.map(({ id, label }) => (
                     <button key={id} type="button" role="tab" id={`control-tab-${id}`}
@@ -854,63 +883,78 @@ function Blank({ icon, title, children }: { icon: ReactNode; title: string; chil
   return <div className="blank">{icon}<b>{title}</b><p>{children}</p></div>;
 }
 
-function Home({ fixtures, projects, busy, onCreate, onOpen, onManage, onError }: {
+function Home({ fixtures, projects, busy, onCreate, onUrlCapture, onOpen, onManage, onError }: {
   fixtures: Fixture[]; projects: Project[]; busy: boolean;
-  onCreate: (data: FormData | UrlImport) => void; onOpen: (id: string) => void; onManage:(id:string,change:{name:string}|{confirm:true})=>Promise<void>; onError: (error: string) => void;
+  onCreate: (data: FormData | UrlImport) => void; onUrlCapture:(url:string)=>void; onOpen: (id: string) => void; onManage:(id:string,change:{name:string}|{confirm:true})=>Promise<void>; onError: (error: string) => void;
 }) {
   const [manage,setManage]=useState<{project:Project;remove:boolean}>();
   const [source, setSource] = useState<Source>('zip');
   const [url, setUrl] = useState('');
-  const [discover, setDiscover] = useState(false);
-  const [urlMode, setUrlMode] = useState<'static' | 'rendered'>('rendered');
+  const [browserCapture, setBrowserCapture] = useState(false);
+  const importingBrowserCapture = source === 'url' && browserCapture;
   const fileInput = useRef<HTMLInputElement>(null);
   function chooseFile(file: File) {
-    if (busy || source !== 'zip') return;
-    if (!/\.zip$/i.test(file.name)) return onError('请选择网页 ZIP 文件。');
+
+    if (busy) return;
+    if (source === 'html' && !/\.html?$/i.test(file.name)) return onError('请选择 HTML 文件，或切换到对应导入入口。');
+    if (importingBrowserCapture && !/\.json$/i.test(file.name)) return onError('请选择浏览器采集 JSON 文件。');
+    if ((source === 'zip' || source === 'source') && !/\.zip$/i.test(file.name)) {
+      return onError(source === 'source' ? '请选择源码工程 ZIP。' : '请选择网页 ZIP 文件。');
+    }
     if (file.size > 8 * 1024 * 1024) return onError('文件不能超过 8 MB。');
     const data = new FormData();
     data.set('file', file);
+    if (source === 'source') data.set('mode','source');
+    if (importingBrowserCapture) data.set('mode','browser-capture');
+
     onCreate(data);
   }
 
   function submitUrl(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (!busy) onCreate({ url: url.trim(), mode: urlMode, discover });
+    if (!busy) {
+      try {onUrlCapture(normalizeCaptureUrl(url));} catch(error){onError((error as Error).message);}
+    }
   }
 
   return <div className="onboarding">
     <section className="import-card" aria-labelledby="import-title">
       <div className="card-heading"><div><span className="section-tag">NEW PROJECT</span><h2 id="import-title">导入网页项目</h2><p>选择你拥有或获准检测的网页。</p></div><span className="section-icon"><FileUp size={20} /></span></div>
       <div className="evidence-tabs import-tabs" role="group" aria-label="网页导入方式">
-        <button aria-pressed={source === 'zip'} disabled={busy} onClick={() => setSource('zip')}><FileArchive size={16} />ZIP</button>
-        <button aria-pressed={source === 'url'} disabled={busy} onClick={() => setSource('url')}><Link2 size={16} />URL</button>
+
+        <button aria-pressed={source === 'html'} disabled={busy} onClick={() => {setBrowserCapture(false);setSource('html');}}><FileCode2 size={16} />HTML</button>
+        <button aria-pressed={source === 'zip'} disabled={busy} onClick={() => {setBrowserCapture(false);setSource('zip');}}><FileArchive size={16} />ZIP</button>
+        <button aria-pressed={source === 'source'} disabled={busy} onClick={() => {setBrowserCapture(false);setSource('source');}}><FileCode2 size={16} />源码工程</button>
+        <button aria-pressed={source === 'url'} disabled={busy} onClick={() => {setBrowserCapture(false);setSource('url');}}><Link2 size={16} />URL</button>
+
       </div>
-      {source === 'url' ? <form className="url-form" onSubmit={submitUrl}>
-        <label htmlFor="page-url">公开网页地址</label>
-        <input id="page-url" type="url" inputMode="url" placeholder="https://example.com/page" value={url} maxLength={2048} required disabled={busy} onChange={event => setUrl(event.target.value)} aria-describedby="url-scope" />
-        <fieldset className="url-mode"><legend>网页采集方式</legend>
-          <label><input type="radio" name="url-mode" value="rendered" checked={urlMode === 'rendered'} disabled={busy} onChange={() => setUrlMode('rendered')} />执行 JavaScript 后采集（推荐）</label>
-          <label><input type="radio" name="url-mode" value="static" checked={urlMode === 'static'} disabled={busy} onChange={() => setUrlMode('static')} />仅采集静态 HTML</label>
-        </fieldset>
-        <label><input type="checkbox" checked={discover} disabled={busy} onChange={event => setDiscover(event.target.checked)} />同时采集同源导航页（最多 6 页，仅限已获授权的站点）</label>
-        <p id="url-scope">动态采集会在独立浏览器中运行网页脚本，限制网络请求。登录、验证、交互及部分资源可能无法还原；修复只保存到本地快照。</p>
-        <button className="button dark" disabled={busy}>导入 URL 并检测 <ArrowRight size={15} /></button>
+      {source === 'url' && !importingBrowserCapture ? <form className="url-form managed-url-form" onSubmit={submitUrl}>
+        <label htmlFor="page-url">网页地址</label>
+        <input id="page-url" type="text" inputMode="url" placeholder="https://example.com/page" value={url} maxLength={2048} required disabled={busy} onChange={event => setUrl(event.target.value)} aria-describedby="url-scope" />
+        <p id="url-scope">输入网址后会打开应用内浏览器。你可以在里面登录、点击和滚动，再采集当前状态开始检测与修复。</p>
+        <button className="button dark" disabled={busy}>打开采集浏览器 <ArrowRight size={15} /></button>
+        <button type="button" className="managed-import-existing" disabled={busy} onClick={()=>setBrowserCapture(true)}>导入已有的浏览器采集 JSON</button>
       </form> : <div className="dropzone" onDragOver={event => event.preventDefault()} onDrop={event => {
         event.preventDefault();
         const file = event.dataTransfer.files[0];
         if (file) chooseFile(file);
       }}>
         <div className="upload-icon"><FileUp size={24} /></div>
-        <b>上传网页 ZIP</b>
-        <span>可包含多个网页、CSS 和本地图片 · 可拖放 · 最大 8 MB</span>
-        <input ref={fileInput} type="file" accept=".zip" hidden onChange={event => {
+
+        <b>{importingBrowserCapture ? '导入已有的浏览器采集文件' : source === 'html' ? '上传单个 HTML 文件' : source === 'source' ? '上传静态或 React 源码工程 ZIP' : '上传静态网页 ZIP'}</b>
+        <span>{importingBrowserCapture ? '支持此前保存的 A11y Studio 浏览器采集 JSON' : source === 'html' ? '支持 .html / .htm' : source === 'source' ? '支持静态工程或基础 React + Vite，根目录保留入口与源码' : '可包含 HTML、CSS 与本地图片'} · 可拖放 · 最大 8 MB</span>
+        <input ref={fileInput} type="file" accept={importingBrowserCapture ? '.json' : source === 'html' ? '.html,.htm' : '.zip'} hidden onChange={event => {
+
           const file = event.target.files?.[0];
           if (file) chooseFile(file);
           event.target.value = '';
         }} />
         <button className="button dark" disabled={busy} onClick={() => fileInput.current?.click()}>选择文件 <ArrowRight size={15} /></button>
+        {importingBrowserCapture&&<button className="managed-import-existing" disabled={busy} onClick={()=>setBrowserCapture(false)}>返回 URL 采集</button>}
       </div>}
-      <div className="import-note"><LockKeyhole size={15} />{source === 'url' && urlMode === 'rendered' ? '采集时运行脚本，检测和修复使用不执行脚本的本地快照。' : '网页自带脚本不会在检测环境中执行。'}</div>
+
+      <div className="import-note"><LockKeyhole size={15} />{source === 'url' ? 'URL 会在服务端隔离 Chromium 中打开；所有网页请求经过公网地址校验。登录信息只在采集会话中保留，结束后自动清除。采集后可在工作台中同步滚动对比。' : source === 'source' ? 'React 使用应用固定的构建工具和隔离浏览器，不运行项目安装脚本或构建配置。' : '网页自带脚本不会在检测环境中执行。'}</div>
+
     </section>
     <section className="examples">
       <div className="section-title"><div><span className="section-tag">DEMO PROJECTS</span><h2>从示例开始</h2></div></div>
@@ -1064,7 +1108,9 @@ function Assistant({ issue, stateScoped, history, knowledge, ai, engineering, vi
           ? '若确认纯装饰，可用空 alt。' + (suggested ? ' 内容性候选：' + suggested : '')
           : suggested ? (linkDecision ? '链接名称：' : labelDecision ? '添加可见标签：' : isImageAlt ? '替代文本候选：' : '建议值：') + suggested : nameDecision === 'needs-input' ? (linkDecision ? '在下方填写链接实际用途，再生成补丁。' : '请填写字段用途。') : '请人工确定合适的修复值。'}</p>
         <p><b>{nameDecision === 'confirm' ? '建议人工确认' : nameDecision === 'needs-input' ? '需要补充信息' : analysis.status === 'needs-manual-review' || !suggested ? '待人工确认' : '理由'}</b> · {analysis.reason}</p>
-        {agentRun && <p><b>分析方式</b> · {agentRun.usage.requests > 0 ? `模型请求 ${agentRun.usage.requests} 次，候选验证 ${agentRun.attempts} 次` : '依据规则与浏览器证据生成，本次未调用语言模型'}。</p>}
+        {agentRun && <p><b>分析方式</b> · {agentRun.usage.requests > 0
+          ? `模型请求 ${agentRun.usage.requests} 次，候选验证 ${agentRun.attempts} 次${agentRun.usage.complete ? `，输入 ${agentRun.usage.inputTokens} / 输出 ${agentRun.usage.outputTokens} tokens` : '，用量信息不完整'}`
+          : agentRun.usage.complete ? '依据规则与浏览器证据生成，本次未调用语言模型' : '模型分析未完成，请人工确认或重试'}。</p>}
       </div>}
       <details className="detail-block">
         <summary>查看详细依据</summary>
@@ -1120,6 +1166,7 @@ function Assistant({ issue, stateScoped, history, knowledge, ai, engineering, vi
           : target.ruleId === 'link-name' ? '例如：查看课程目录。填写链接真实用途后即可生成补丁。'
           : sourceRepairKinds[target.ruleId] === 'label' ? '可编辑标签文案，再生成原生标签补丁。'
           : (ai ? (Object.hasOwn(sourceRepairKinds, target.ruleId) ? 'Agent 会检查局部源码并验证隔离副本。若需指定文案，填写后重新分析。' : 'AI 按需使用局部代码和视觉证据。') : '可手动填写内容并生成补丁。配置模型服务后可使用 AI 建议。')}</p>
+        {ai && <p className="muted note">AI 分析会向模型服务发送相关页面文本，图片或图标分析还会发送局部图片。系统会尝试遮蔽常见文本敏感信息，图片内容请在使用前自行确认。</p>}
         <p id="repair-preview-hint" className="note" role="status">{previewHint || (isImageAlt && purpose === 'decorative' ? '预览将添加空 alt（alt=""），请确认该图片只用于装饰。' : null)}</p>
         <div className="repair-actions">
           <button className="button dark" disabled={busy || Boolean(previewHint) || (stateScoped && !input.trim()) || (['label','select-name','link-name'].includes(target.ruleId) && !input.trim()) || (agentOnly && !proposal?.sourceReview)} aria-describedby={isImageAlt ? 'repair-preview-hint' : undefined} onClick={() => onPropose('manual')}><Code2 size={15} />生成补丁预览</button>
@@ -1308,4 +1355,20 @@ function ConfirmDialog({ imagePurpose, sourceReview, onClose, onConfirm }: {
   </dialog>;
 }
 
-createRoot(document.getElementById('root')!).render(<AccountGate>{(account,signOut,openUpgrade,openVerification)=><App key={account.id+':'+Boolean(account.isGuest)} account={account} signOut={signOut} openUpgrade={openUpgrade} openVerification={openVerification} />}</AccountGate>);
+function StudioEntry({ account, signOut, openUpgrade, openVerification }: { account:Account; signOut:()=>Promise<void>; openUpgrade:()=>void; openVerification:()=>void }) {
+  const [route, setRoute] = useState(() => ({hash:location.hash,url:location.hash==='#url-capture'?sessionStorage.getItem('a11y-studio:url-capture')||'':''}));
+  useEffect(() => {
+    const syncRoute = () => {
+      const hash=location.hash;
+      const url=hash==='#url-capture'?sessionStorage.getItem('a11y-studio:url-capture')||'':'';
+      setRoute({hash,url});
+    };
+    window.addEventListener('hashchange', syncRoute);
+    return () => window.removeEventListener('hashchange', syncRoute);
+  }, []);
+  if(route.hash==='#url-capture')return route.url?<ManagedBrowserCapture initialUrl={route.url}/>:<App key={account.id+':'+Boolean(account.isGuest)} account={account} signOut={signOut} openUpgrade={openUpgrade} openVerification={openVerification}/>;
+  if(route.hash==='#original-live')return <OriginalLive/>;
+  return <App key={account.id+':'+Boolean(account.isGuest)} account={account} signOut={signOut} openUpgrade={openUpgrade} openVerification={openVerification} />;
+}
+
+createRoot(document.getElementById('root')!).render(<AccountGate>{(account,signOut,openUpgrade,openVerification)=><StudioEntry account={account} signOut={signOut} openUpgrade={openUpgrade} openVerification={openVerification} />}</AccountGate>);

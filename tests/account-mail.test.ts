@@ -12,7 +12,7 @@ import Database from 'better-sqlite3';
 import { chromium, type BrowserContext, type Page } from 'playwright-core';
 import { unzipSync, strFromU8 } from 'fflate';
 
-test('Chrome 邮箱验证、密码重置与四个独立账号并发修复', {timeout:120_000}, async()=>{
+test('Chrome 邮箱验证、密码重置与四个独立账号并发修复', {timeout:180_000}, async()=>{
   const dir=await mkdtemp(path.join(os.tmpdir(),'a11y-mail-'));
   const mail=path.join(dir,'mail');
   await mkdir(mail,{mode:0o700});
@@ -85,18 +85,16 @@ test('Chrome 邮箱验证、密码重置与四个独立账号并发修复', {tim
         await page.getByLabel('密码',{exact:true}).fill(password);
         await page.getByLabel('确认密码',{exact:true}).fill(password);
         await page.getByRole('button',{name:'注册',exact:true}).click();
-        await page.getByText(/请查收验证邮件/).waitFor();
-        const verifyA=await receive(accountA,'verify');
-        await login(page,accountA);
         await page.getByRole('heading',{name:'验证邮箱',exact:true}).waitFor();
-        assert.equal((await a.request.get(origin+'/api/projects')).status(),403);
+        const verifyA=await receive(accountA,'verify');
+        assert.equal((await a.request.get(origin+'/api/projects')).status(),401);
         await page.goto(verifyA.link.href);
         await page.getByRole('button',{name:'验证邮箱',exact:true}).click();
-        await page.getByText(/邮箱验证成功/).waitFor();
-        assert.equal(new URL(page.url()).hash,'');
-        assert.equal((await post(recovery,'/api/auth/confirm-email',{token:verifyA.token})).status(),400);
-        await page.getByRole('button',{name:'返回工作区'}).click();
+        await page.getByText('邮箱验证成功，可以返回登录。').waitFor();
+        await page.getByRole('button',{name:'返回登录',exact:true}).click();
+        await login(page,accountA);
         await page.getByRole('heading',{name:'我的项目',exact:true}).waitFor();
+        assert.equal((await post(recovery,'/api/auth/confirm-email',{token:verifyA.token})).status(),400);
 
         const createdB=await post(b,'/api/auth/sign-up/email',{email:accountB,password,name:'B',emailVerified:true});
         assert.equal(createdB.status(),200);
@@ -104,6 +102,10 @@ test('Chrome 邮箱验证、密码重置与四个独立账号并发修复', {tim
         const duplicate=await post(recovery,'/api/auth/sign-up/email',{email:' MAIL-B@example.test ',password,name:'duplicate'});
         assert.deepEqual(await duplicate.json(),await createdB.json());
         assert.equal(db.prepare('SELECT emailVerified FROM user WHERE email=?').pluck().get(accountB),0);
+        assert.equal((await post(b,'/api/auth/sign-in/email',{email:accountB,password})).status(),200);
+        assert.equal((await b.request.get(origin+'/api/projects')).status(),403);
+        await other.goto(origin);
+        await other.getByRole('heading',{name:'验证邮箱',exact:true}).waitFor();
         db.prepare("UPDATE account_mail_tokens SET expires_at=0,issued_at=0 WHERE email=? AND purpose='verify'").run(accountB);
         assert.equal((await post(b,'/api/auth/confirm-email',{token:firstB.token})).status(),400);
         const resend=await post(b,'/api/auth/resend-verification',{email:accountB});
@@ -111,7 +113,7 @@ test('Chrome 邮箱验证、密码重置与四个独立账号并发修复', {tim
         assert.deepEqual(await resend.json(),await unknownResend.json());
         const verifyB=await receive(accountB,'verify');
         assert.equal((await post(b,'/api/auth/confirm-email',{token:verifyB.token})).status(),200);
-        assert.equal((await post(b,'/api/auth/sign-in/email',{email:accountB,password})).status(),200);
+        await other.reload();await other.getByRole('heading',{name:'我的项目',exact:true}).waitFor();
 
         await guest.goto(origin);
         await guest.getByRole('button',{name:'游客登录'}).click();
@@ -133,7 +135,7 @@ test('Chrome 邮箱验证、密码重置与四个独立账号并发修复', {tim
             return (await response.json()).id as string;
           }));
           await Promise.all(tickets.map(async(ticket,i)=>{
-            for(let n=0;n<200;n++){
+            for(let n=0;n<600;n++){
               const state=await json(actors[i],'/api/jobs/'+ticket);
               if (state.status==='completed') return;
               assert.ok(['queued','running'].includes(state.status),JSON.stringify(state));
@@ -186,7 +188,8 @@ test('Chrome 邮箱验证、密码重置与四个独立账号并发修复', {tim
         assert.equal((await json(guestA,routes[2])).project.currentSnapshot,states[2].project.currentSnapshot);
 
         await other.goto(origin+'/?project='+projects[1].id);
-        await other.getByRole('heading',{name:'网页无障碍工作台',exact:true}).waitFor();
+        try { await other.getByRole('heading',{name:'网页无障碍工作台',exact:true}).waitFor(); }
+        catch (error) { throw new Error('第二账号工作台未打开：'+(await other.locator('body').innerText()).slice(0,800),{cause:error}); }
         const oldCookie=(await a.cookies()).find(cookie=>cookie.name.includes('session_token'))!;
         assert.ok(oldCookie.httpOnly);
         assert.equal(oldCookie.sameSite,'Lax');

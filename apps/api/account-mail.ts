@@ -21,6 +21,8 @@ export function migrateAccountMail() {
     issued_at INTEGER NOT NULL, expires_at INTEGER NOT NULL,
     PRIMARY KEY(user_id,purpose)
   )`);
+  // Remove the short-lived OTP store from databases created by the previous iteration.
+  db.exec('DROP TABLE IF EXISTS account_email_codes');
 }
 
 export function queueAccountMail(purpose:Purpose,address:string,origin:string,userId?:string) {
