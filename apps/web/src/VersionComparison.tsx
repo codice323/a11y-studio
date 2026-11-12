@@ -58,8 +58,8 @@ export function ComparisonVersions({state,pair,onPair,busy}: {
   </div>;
 }
 
-export function VersionComparison({ state, target, pair, onPair, view, onView, onHistory, jump, onInspection, scopeTargetId, busy, pageRequest, versionsVisible }: {
-  state: State; target?: Issue; pair: VersionPair; onPair: (pair: VersionPair) => void;
+export function VersionComparison({ state, target, pair, onPair, view, onView, onHistory, jump, onInspection, scopeTargetId, busy, pageRequest, versionsVisible, autoScanning }: {
+  autoScanning?:boolean; state: State; target?: Issue; pair: VersionPair; onPair: (pair: VersionPair) => void;
   view: EvidenceView; onView: (view: EvidenceView) => void; onHistory?: () => void;
   jump?: PanoramaJump; onInspection:(value:PageInspection)=>void; scopeTargetId?:string; busy:boolean; versionsVisible:boolean; pageRequest?: {path:string};
 }) {
@@ -141,7 +141,7 @@ export function VersionComparison({ state, target, pair, onPair, view, onView, o
       {onHistory && <button type="button" className="secondary comparison-switch" onClick={onHistory}>返回本次修复证据</button>}
     </div>
     {versionsVisible && <ComparisonVersions state={state} pair={pair} onPair={onPair} busy={busy} />}
-    <Panorama state={state} pair={pair} jump={jump} onInspection={onInspection} scopeTargetId={scopeTargetId} disabled={busy}
+    <Panorama state={state} autoScanning={autoScanning} pair={pair} jump={jump} onInspection={onInspection} scopeTargetId={scopeTargetId} disabled={busy}
       onScope={setScoped} targetId={target?.id} view={view} pageRequest={pageRequest} viewTools={<>
         <div className="evidence-tabs comparison-view-tabs" role="group" aria-label="修复效果视图">
           {views.map(([id, label]) => <button key={id} type="button" aria-pressed={view === id} onClick={() => onView(id)}>{label}</button>)}

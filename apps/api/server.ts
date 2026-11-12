@@ -1,3 +1,4 @@
+import {setTimeout as delay} from 'node:timers/promises';
 import { explorerPlanner } from './explorer';
 import express from 'express';import multer from 'multer';import fs from 'node:fs';import path from 'node:path';import {zipSync,strToU8} from 'fflate';import 'dotenv/config';
 import {db,id,now,ROOT,DATA,project,proposal,audit,snapshotDir,walk,safePath} from './storage';import {createProject} from './import';import {captureUrlSnapshot} from './url-snapshot';import {runAudit,inspectAuditElement} from './scan';import {createProposal,createSourceProposal,createPanoramaProposal,previewProposal,previewIssueImage,applyProposal,rejectProposal,rollback,getKnowledge} from './repair';
@@ -107,8 +108,37 @@ async function projectWork<T>(projectId:string,res:express.Response,run:()=>Prom
 const controllers=new Map<string,AbortController>();
 function job(type:string,projectId:string,run:(signal:AbortSignal,progress:(message:string,payload?:object)=>void)=>Promise<any>){const owner=db.prepare(`SELECT u.id,u.isAnonymous FROM projects p
  JOIN user u ON u.id=p.owner_user_id WHERE p.id=?`).get(projectId) as {id:string;isAnonymous:number}|undefined;
- if (owner?.isAnonymous) ensureGuestCapacity(owner.id,type==='panorama'?'panorama':'foreground');
+ if (owner?.isAnonymous && type!=='diagnostics') ensureGuestCapacity(owner.id,type==='panorama'?'panorama':'foreground');
  const jid=id(),controller=new AbortController();controllers.set(jid,controller);db.prepare('INSERT INTO jobs(id,type,status,result,error,created_at,project_id) VALUES(?,?,?,?,?,?,?)').run(jid,type,'queued',null,null,now(),projectId);setImmediate(async()=>{if(controller.signal.aborted){controllers.delete(jid);return;}db.prepare('UPDATE jobs SET status=? WHERE id=?').run('running',jid);try{const result=await run(controller.signal,(message,payload)=>db.prepare("UPDATE jobs SET result=? WHERE id=? AND status='running'").run(JSON.stringify({progress:message,...payload}),jid));db.prepare('UPDATE jobs SET status=?,result=? WHERE id=?').run(controller.signal.aborted?'cancelled':'completed',JSON.stringify(result),jid)}catch(error){db.prepare('UPDATE jobs SET status=?,error=? WHERE id=?').run(controller.signal.aborted?'cancelled':'failed',(error as Error).message,jid)}finally{controllers.delete(jid)}});return {id:jid,kind:'job',type,status:'queued'};}
+function diagnosticStatus(projectId:string,snapshotId:string) {
+ return db.prepare(`SELECT id,status,error FROM jobs WHERE project_id=? AND type='diagnostics'
+   AND json_extract(result,'$.snapshotId')=? ORDER BY rowid DESC LIMIT 1`).get(projectId,snapshotId) as
+   {id:string;status:string;error:string|null} | undefined;
+}
+let activeDiagnostics=0;
+function startDiagnostics(projectId:string,snapshotId:string,guest:boolean) {
+ const active=diagnosticStatus(projectId,snapshotId);
+ if (active && ['queued','running'].includes(active.status)) return active.id;
+ const ticket=job('diagnostics',projectId,async(signal,progress)=>{
+  while (activeDiagnostics >= 1) await delay(150,undefined,{signal});
+  signal.throwIfAborted();
+  activeDiagnostics++;
+  try {
+    progress('正在检查网站',{snapshotId});
+    await runAudit(projectId,snapshotId,signal);
+    signal.throwIfAborted();
+    const result=await exploreSite(projectId,snapshotId,guest,signal,
+      (message,payload)=>progress(message,{...payload,snapshotId}));
+    signal.throwIfAborted();
+    if (!result.graph.nodes.some(node=>node.captureId)) throw new Error('页面检查未完成，请重新检测。');
+    return {...result,snapshotId};
+  } finally {
+    activeDiagnostics--;
+  }
+ });
+ db.prepare('UPDATE jobs SET result=? WHERE id=?').run(JSON.stringify({snapshotId}),ticket.id);
+ return ticket.id;
+}
 app.get('/api/status',(_req,res)=>res.json({configured:!!process.env.AI_API_KEY,visionConfigured:imageVisionConfigured(),explorerPlanning:explorerPlanner(true).enabled}));
 app.get('/api/fixtures',(_req,res)=>res.json([{id:'demo-mixed',name:'慢绿生活',description:'图片、按钮、表单与对比度综合示例'},{id:'demo-form',name:'课程报名',description:'表单可访问名称示例'},{id:'demo-contrast',name:'自然笔记',description:'文字对比度示例'}]));
 app.get('/api/projects',(_req,res)=>res.json(db.prepare(`SELECT p.id,p.name,p.entry,p.mode,p.current_snapshot AS currentSnapshot,p.created_at AS createdAt,
@@ -120,7 +150,10 @@ app.get('/api/projects',(_req,res)=>res.json(db.prepare(`SELECT p.id,p.name,p.en
  FROM projects p JOIN snapshots s ON s.id=p.current_snapshot AND s.project_id=p.id
  LEFT JOIN audits a ON a.id=(SELECT id FROM audits WHERE project_id=p.id AND snapshot_id=s.id ORDER BY rowid DESC LIMIT 1)
  WHERE p.owner_user_id=? ORDER BY updatedAt DESC,p.rowid DESC`).all(accountFor(res).user.id)));
-app.post('/api/projects',guestBudget('projects'),upload.single('file'),async(req,res,next)=>{try{res.status(201).json(await createProject({ownerUserId:accountFor(res).user.id,fixture:req.body.fixture,file:req.file,engineering:req.body.mode==='source'}));}catch(e){next(e)}});
+app.post('/api/projects',guestBudget('projects'),upload.single('file'),async(req,res,next)=>{try{const user=accountFor(res).user;
+ const created=await createProject({ownerUserId:user.id,fixture:req.body.fixture,file:req.file,engineering:req.body.mode==='source'});
+ if(req.body.diagnostics==='true') startDiagnostics(created.id,created.currentSnapshot,Boolean(user.isAnonymous));
+ res.status(201).json(created);}catch(e){next(e)}});
 let activeUrlImports = 0;
 app.post('/api/projects/import-url', guestBudget('projects'), async (req,res,next) => {
  const url = req.body?.url;
@@ -135,6 +168,7 @@ app.post('/api/projects/import-url', guestBudget('projects'), async (req,res,nex
   const captured = await captureUrlSnapshot(url.trim(), controller.signal, mode, req.body?.discover === true);
   controller.signal.throwIfAborted();
   const created = await createProject({captured,ownerUserId:accountFor(res).user.id});
+  if(req.body?.diagnostics===true) startDiagnostics(created.id,created.currentSnapshot,Boolean(accountFor(res).user.isAnonymous));
   res.status(201).json({...created, assets: captured.assets, discovery: 'discovery' in captured ? captured.discovery : undefined, rendering: captured.rendering});
  } catch (error) { if (!controller.signal.aborted) next(error); }
  finally { activeUrlImports--; }
@@ -231,6 +265,8 @@ app.post('/api/projects/:id/explore',(req,res,next)=>{
    return res.status(409).json({error:'已有探索任务正在运行，请在结束后重试。'});
   }
   const version = project(projectId).current_snapshot;
+  const diagnostic=diagnosticStatus(projectId,version);
+  if (diagnostic && ['queued','running'].includes(diagnostic.status)) return res.status(409).json({error:'网站检测正在进行。'});
   const guest = Boolean(accountFor(res).user.isAnonymous);
   res.status(202).json(job('explorer',projectId,(signal,progress)=>exploreSite(projectId,version,guest,signal,progress,req.body?.planner === 'deepseek')));
  } catch (error) { next(error); }
@@ -296,6 +332,22 @@ app.patch('/api/projects/:id/snapshots/:snapshotId',(req,res,next)=>{
  try{res.json(renameSnapshot(req.params.id,req.params.snapshotId,req.body?.name));}catch(e){next(e);}
 });
 app.post('/api/projects/:id/rollback',(req,res,next)=>{try{res.json(rollback(req.params.id,String(req.body.snapshotId||'')));}catch(e){next(e)}});
+app.post('/api/projects/:id/diagnostics',(req,res,next)=>{
+ try {const version=project(req.params.id).current_snapshot;
+  res.status(202).json({id:startDiagnostics(req.params.id,version,Boolean(accountFor(res).user.isAnonymous))});
+ } catch(error) {next(error);}
+});
+app.get('/api/projects/:id/diagnostics',(req,res,next)=>{
+ try {
+  const snapshotId=project(req.params.id).current_snapshot;
+  const report=siteReport(req.params.id,snapshotId);
+  const auditRow=db.prepare("SELECT id,status FROM audits WHERE project_id=? AND snapshot_id=? ORDER BY rowid DESC LIMIT 1").get(req.params.id,snapshotId);
+  res.set('Cache-Control','no-store').json({snapshotId,audit:auditRow,job:diagnosticStatus(req.params.id,snapshotId),
+   limited:Boolean(report.exploration && (report.exploration.stop==='budget'||report.exploration.stop==='timeout'||report.exploration.edges.some(edge=>edge.status==='failed'))),
+   states:report.states.filter(item=>!item.attempt || item.attempt.status==='completed').map(item=>({stateId:item.stateId,path:item.path,issues:item.issues,
+    findings:item.scan?.interaction?.findings.filter(finding=>finding.status==='confirmed') ?? []}))});
+ } catch(error) {next(error);}
+});
 app.get('/api/projects/:id/reports',(req,res,next)=>{
  try {
   const report = state(req.params.id);

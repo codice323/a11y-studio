@@ -27,8 +27,8 @@ export type PageInspection = {
 };
 export type PanoramaJump = {stateId: string; left: string; right: string; key: string};
 
-export function Panorama({state, onInspection, disabled, jump, pair: versions, view, onScope, targetId, scopeTargetId, viewTools, pageRequest}: {
-  state: State; onInspection: (value: PageInspection) => void; disabled: boolean; jump?: PanoramaJump;
+export function Panorama({state, onInspection, disabled, jump, pair: versions, view, onScope, targetId, scopeTargetId, viewTools, pageRequest, autoScanning}: {
+  autoScanning?:boolean; state: State; onInspection: (value: PageInspection) => void; disabled: boolean; jump?: PanoramaJump;
   pair: VersionPair; view: EvidenceView; onScope:(scoped:boolean)=>void; targetId?:string; scopeTargetId?:string; viewTools?:ReactNode; pageRequest?:{path:string};
 }) {
   const {project} = state;
@@ -94,6 +94,7 @@ export function Panorama({state, onInspection, disabled, jump, pair: versions, v
       setMissing({});
       try {
         if (!await refresh() || signal.aborted) return;
+        if (autoScanning && selection.start===project.entry && !selection.step && !selection.site) return;
         setProgress('准备采集本地页面');
         const id = await startJob(route, 'panorama', {left, right, ...selection}, signal);
         if (signal.aborted) return;
@@ -119,7 +120,7 @@ export function Panorama({state, onInspection, disabled, jump, pair: versions, v
       }
     })();
     return () => controller.abort();
-  }, [hasAudit, route, routeQuery, resultQuery, left, right, selection, attempt, project.entry]);
+  }, [hasAudit, route, routeQuery, resultQuery, left, right, selection, attempt, project.entry, autoScanning]);
 
   // After an action, the returned recipe is the stable selection for version changes.
   const stateId = result?.stateId ?? selection.stateId;
@@ -181,18 +182,15 @@ export function Panorama({state, onInspection, disabled, jump, pair: versions, v
     ? [result.left.capture, result.right.capture] as const : null;
   const resolved = pair?.[0].issues.filter(item => !pair[1].issues.some(other => other.id === item.id)) ?? [];
   const added = pair?.[1].issues.filter(item => !pair[0].issues.some(other => other.id === item.id)) ?? [];
-  const discovered = new Set([
-    ...(inventory?.pages ?? []).map(file => 'page:' + file),
-    ...(inventory?.recipes ?? []).map(recipe => recipe.steps.length ? 'state:' + recipe.id : 'page:' + recipe.start),
-  ]).size;
-  const covered = new Set(inventory?.recipes.filter(recipe => recipe.counts[state.project.currentSnapshot] !== undefined).map(recipe => recipe.path));
-  const inspectedStates = inventory?.recipes.filter(recipe => recipe.counts[state.project.currentSnapshot] !== undefined).length ?? 0;
+  const currentRecipes = inventory?.recipes.filter(recipe=>recipe.counts[project.currentSnapshot]!==undefined) ?? [];
+  const capturedStates = new Set(currentRecipes.map(recipe=>JSON.stringify([recipe.path,recipe.steps])));
+  const covered = new Set(currentRecipes.map(recipe=>recipe.path));
   const shownVersion = project.currentSnapshot;
   const currentSide = right === shownVersion ? result?.right : left === shownVersion ? result?.left : undefined;
   const shown = currentSide?.status === 'captured' ? currentSide.capture : undefined;
   const scanError = captureError || listError || (currentSide?.status !== 'captured' ? currentSide?.error : undefined);
   const scanStatus = shown ? 'scanned' : progress ? 'pending' : scanError ? 'failed' : 'unscanned';
-  const coverage = inventory ? `当前版本已检测 ${covered.size}/${paths.length} 个已发现页面、${inspectedStates}/${discovered} 个已知状态。` : undefined;
+  const coverage = inventory ? `当前版本已检测 ${covered.size}/${paths.length} 个已发现页面，已采集 ${capturedStates.size} 个不同操作路径。` : undefined;
   const comparison = pair && scoped ? `右侧较左侧解决 ${resolved.length} 个问题，新增 ${added.length} 个问题。` : undefined;
   useEffect(() => {
     onInspection({projectId:project.id,version:shownVersion,path:page,stateId,scoped,findings:shown?.issues ?? [],coverage,comparison,
@@ -267,21 +265,36 @@ export function Panorama({state, onInspection, disabled, jump, pair: versions, v
         <label>页面<select aria-label="页面" value={page} disabled={busy} onChange={event => choosePage(event.target.value)}>
           {paths.map(path => <option key={path} value={path}>{pathNames.get(path) ? pathNames.get(path) + ' · ' : ''}{path}</option>)}
         </select></label>
-        <label>交互状态<select aria-label="交互状态" value={active?.id ?? ''} disabled={busy || !states.length} onChange={event => selectRequest({stateId: event.target.value})}>
-          {!active && <option value="">{listError ? '状态列表加载失败' : '尚未采集'}</option>}
-          {states.map(recipe => <option key={recipe.id} value={recipe.id}>{recipe.label}</option>)}
-        </select></label>
+    </div>
+    {viewTools}
+    <details className="comparison-advanced"><summary>高级选项</summary>
+      <label>交互状态<select aria-label="交互状态" value={active?.id ?? ''} disabled={busy || !states.length} onChange={event => selectRequest({stateId: event.target.value})}>
+        {!active && <option value="">{listError ? '状态列表加载失败' : '尚未采集'}</option>}
+        {states.map(recipe => {
+          const action=[...recipe.steps].reverse().find(step=>'target' in step || step.action==='toggle-details');
+          const title=recipe.title ?? pathNames.get(recipe.path) ?? recipe.path;
+          return <option key={recipe.id} value={recipe.id}>{title} · {action ? stepName(action) : '页面初始状态'}</option>;
+        })}
+      </select></label>
       <button type="button" className="secondary" disabled={busy || !inventory} onClick={() => {
         setBatchFailures([]);
         selectRequest({site:true});
       }}>检测已发现页面</button>
-    </div>
-    {viewTools}
-    {project.mode === 'snapshot' && <p className="comparison-status muted">静态快照 · 动态交互状态未覆盖</p>}
+      {coverage && <p>{coverage}</p>}
+      {comparison && <p>{comparison}</p>}
+      {project.mode === 'snapshot' && <p>静态快照 · 动态交互状态未覆盖</p>}
+        {scoped && view === 'visual' && <div className="panorama-bar" role="group" aria-label="页面截图选项">
+          <label><input type="checkbox" checked={full} onChange={event => setFull(event.target.checked)} />完整页面</label>
+          <label><input type="checkbox" checked={sync} onChange={event => setSync(event.target.checked)} />同步滚动</label>
+          <label>截图缩放<select value={zoom} onChange={event => setZoom(Number(event.target.value))}>
+            {[50, 75, 100, 125, 150, 200].map(value => <option key={value} value={value}>{value}%</option>)}
+          </select></label>
+        </div>}
+    </details>
     {batchFailures.length > 0 && <details><summary>未完成 {batchFailures.length} 个页面检查</summary>
       <ul>{batchFailures.map(({page,reason},index)=><li key={index}>{page} · {reason}</li>)}</ul>
     </details>}
-        {progress && <p role="status">{progress}… {job && <button type="button" className="secondary"
+        {progress && scoped && <p role="status">正在准备页面… {job && <button type="button" className="secondary"
           onClick={() => void fetch('/api/jobs/' + job + '/cancel', {method: 'POST'})}>取消全景采集</button>}</p>}
         {listError && <p role="alert">{listError}</p>}
         {captureError && <p role="alert">全景采集未完成。{captureError}</p>}
@@ -292,13 +305,6 @@ export function Panorama({state, onInspection, disabled, jump, pair: versions, v
 
         {active && active.steps.length > 0 && <details className="panorama-steps"><summary>操作记录 · {active.steps.length} 步</summary>
           <ol>{active.steps.map((step, index) => <li key={index}>{stepName(step)}</li>)}</ol></details>}
-        {scoped && view === 'visual' && <div className="panorama-bar" role="group" aria-label="页面截图选项">
-          <label><input type="checkbox" checked={full} onChange={event => setFull(event.target.checked)} />完整页面</label>
-          <label><input type="checkbox" checked={sync} onChange={event => setSync(event.target.checked)} />同步滚动</label>
-          <label>截图缩放<select value={zoom} onChange={event => setZoom(Number(event.target.value))}>
-            {[50, 75, 100, 125, 150, 200].map(value => <option key={value} value={value}>{value}%</option>)}
-          </select></label>
-        </div>}
         {scoped && view !== 'diff' && <div className="panorama-pair">
           <section><h3>左侧 · {versionName(state, left)}</h3>{renderSide(result?.left, 'left')}</section>
           <section><h3>右侧 · {versionName(state, right)}</h3>{renderSide(result?.right, 'right')}</section>

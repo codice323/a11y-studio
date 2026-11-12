@@ -112,8 +112,7 @@ test('静态与 React 源码工程经真实工作台审核、复测和独立 Vit
         await page.goto(base);
         await openImportedFixture(page, base, { name: fixture.title + '.zip', mimeType: 'application/zip',
           buffer: archive(fixture.files as Record<string, string | Buffer>) }, 'source');
-        const modeName = fixture.mode === 'static-source' ? '静态源码工程' : 'React 原始组件工程';
-        await page.getByText(modeName + '：', { exact: false }).waitFor();
+        await page.locator('.project-title').getByText(fixture.title+'.zip',{exact:true}).waitFor();
         const [project] = await get('/projects');
         assert.equal(project.mode, fixture.mode);
         const route = '/projects/' + project.id;
@@ -175,7 +174,7 @@ test('静态与 React 源码工程经真实工作台审核、复测和独立 Vit
           await page.getByRole('button', { name: '确认应用修复' }).click();
           await page.getByLabel('我已核对修复内容和页面用途，确认适合应用').check();
           await page.getByRole('button', { name: '确认应用并复测' }).click();
-          await page.getByText(new RegExp('当前版本 V' + (index + 1))).waitFor();
+          await page.waitForFunction(version => (document.querySelector<HTMLSelectElement>('[aria-label="切换项目版本"]')?.selectedOptions[0]?.textContent ?? '').split(' · ')[0] === 'V' + version, index + 1);
           const verified = (await get(route)).verifications.find((entry: any) => entry.patch.ruleId === repair.rule);
           assert.equal(verified.status, 'passed', JSON.stringify(verified));
           assert.deepEqual(verified.added, []);

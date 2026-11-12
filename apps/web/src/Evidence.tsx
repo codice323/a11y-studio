@@ -10,7 +10,7 @@ import { PatchReview } from './PatchReview';
 
 export type EvidenceView = 'visual' | 'diff' | 'semantics';
 type EvidenceProps = {
-  state: State; jump?:PanoramaJump; onInspection:(value:PageInspection)=>void; scopeTargetId?:string; stateScoped?: boolean; issue?: Issue; history?: HistoryItem; proposal: Proposal | null;
+  autoScanning?:boolean; state: State; jump?:PanoramaJump; onInspection:(value:PageInspection)=>void; scopeTargetId?:string; stateScoped?: boolean; issue?: Issue; history?: HistoryItem; proposal: Proposal | null;
   versionsVisible:boolean; pair: VersionPair; onPair: (pair:VersionPair)=>void; pageRequest?:{path:string};
   view: EvidenceView; onView: (view: EvidenceView) => void;
   problem: string; impact: string;
@@ -28,7 +28,7 @@ function ProjectEvidence(props: EvidenceProps) {
   if (proposal || (historyKey && freeFor !== historyKey)) {
     return <RepairEvidence {...props} onCompare={proposal ? undefined : () => setFreeFor(historyKey)} />;
   }
-  return <VersionComparison state={state} target={props.stateScoped ? undefined : history?.issue ?? issue} pair={props.pair} onPair={props.onPair} versionsVisible={props.versionsVisible} pageRequest={props.pageRequest} jump={props.jump} onInspection={props.onInspection} scopeTargetId={props.scopeTargetId} busy={props.busy}
+  return <VersionComparison state={state} autoScanning={props.autoScanning} target={props.stateScoped ? undefined : history?.issue ?? issue} pair={props.pair} onPair={props.onPair} versionsVisible={props.versionsVisible} pageRequest={props.pageRequest} jump={props.jump} onInspection={props.onInspection} scopeTargetId={props.scopeTargetId} busy={props.busy}
     view={view} onView={onView} onHistory={historyKey ? () => setFreeFor(undefined) : undefined} />;
 }
 

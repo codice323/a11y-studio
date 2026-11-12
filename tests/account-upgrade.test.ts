@@ -155,6 +155,7 @@ test('Chrome：游客修复、事务升级、会话轮换、越权拦截及项�
 
       // Expiration in a live tab preserves only the project URL, then enforces ownership again.
       db.prepare('UPDATE session SET expiresAt=? WHERE userId=?').run(new Date(0).toISOString(),formal.id);
+      await page.locator('.project-more summary').click();
       await page.getByRole('button',{name:'重新检测'}).click();
       await page.getByText('会话已过期，请重新登录。',{exact:true}).waitFor();
       assert.equal(new URL(page.url()).searchParams.get('project'),project.id);

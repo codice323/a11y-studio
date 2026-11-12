@@ -129,6 +129,7 @@ test('全景工作台用真实 Chrome 采集静态多页和 React 路由，重�
         assert.equal(await panel.getByLabel('右侧版本').inputValue(), project.currentSnapshot);
         if (scenario.name === 'reading') {
           const initial = await panel.getByLabel('交互状态').inputValue();
+          await panel.locator('.comparison-advanced').evaluate((node:HTMLDetailsElement)=>{node.open=true;});
           await panel.getByLabel('交互状态').selectOption(initial);
           await ready();
           const captures = panel.locator('.panorama-pair img');
@@ -166,12 +167,14 @@ test('全景工作台用真实 Chrome 采集静态多页和 React 路由，重�
           await panel.getByLabel('操作', {exact:true}).selectOption('click');
           await panel.getByRole('button', {name:'执行并重放'}).click();
           await panel.getByText(/不允许提交表单/).first().waitFor();
+          await panel.locator('.comparison-advanced').evaluate((node:HTMLDetailsElement)=>{node.open=true;});
           await panel.getByLabel('交互状态').selectOption(routeState);
           await ready();
           await step('Check booking', 'validate');
           await panel.getByText('操作记录 · 2 步').click();
           await panel.getByText('检查原生表单校验 · Check booking', {exact:true}).waitFor();
           await screenshot(page, 'workshop-form-validation');
+          await panel.locator('.comparison-advanced').evaluate((node:HTMLDetailsElement)=>{node.open=true;});
           await panel.getByLabel('交互状态').selectOption(routeState);
           await ready();
           await step('Resources');
@@ -206,15 +209,18 @@ test('全景工作台用真实 Chrome 采集静态多页和 React 路由，重�
         assert.equal(await panel.getByLabel('左侧版本').inputValue(), project.currentSnapshot);
         assert.equal(await panel.getByLabel('交互状态').inputValue(), modal);
         await page.getByRole('tab',{name:'问题与历史'}).click();
+        await panel.locator('.comparison-advanced').evaluate((node:HTMLDetailsElement)=>{node.open=true;});
         await page.getByText(/右侧较左侧解决 1 个问题/).waitFor();
         await screenshot(page, scenario.name + '-verified');
         await panel.getByRole('button', {name:'交换版本', exact:true}).click();
         await page.getByText(/新增 1 个问题/).waitFor();
         assert.equal(await panel.getByLabel('交互状态').inputValue(), modal);
         await panel.getByRole('button', {name:'交换版本', exact:true}).click();
+        await panel.locator('.comparison-advanced').evaluate((node:HTMLDetailsElement)=>{node.open=true;});
         await page.getByText(/右侧较左侧解决 1 个问题/).waitFor();
         await step(scenario.closer);
         assert.notEqual(await panel.getByLabel('交互状态').inputValue(), modal);
+        await panel.locator('.comparison-advanced').evaluate((node:HTMLDetailsElement)=>{node.open=true;});
         await panel.getByLabel('交互状态').selectOption(modal);
         await ready();
         assert.equal(await panel.getByLabel('交互状态').inputValue(), modal);
@@ -257,6 +263,7 @@ test('全景工作台用真实 Chrome 采集静态多页和 React 路由，重�
           await ready();
           await panel.getByLabel('页面', {exact:true}).selectOption(scenario.page);
           await ready();
+          await panel.locator('.comparison-advanced').evaluate((node:HTMLDetailsElement)=>{node.open=true;});
           await panel.getByLabel('交互状态').selectOption(modal);
           await ready();
           await panel.getByLabel('右侧版本').selectOption(altered);

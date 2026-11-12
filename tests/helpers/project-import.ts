@@ -3,17 +3,17 @@ import type { Page } from 'playwright-core';
 
 export async function importProjectFixture(page: Page, origin: string, file: {
   name: string; mimeType: string; buffer: Buffer;
-}, mode?: 'source') {
+}, mode?: 'source', diagnostics=false) {
   return page.request.post(origin + '/api/projects', {
     headers: { origin },
-    multipart: { file, ...(mode ? { mode } : {}) },
+    multipart: { file, ...(mode ? { mode } : {}), ...(diagnostics ? {diagnostics:'true'} : {}) },
   });
 }
 
 export async function openImportedFixture(page: Page, origin: string, file: {
   name: string; mimeType: string; buffer: Buffer;
-}, mode?: 'source') {
-  const response = await importProjectFixture(page, origin, file, mode);
+}, mode?: 'source', diagnostics=false) {
+  const response = await importProjectFixture(page, origin, file, mode, diagnostics);
   assert.ok(response.ok(), await response.text());
   const project = await response.json();
   await page.goto(origin);

@@ -91,20 +91,29 @@ test('Chrome Explorer follows real campus and React paths, blocks unsafe actions
     if(await page.getByRole('button',{name:'切换项目',exact:true}).isVisible()) await page.getByRole('button',{name:'切换项目',exact:true}).click();
     else await page.goto(origin);
     const file = {name,mimeType:'application/zip',buffer:buffer};
-    if (mode === '源码工程') await openImportedFixture(page,origin,file,'source');
+    if (mode === '源码工程') await openImportedFixture(page,origin,file,'source',true);
     else await page.locator('input[type=file]').setInputFiles(file);
-    await page.getByRole('button',{name:'自动探索与检测'}).waitFor();
+    await page.getByRole('heading',{name:'网页无障碍工作台'}).waitFor();
+    assert.equal(await page.getByRole('button',{name:'自动探索与检测'}).count(),0);
     const projects=await (await testFetch(origin+'/api/projects')).json();
     const imported=projects.find((item:{name:string})=>item.name===name);
     assert.ok(imported);
     return imported.id as string;
   }
   async function explore(projectId:string) {
-    const button=page.getByRole('button',{name:'自动探索与检测'});
-    await button.click({timeout:30_000});
-    const waiting=page.getByRole('heading',{name:'结果报告',exact:true});
-    await waiting.waitFor({timeout:165_000});
-    await page.getByText(/自动探索记录/).waitFor();
+    const diagnosticUrl=origin+'/api/projects/'+projectId+'/diagnostics';
+    const initial=await (await testFetch(diagnosticUrl)).json();
+    assert.ok(initial.job?.id,'import did not queue diagnostics');
+    assert.ok(await page.getByRole('button',{name:'切换项目'}).isEnabled());
+    let finished=false;
+    for(let attempt=0;attempt<165;attempt++){
+      const status=await (await testFetch(diagnosticUrl)).json();
+      assert.equal(status.job.id,initial.job.id);
+      if(status.job.status==='completed'){finished=true;break;}
+      assert.ok(['queued','running'].includes(status.job.status),JSON.stringify(status.job));
+      await delay(1000);
+    }
+    assert.ok(finished,'diagnostics did not complete');
     const response=await testFetch(origin+'/api/projects/'+projectId+'/reports');
     assert.ok(response.ok,await response.clone().text());
     const {site}=await response.json() as {site:{exploration:ExplorerGraph;states:Evidence[]}};
@@ -160,9 +169,13 @@ test('Chrome Explorer follows real campus and React paths, blocks unsafe actions
     }
     await other.close();
 
-    const detail=page.locator('details').filter({has:page.locator('summary').filter({hasText:'自主探索 · Ticket terms'})}).last();
-    await detail.locator('summary').first().click();
-    await detail.getByRole('button',{name:'在诊断中查看'}).first().click();
+    const issueList=page.getByRole('region',{name:'待处理问题'});
+    const dynamicIssue=issueList.getByRole('button').filter({hasText:'#print-terms'}).filter({hasText:'按钮缺少名称'});
+    await dynamicIssue.waitFor();
+    assert.ok(!await page.getByLabel('交互状态',{exact:true}).isVisible());
+    if(output) await page.screenshot({path:path.join(output,'workbench.png'),fullPage:false});
+    await dynamicIssue.click();
+    await page.waitForFunction(()=>document.querySelector<HTMLSelectElement>('select[aria-label="页面"]')?.value==='/tickets');
     await page.getByRole('button',{name:'AI 分析与修复'}).click();
     await page.waitForFunction(()=>document.querySelector<HTMLInputElement>('#repair-value')?.value==='Print terms');
     assert.equal(mockCalls,2);
@@ -203,6 +216,8 @@ test('Chrome Explorer follows real campus and React paths, blocks unsafe actions
       actual:holdout.graph.nodes.filter(item=>item.captureId).length,expected:3},
       labeledControls:{tp:Number(positive),fn:Number(!positive),fp:Number(negative),tn:Number(!negative)}});
 
+    await page.getByRole('region',{name:'待处理问题'}).getByRole('button',{name:/按钮缺少名称/}).filter({hasText:'#unlabeled-archive'}).click();
+    await page.waitForFunction(()=>document.querySelector<HTMLSelectElement>('select[aria-label="页面"]')?.value==='/guides/index.html');
     const cancelUrl=origin+'/api/projects/'+holdoutId+'/explore';
     const started=await testFetch(cancelUrl,{method:'POST'});
     assert.equal(started.status,202);

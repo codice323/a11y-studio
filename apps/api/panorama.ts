@@ -99,7 +99,7 @@ export function siteReport(projectId: string, snapshotId: string) {
   const mode = project(projectId).mode;
   const known = new Set([
     ...documents(current).map(documentPath),
-    ...knownRecipes.map(recipe => recipe.path),
+    ...states.map(state => state.path),
     ...(mode === 'react-source' ? states.flatMap(item => (item.navigation ?? []).map(link => link.path)) : []),
     ...attempts.map(attempt => attempt.path),
   ]);
@@ -112,7 +112,7 @@ export function siteReport(projectId: string, snapshotId: string) {
     const status = captures.length ? 'completed' : attempt?.status ?? 'unscanned';
     const issues = new Map(captures.flatMap(state => state.issues.map(issue => [issue.id, issue] as const)));
     return {pageId:hash(path).slice(0,20),path,status,issues:status === 'completed' ? issues.size : null,
-      states:captures.length, error:status !== 'completed' ? attempt?.error : undefined};
+      states:new Set(captures.map(state=>JSON.stringify(state.steps))).size, error:status !== 'completed' ? attempt?.error : undefined};
   });
   const liveStates = db.prepare('SELECT data FROM live_state_audits WHERE project_id=? AND snapshot_id=? ORDER BY created_at DESC LIMIT 30')
     .all(projectId,snapshotId).map(row => JSON.parse((row as {data:string}).data) as Awaited<ReturnType<typeof import('./live-comparison').scanLive>>);
@@ -764,7 +764,7 @@ function latestExploration(projectId:string, version:string): ExplorerGraph | un
   // Library callers can use the scanner before the server runs account/job migrations.
   if (!db.prepare("SELECT 1 FROM pragma_table_info('jobs') WHERE name='project_id'").get()) return;
   const record = db.prepare(`SELECT json_extract(result,'$.graph') AS graph,status FROM jobs
-    WHERE project_id=? AND type='explorer' AND json_extract(result,'$.graph.snapshotId')=? ORDER BY rowid DESC LIMIT 1`)
+    WHERE project_id=? AND type IN ('explorer','diagnostics') AND json_extract(result,'$.graph.snapshotId')=? ORDER BY rowid DESC LIMIT 1`)
     .get(projectId,version) as {graph:string;status:string} | undefined;
   if (!record) return;
   const graph = JSON.parse(record.graph) as ExplorerGraph;

@@ -107,7 +107,7 @@ test('URL 快照从首页导入，经真实扫描、修复和三视图复测后�
       await page.getByLabel('仅采集静态 HTML').check();
       await page.getByLabel('公开网页地址').fill('http://93.184.216.34/page');
       await page.getByRole('button', { name: '导入 URL 并检测' }).click();
-      await page.getByText(/URL 快照已导入并完成检测/).waitFor({ timeout: 15000 });
+      await page.locator('[data-entry-audited="true"]').waitFor({ timeout: 15000 });
       assert.deepEqual(hits.slice(1).sort(), ['/page', '/sample.png', '/theme.css']);
       await page.setViewportSize({ width: 1440, height: 900 });
       const [controls, evidence] = await page.locator('.workbench > div').evaluateAll(columns =>
@@ -259,7 +259,7 @@ test('URL 快照从首页导入，经真实扫描、修复和三视图复测后�
       await page.getByLabel('执行 JavaScript 后采集（推荐）').check();
       await page.getByLabel('公开网页地址').fill('http://93.184.216.34/dynamic');
       await page.getByRole('button', { name: '导入 URL 并检测' }).click();
-      await page.getByText(/已运行页面脚本/).waitFor({ timeout: 30000 });
+      await page.locator('[data-entry-audited="true"]').waitFor({ timeout: 30000 });
       const [dynamicProject] = await (await api('/api/projects')).json();
       const dynamicState = await (await api('/api/projects/' + dynamicProject.id)).json();
       const dynamicHtml = fs.readFileSync(path.join(dataDir, 'projects', dynamicProject.id, dynamicProject.currentSnapshot, 'index.html'), 'utf8');

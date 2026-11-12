@@ -606,3 +606,17 @@ footer { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 8p
 .live-pair .live-screen { aspect-ratio: 900 / 700; touch-action: none; }
 .live-pair .live-screen img { height: 100%; object-fit: fill; }
 .live-more { font-size: 13px; margin: 4px 0 0; }
+
+.content .compact-intro { margin-bottom: 8px; align-items: center; }
+.compact-intro .eyebrow, .compact-intro p { display: none; }
+.compact-intro h1 { font-size: 18px; margin: 0; }
+.project-strip { grid-template-columns: minmax(0, 1fr) auto; padding: 6px 10px; margin-bottom: 8px; }
+.project-title { flex-direction: row; justify-content: flex-start; align-items: center; flex-wrap: wrap; gap: 4px 10px; }
+.project-actions { grid-template-columns: minmax(0, auto) auto; }
+.project-more { position: relative; }
+.project-more summary, .comparison-advanced summary { padding: 6px 8px; cursor: pointer; }
+.project-more > div { position: absolute; z-index: 3; right: 0; display: grid; gap: 4px; padding: 6px; background: white; border: 1px solid var(--line); border-radius: 7px; white-space: nowrap; }
+.diagnostic-status { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; margin-bottom: 8px; font-size: 13px; }
+.comparison-advanced { padding: 0 8px; font-size: 13px; }
+@media (min-width: 901px) { .workbench { --workbench-height: clamp(440px, calc(100dvh - 155px), 900px); } }
+@media (max-width: 600px) { .project-strip { grid-template-columns: minmax(0, 1fr); } }

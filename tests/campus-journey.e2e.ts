@@ -208,7 +208,7 @@ test('校园综合服务平台按用户操作顺序验收公开导入入口及�
           const input=page.locator('input[type=file]');
           const alert=page.getByRole('alert');
           let rejection:string;
-          const imported=()=>page.getByText(/项目已导入并完成真实检测|URL 快照已导入并完成检测/).waitFor({timeout:65000});
+          const imported=()=>page.locator('[data-entry-audited="true"]').waitFor({timeout:65000});
           if('rendered' in mode){
             assert.equal(await urlChoice.getAttribute('aria-pressed'),'true');
             assert.equal(await input.count(),0);
@@ -300,6 +300,7 @@ test('校园综合服务平台按用户操作顺序验收公开导入入口及�
         assert.equal(await panel.getByRole('region',{name:'当前状态问题'}).count(),0);
         await panel.locator('.shots img').nth(1).waitFor();
         await page.getByRole('tab',{name:'问题与历史'}).click();
+        await panel.getByText('高级选项',{exact:true}).click();
         await panel.getByRole('button',{name:'检测已发现页面'}).click();
         const expected = s.mode.id==='html'?1:6;
         await page.getByText(new RegExp('已检测 '+expected+'/'+expected+' 个已发现页面')).waitFor({timeout:125000});
@@ -386,6 +387,7 @@ test('校园综合服务平台按用户操作顺序验收公开导入入口及�
         assert.equal(v2.snapshots.length,3);
         assert.ok(v2.verifications.every(item=>item.status==='passed'&&item.added.length===0));
         const current=v2.project.currentSnapshot;
+        await page.locator('.project-more summary').click();
         await page.getByRole('button',{name:'重命名',exact:true}).click();
         await page.getByLabel('版本名称').fill('校园验收 V2');
         await page.getByRole('button',{name:'保存',exact:true}).click();
