@@ -1,3 +1,4 @@
+import { openImportedFixture } from './helpers/project-import';
 import { testFetch as fetch, registerTestAccount, attachTestAccount } from './helpers/account';
 import assert from 'node:assert/strict';
 import { once } from 'node:events';
@@ -109,9 +110,8 @@ test('静态与 React 源码工程经真实工作台审核、复测和独立 Vit
         await attachTestAccount(page.context(),base);
         page.setDefaultTimeout(25_000);
         await page.goto(base);
-        await page.getByRole('button', { name: '源码工程', exact: true }).click();
-        await page.locator('input[type=file]').setInputFiles({ name: fixture.title + '.zip', mimeType: 'application/zip',
-          buffer: archive(fixture.files as Record<string, string | Buffer>) });
+        await openImportedFixture(page, base, { name: fixture.title + '.zip', mimeType: 'application/zip',
+          buffer: archive(fixture.files as Record<string, string | Buffer>) }, 'source');
         const modeName = fixture.mode === 'static-source' ? '静态源码工程' : 'React 原始组件工程';
         await page.getByText(modeName + '：', { exact: false }).waitFor();
         const [project] = await get('/projects');

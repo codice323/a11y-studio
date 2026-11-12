@@ -10,7 +10,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { test } from 'node:test';
 import Database from 'better-sqlite3';
 import { chromium, type BrowserContext } from 'playwright-core';
-import { strFromU8, unzipSync } from 'fflate';
+import { strFromU8, strToU8, unzipSync, zipSync } from 'fflate';
 
 test('Chrome：游客修复、事务升级、会话轮换、越权拦截及项目管理', {timeout:100_000}, async()=>{
   const dir=await mkdtemp(path.join(os.tmpdir(),'a11y-upgrade-'));
@@ -61,7 +61,7 @@ test('Chrome：游客修复、事务升级、会话轮换、越权拦截及项�
       assert.notEqual(guest.id,(await json(guestB,'/api/auth/get-session')).user.id);
       const oldCookie=await sessionCookie(a);
       const html='<!doctype html><html lang="zh"><title>升级验收</title><main><h1>升级验收</h1><button id="fixme"></button></main></html>';
-      await page.locator('input[type=file]').setInputFiles({name:'guest-v1.html',mimeType:'text/html',buffer:Buffer.from(html)});
+      await page.locator('input[type=file]').setInputFiles({name:'guest-v1.zip',mimeType:'application/zip',buffer:Buffer.from(zipSync({'index.html':strToU8(html)}))});
       await page.getByRole('region',{name:'待处理问题'}).getByRole('button').filter({hasText:'#fixme'}).click();
       await page.getByLabel('建议的文本内容',{exact:true}).fill('查看详情');
       const proposed=page.waitForResponse(r=>r.request().method()==='POST'&&r.url().endsWith('/proposals'));
@@ -180,7 +180,7 @@ test('Chrome：游客修复、事务升级、会话轮换、越权拦截及项�
       await page.getByRole('heading',{name:'登录',exact:true}).waitFor();
       await loginA();
       await page.getByRole('heading',{name:'我的项目',exact:true}).waitFor();
-      await page.getByRole('button',{name:'重命名 guest-v1.html',exact:true}).click();
+      await page.getByRole('button',{name:'重命名 guest-v1.zip',exact:true}).click();
       await page.getByLabel('项目名称').fill('保留的修复');
       await page.getByRole('button',{name:'保存名称',exact:true}).click();
       await page.getByRole('button',{name:'保留的修复',exact:true}).waitFor();

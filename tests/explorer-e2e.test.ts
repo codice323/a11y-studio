@@ -1,3 +1,4 @@
+import { openImportedFixture } from './helpers/project-import';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
@@ -89,8 +90,9 @@ test('Chrome Explorer follows real campus and React paths, blocks unsafe actions
   async function upload(name:string,buffer:Buffer,mode:'ZIP'|'源码工程') {
     if(await page.getByRole('button',{name:'切换项目',exact:true}).isVisible()) await page.getByRole('button',{name:'切换项目',exact:true}).click();
     else await page.goto(origin);
-    await page.getByRole('button',{name:mode,exact:true}).click();
-    await page.locator('input[type=file]').setInputFiles({name,mimeType:'application/zip',buffer});
+    const file = {name,mimeType:'application/zip',buffer:buffer};
+    if (mode === '源码工程') await openImportedFixture(page,origin,file,'source');
+    else await page.locator('input[type=file]').setInputFiles(file);
     await page.getByRole('button',{name:'自动探索与检测'}).waitFor();
     const projects=await (await testFetch(origin+'/api/projects')).json();
     const imported=projects.find((item:{name:string})=>item.name===name);

@@ -1,3 +1,4 @@
+import { importProjectFixture, openImportedFixture } from './helpers/project-import';
 import { testFetch as fetch, registerTestAccount, attachTestAccount } from './helpers/account';
 import assert from 'node:assert/strict';
 import {spawn, type ChildProcess} from 'node:child_process';
@@ -19,9 +20,9 @@ const out=path.resolve(process.env.CAMPUS_EVIDENCE_DIR ?? 'data/campus-evidence'
 const maxStage=Number(process.env.CAMPUS_STAGE ?? 5);
 const title='校园综合服务平台';
 const modes=[
-  {id:'html',tab:'HTML',actor:'网站管理员'},
+  {id:'html',actor:'网站管理员'},
   {id:'zip',tab:'ZIP',actor:'无障碍体验审核'},
-  {id:'source',tab:'源码工程',actor:'前端开发者'},
+  {id:'source',actor:'前端开发者'},
   {id:'url-static',tab:'URL',actor:'网站管理员',rendered:false},
   {id:'url-rendered',tab:'URL',actor:'无障碍体验审核',rendered:true},
 ] as const;
@@ -92,7 +93,7 @@ async function step(page:Page,name:string){
 }
 async function saveJson(file:string,data:unknown){await fs.writeFile(path.join(out,file),JSON.stringify(data,null,2)+'\n');}
 
-test('校园综合服务平台按用户操作顺序验收四种导入入口', {timeout:600_000}, async()=>{
+test('校园综合服务平台按用户操作顺序验收公开导入入口及历史项目', {timeout:600_000}, async()=>{
   assert.ok(Number.isInteger(maxStage)&&maxStage>=1&&maxStage<=5);
   assert.ok(testedModes.length > 0 && (!selected || selected.every(id=>testedModes.some(mode=>mode.id===id))));
   const scratch=await fs.mkdtemp(path.join(os.tmpdir(),'a11y-campus-'));
@@ -194,12 +195,23 @@ test('校园综合服务平台按用户操作顺序验收四种导入入口', {t
         scenarios.push(scenario);
         await record(1,scenario,async()=>{
           await page.goto(origin);
-          await page.getByRole('group',{name:'网页导入方式'}).getByRole('button',{name:mode.tab,exact:true}).click();
+          const choices=page.getByRole('group',{name:'网页导入方式'});
+          await choices.getByRole('button',{name:'ZIP',exact:true}).waitFor();
+          assert.deepEqual(await choices.getByRole('button').allTextContents(),['ZIP','URL']);
+          const zipChoice=choices.getByRole('button',{name:'ZIP',exact:true});
+          const urlChoice=choices.getByRole('button',{name:'URL',exact:true});
+          assert.equal(await zipChoice.getAttribute('aria-pressed'),'true');
+          const zipSize=await zipChoice.boundingBox();
+          const urlSize=await urlChoice.boundingBox();
+          assert.ok(zipSize && urlSize && Math.abs(zipSize.width-urlSize.width)<1 && zipSize.height===urlSize.height);
+          if ('rendered' in mode) await urlChoice.click();
           const input=page.locator('input[type=file]');
           const alert=page.getByRole('alert');
           let rejection:string;
           const imported=()=>page.getByText(/项目已导入并完成真实检测|URL 快照已导入并完成检测/).waitFor({timeout:65000});
           if('rendered' in mode){
+            assert.equal(await urlChoice.getAttribute('aria-pressed'),'true');
+            assert.equal(await input.count(),0);
             await page.getByLabel(mode.rendered?'执行 JavaScript 后采集（推荐）':'仅采集静态 HTML').check();
             const url=page.getByLabel('公开网页地址');
             await url.fill('http://93.184.216.34/private-redirect');
@@ -210,37 +222,46 @@ test('校园综合服务平台按用户操作顺序验收四种导入入口', {t
             await page.getByLabel(/同时采集同源导航页/).check();
             await url.fill('http://93.184.216.34/');
             await page.getByRole('button',{name:'导入 URL 并检测'}).click();
-          }else{
-            if(mode.id==='html'){
-              await input.setInputFiles(fixtures.zip);
-            }else if(mode.id==='zip'){
-              await input.setInputFiles({name:'scripts.zip',mimeType:'application/zip',buffer:Buffer.from(zipSync({
-                'index.html':strToU8('<title>test</title>'),'script.js':strToU8('console.log(1)'),
-              }))});
-            }else{
-              const files=unzipSync(await fs.readFile(fixtures.project));
-              files['package.json']=strToU8(JSON.stringify({dependencies:{react:'*','react-dom':'*','react-router-dom':'*'}}));
-              await input.setInputFiles({name:'unsupported-dependencies.zip',mimeType:'application/zip',buffer:Buffer.from(zipSync(files))});
-            }
-            const message=mode.id==='html'?/HTML/:mode.id==='zip'?/不支持文件类型.*script\.js/:/React DOM 运行依赖/;
-            await alert.getByText(message).waitFor();
+          }else if(mode.id==='zip'){
+            assert.equal(await input.getAttribute('accept'),'.zip');
+            await input.setInputFiles(fixtures.html);
+            await alert.getByText('请选择网页 ZIP 文件。').waitFor();
+            await input.setInputFiles({name:'scripts.zip',mimeType:'application/zip',buffer:Buffer.from(zipSync({
+              'index.html':strToU8('<title>test</title>'),'script.js':strToU8('console.log(1)'),
+            }))});
+            await alert.getByText(/不支持文件类型.*script\.js/).waitFor();
             rejection=await alert.innerText();
-            await page.screenshot({path:path.join(out,'stage-1-'+mode.id+'-rejected.png')});
-            await input.setInputFiles(mode.id==='html'?fixtures.html:mode.id==='zip'?fixtures.zip:fixtures.project);
+            await page.screenshot({path:path.join(out,'stage-1-zip-rejected.png')});
+            await input.setInputFiles(fixtures.zip);
+          }else if(mode.id==='html'){
+            rejection='公开上传入口已通过 ZIP 文件类型校验覆盖。';
+            await openImportedFixture(page,origin,{name:'campus-single.html',mimeType:'text/html',buffer:await fs.readFile(fixtures.html)});
+          }else{
+            const files=unzipSync(await fs.readFile(fixtures.project));
+            files['package.json']=strToU8(JSON.stringify({dependencies:{react:'*','react-dom':'*','react-router-dom':'*'}}));
+            const invalid=await importProjectFixture(page,origin,{name:'unsupported-dependencies.zip',
+              mimeType:'application/zip',buffer:Buffer.from(zipSync(files))},'source');
+            assert.equal(invalid.ok(),false);
+            rejection=(await invalid.json()).error;
+            assert.match(rejection,/React DOM 运行依赖/);
+            await openImportedFixture(page,origin,{name:'campus-react-source.zip',mimeType:'application/zip',
+              buffer:await fs.readFile(fixtures.project)},'source');
           }
-          await page.locator('.busy').waitFor();
-          await page.screenshot({path:path.join(out,'stage-1-'+mode.id+'-loading.png')});
-          await imported();
+          if (mode.id==='zip' || 'rendered' in mode) {
+            await page.locator('.busy').waitFor();
+            await page.screenshot({path:path.join(out,'stage-1-'+mode.id+'-loading.png')});
+            await imported();
+          }
           const response=await fetch(origin+'/api/projects');
           const [project]=await response.json();
           scenario.id=project.id;scenario.original=project.currentSnapshot;
           assert.equal(project.mode,mode.id==='source'?'react-source':'snapshot');
           assert.equal(project.entry,'index.html');
           assert.match(await page.locator('.project-title').innerText(),mode.id.startsWith('url')?new RegExp(title):/campus-/);
-          return {steps:['选择入口','提交不支持输入','读取错误','从同一入口重试','进入项目'],rejection,mode:project.mode,entry:project.entry};
+          return {steps:mode.id==='html'||mode.id==='source'?['准备历史项目','从项目列表打开']:['选择入口','提交不支持输入','读取错误','从同一入口重试','进入项目'],rejection,mode:project.mode,entry:project.entry};
         });
       }
-      console.log('阶段 1：四种入口、两种 URL 模式均完成失败恢复与成功导入。');
+      console.log('阶段 1：ZIP 与两种 URL 采集模式完成导入，历史 HTML 与源码项目可从项目列表打开。');
 
       if(maxStage>=2)for(const s of scenarios)await record(2,s,async()=>{
         const {page}=s;

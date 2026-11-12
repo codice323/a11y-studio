@@ -1,3 +1,4 @@
+import { openImportedFixture } from './helpers/project-import';
 import { testFetch as fetch, registerTestAccount, attachTestAccount } from './helpers/account';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
@@ -171,8 +172,9 @@ test('Chrome 实时双侧比较：校园 ZIP 导航及 React 独立状态、动�
       const switchProject = page.getByRole('button',{name:'切换项目',exact:true});
       if (await switchProject.isVisible()) await switchProject.click();
       else await page.goto(origin);
-      await page.getByRole('button',{name:mode,exact:true}).click();
-      await page.locator('input[type=file]').setInputFiles({name,mimeType:'application/zip',buffer:bytes});
+      const file = {name,mimeType:'application/zip',buffer:bytes};
+      if (mode === '源码工程') await openImportedFixture(page,origin,file,'source');
+      else await page.locator('input[type=file]').setInputFiles(file);
       await page.getByRole('heading',{name:'网页无障碍工作台',exact:true}).waitFor();
       const projects=await (await fetch(origin+'/api/projects')).json();
       const project=projects.find((p:{name:string})=>p.name===name);

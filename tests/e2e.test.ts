@@ -148,7 +148,7 @@ test('静态项目的真实检测、审核修复、失败回滚、导出与异�
    await page.getByLabel('建议的文本内容').fill('电子邮箱');await page.getByRole('button',{name:'生成补丁预览'}).click();await page.getByRole('button',{name:'确认应用修复'}).click();const modal=await new AxeBuilder({page}).withTags(['wcag2a','wcag2aa','wcag21a','wcag21aa']).analyze();assert.deepEqual(modal.violations.filter(x=>x.impact==='critical'||x.impact==='serious').map(x=>x.id),[]);await page.keyboard.press('Escape');assert.equal(await page.getByRole('dialog').count(),0);await page.getByRole('button',{name:'结果报告',exact:true}).click();const reportAudit=await new AxeBuilder({page}).withTags(['wcag2a','wcag2aa','wcag21a','wcag21aa']).analyze();const reportSerious=reportAudit.violations.filter(x=>x.impact==='critical'||x.impact==='serious');assert.deepEqual(reportSerious.map(x=>x.id),[],`报告页高严重度问题: ${JSON.stringify(reportSerious.map(x=>({id:x.id,nodes:x.nodes.map(n=>({target:n.target,summary:n.failureSummary}))})))}`);
    await page.getByRole('button',{name:'切换项目'}).click();
    const browserFixture='<!doctype html><html lang="zh-CN"><title>上传验收</title><main><h1>验收</h1><input id="email" type="email"></main></html>';
-   await page.locator('input[type=file]').setInputFiles({name:'browser-upload.html',mimeType:'text/html',buffer:Buffer.from(browserFixture)});
+   await page.locator('input[type=file]').setInputFiles({name:'browser-upload-ui.zip',mimeType:'application/zip',buffer:await zip([{name:'index.html',value:browserFixture}])});
    await page.getByText('项目已导入并完成真实检测。').waitFor();
    await page.getByRole('button',{name:/表单控件缺少标签/}).click();
    await page.getByRole('button',{name:'AI 分析与修复'}).click();
@@ -190,7 +190,7 @@ test('静态项目的真实检测、审核修复、失败回滚、导出与异�
    await page.getByText('V2 检测证据 · 已完成',{exact:true}).waitFor();
    await page.getByRole('button',{name:'切换项目'}).click();
    const ambiguous='<!doctype html><html lang="zh-CN"><title>用途未说明</title><main><h1>登记</h1><form><input id="email" name="field-1" type="text"><button>提交</button></form></main></html>';
-   await page.locator('input[type=file]').setInputFiles({name:'unknown-field.html',mimeType:'text/html',buffer:Buffer.from(ambiguous)});
+   await page.locator('input[type=file]').setInputFiles({name:'unknown-field-ui.zip',mimeType:'application/zip',buffer:await zip([{name:'index.html',value:ambiguous}])});
    await page.getByText('项目已导入并完成真实检测。').waitFor();
    await page.getByRole('button',{name:/表单控件缺少标签/}).click();
    await page.getByRole('button',{name:'AI 分析与修复'}).click();
@@ -204,7 +204,7 @@ test('静态项目的真实检测、审核修复、失败回滚、导出与异�
    await page.getByLabel('index.html 源码差异').filter({hasText:'登记编号'}).waitFor();
    await page.getByRole('button',{name:'切换项目'}).click();
    const references='<!doctype html><html lang="zh-CN"><title>ARIA 引用</title><main><h1>预约</h1><p id="known">发送提醒</p><button id="valid-ref" aria-labelledby="known"></button><button id="broken-ref" aria-labelledby="missing"></button></main></html>';
-   await page.locator('input[type=file]').setInputFiles({name:'aria-references.html',mimeType:'text/html',buffer:Buffer.from(references)});
+   await page.locator('input[type=file]').setInputFiles({name:'aria-references-ui.zip',mimeType:'application/zip',buffer:await zip([{name:'index.html',value:references}])});
    await page.getByText('项目已导入并完成真实检测。').waitFor();
    await page.getByText('V2 检测证据 · 已完成',{exact:true}).click();
    const repairReference=page.getByRole('button',{name:/查看ARIA 引用修复.*#broken-ref/});
@@ -215,7 +215,7 @@ test('静态项目的真实检测、审核修复、失败回滚、导出与异�
    await page.getByRole('button',{name:'切换项目'}).click();
    const chart=fs.readFileSync(new URL('./fixtures/vision/bars.png',import.meta.url)).toString('base64');
    const imageFixture=`<!doctype html><html lang="zh-CN"><title>图片验收</title><main><h1>图片</h1><img src="data:image/png;base64,${chart}"></main></html>`;
-   await page.locator('input[type=file]').setInputFiles({name:'browser-image.html',mimeType:'text/html',buffer:Buffer.from(imageFixture)});
+   await page.locator('input[type=file]').setInputFiles({name:'browser-image-ui.zip',mimeType:'application/zip',buffer:await zip([{name:'index.html',value:imageFixture}])});
    await page.getByText('项目已导入并完成真实检测。').waitFor();
    await page.getByRole('button',{name:/图片缺少替代文本/}).click();
    await page.getByRole('button',{name:'AI 分析与修复'}).click();

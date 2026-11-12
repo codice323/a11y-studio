@@ -1,3 +1,4 @@
+import { openImportedFixture } from './helpers/project-import';
 import { testFetch as fetch, registerTestAccount, attachTestAccount } from './helpers/account';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
@@ -98,8 +99,7 @@ test('全景工作台用真实 Chrome 采集静态多页和 React 路由，重�
         if (evidence) await page.context().tracing.start({screenshots:true,snapshots:true});
         page.setDefaultTimeout(22000);
         await page.goto(origin);
-        await page.getByRole('button', {name:'源码工程',exact:true}).click();
-        await page.locator('input[type=file]').setInputFiles({name:scenario.name+'.zip', mimeType:'application/zip', buffer:zip(scenario.files as Record<string, string>)});
+        await openImportedFixture(page, origin, {name:scenario.name+'.zip', mimeType:'application/zip', buffer:zip(scenario.files as Record<string, string>)}, 'source');
         const panel = page.getByRole('region', {name:'修复效果对比'});
         const matched = panel.getByText(/左右已匹配同一页面和状态/);
         const ready = async () => {
