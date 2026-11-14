@@ -3,20 +3,25 @@ import { randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { chromium, type Browser, type BrowserContext, type Page, type Route } from 'playwright-core';
-import { ROOT } from './storage';
+import { ROOT, DATA, hash } from './storage';
 import { parsePublicUrl, requestPublicBrowserResource, type PublicBrowserBudget } from './url-snapshot';
 import { importBrowserCaptureData } from './browser-capture';
+import { diagnosePage, isWebsiteVerificationPage, locatePageElement, requireTargetPage, verificationPageMessage } from './page-diagnostics';
+import type { LiveFrame } from '../../packages/shared/live-comparison';
+import type { PageDiagnostics } from '../../packages/shared/page-diagnostics';
 
 const MAX_SESSIONS = 2;
 const SESSION_TTL = 20 * 60 * 1000;
 const MAX_REQUESTS = 1200;
 const MAX_PARALLEL_REQUESTS = 24;
 const NETWORK_BUDGET = 96 * 1024 * 1024;
+const MAX_NAVIGATION_REDIRECTS = 5;
+const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
 const VIEWPORT = { width: 1280, height: 820 };
 const candidates = [process.env.CHROME_PATH, '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
   '/usr/bin/chromium', '/usr/bin/chromium-browser', '/usr/bin/google-chrome'].filter(Boolean) as string[];
 
-type Frame = { image: string; width: number; height: number; title: string; url: string; scrollHeight:number; failedResources:number };
+type Frame = { image: string; width: number; height: number; title: string; url: string; scrollHeight:number; failedResources:number; resourceFailures?: Record<string,number>; blocked?:string; location?:LiveFrame['location'] };
 type Session = {
   id: string;
   ownerUserId: string;
@@ -30,14 +35,23 @@ type Session = {
   activeRequests: number;
   requestWaiters: Array<() => void>;
   failedResources: number;
+  resourceFailures: Record<string,number>;
   actions: number;
   frames: number;
   queue: Promise<unknown>;
   expires: ReturnType<typeof setTimeout>;
   closed: boolean;
   navigationError?: unknown;
+  diagnostics: Map<string,PageDiagnostics>;
+  target?: {url:string;selector:string;selectors:string[]};
+  pendingRedirect?: {page:Page;url:URL};
+  openingNavigation?: {url: string; redirect?: URL};
+  replay: Map<string,{type:string;body:string}>;
+  replayBytes: number;
+  replayDocuments: WeakMap<Page, {url:string;key:string}>;
 };
 const sessions = new Map<string, Session>();
+let startQueue: Promise<unknown> = Promise.resolve();
 
 function ownedSession(id: string, ownerUserId: string, authSessionId: string) {
   const session = sessions.get(id);
@@ -109,12 +123,20 @@ async function acquireRequestSlot(session: Session) {
   session.activeRequests++;
 }
 
+function recordResourceFailure(session: Session, type: string, reason: string) {
+  if (!['script','image','stylesheet','xhr','fetch','font'].includes(type)) return;
+  session.failedResources++;
+  const key = type + ' · ' + reason;
+  session.resourceFailures[key] = (session.resourceFailures[key] ?? 0) + 1;
+}
+
 async function routeResponse(session: Session, route: Route) {
   const request = route.request();
-  let mainNavigation = false;
+  let navigationPage: Page | undefined;
   if (request.isNavigationRequest()) {
     try {
-      mainNavigation = request.frame() === session.page.mainFrame();
+      const frame = request.frame();
+      if (frame === frame.page().mainFrame()) navigationPage = frame.page();
     } catch { /* Some navigation requests are emitted before a frame exists. */ }
   }
   let acquired = false;
@@ -127,8 +149,7 @@ async function routeResponse(session: Session, route: Route) {
     acquired = true;
     const url = parsePublicUrl(request.url());
     const response = await requestPublicBrowserResource(request.url(), request.method(), await request.allHeaders(),
-      request.postDataBuffer() ?? undefined, session.budget, session.controller.signal, mainNavigation);
-    if (response.status >= 400 && ['script','image','stylesheet','xhr','fetch','font'].includes(request.resourceType())) session.failedResources++;
+      request.postDataBuffer() ?? undefined, session.budget, session.controller.signal, Boolean(navigationPage));
     const headerValues = response.headers['set-cookie'];
     if (headerValues) {
       const values = Array.isArray(headerValues) ? headerValues : [headerValues];
@@ -137,6 +158,31 @@ async function routeResponse(session: Session, route: Route) {
         if (cookie) await session.context.addCookies([cookie]).catch(() => {});
       }
     }
+    const opening = session.openingNavigation;
+    if (navigationPage === session.page && request.method() === 'GET' && REDIRECT_STATUSES.has(response.status)) {
+      if (!response.headers.location) throw new Error('目标网站返回了无效的跳转地址。');
+      const destination = parsePublicUrl(new URL(response.headers.location,url));
+      // Chromium follows fulfilled redirects outside the route handler.
+      // Queue a fresh, guarded navigation after aborting the original.
+      if (opening?.url === url.href) opening.redirect = destination;
+      else session.pendingRedirect = {page:navigationPage,url:destination};
+      await route.abort('aborted');
+      return;
+    }
+    const key = hash(url.href);
+    const size = response.body.length;
+    const resourceLimit = navigationPage ? 4_000_000 : 2_000_000;
+    const archiveLimit = navigationPage ? 24_000_000 : 20_000_000;
+    if (request.method()==='GET' && response.status===200 && ['document','script','stylesheet','image','font','xhr','fetch'].includes(request.resourceType()) &&
+        size<=resourceLimit && session.replayBytes+size<=archiveLimit && !session.replay.has(key)) {
+      session.replay.set(key,{type:String(response.headers['content-type'] || 'application/octet-stream').slice(0,160),body:response.body.toString('base64')});
+      session.replayBytes+=size;
+    }
+    if (navigationPage && response.status >= 200 && response.status < 300) {
+      if (session.replay.has(key)) session.replayDocuments.set(navigationPage, {url:url.href,key});
+      else session.replayDocuments.delete(navigationPage);
+    }
+    if (response.status >= 400) recordResourceFailure(session,request.resourceType(),'HTTP '+response.status);
     const forwarded: Record<string,string> = {};
     const responseHeaderPattern = /^(?:content-type|content-language|content-disposition|location|cache-control|expires|last-modified|etag|vary|www-authenticate|content-security-policy(?:-report-only)?|referrer-policy|x-content-type-options|x-frame-options|permissions-policy|access-control-allow-[a-z-]+|access-control-expose-headers)$/i;
     for (const [name, value] of Object.entries(response.headers)) {
@@ -146,8 +192,16 @@ async function routeResponse(session: Session, route: Route) {
     }
     await route.fulfill({ status:response.status, headers:forwarded, body:response.body });
   } catch (error) {
-    if (mainNavigation) session.navigationError = error;
-    if (!session.controller.signal.aborted && ['script','image','stylesheet','xhr','fetch','font'].includes(request.resourceType())) session.failedResources++;
+    if (navigationPage === session.page) session.navigationError = error;
+    if (!session.controller.signal.aborted) {
+      const message = (error as Error).message;
+      const reason = /超过采集限制|流量已达上限|请求已达上限/.test(message) ? '超过采集限制' :
+        /DNS/.test(message) ? 'DNS 解析失败' :
+        /压缩内容/.test(message) ? '响应编码不受支持' :
+        /公开网页|公网|默认端口/.test(message) ? '地址受限' :
+        /连接失败/.test(message) ? '连接失败' : '请求失败';
+      recordResourceFailure(session,request.resourceType(),reason);
+    }
     await route.abort('failed').catch(() => {});
   } finally {
     if (acquired) {
@@ -155,6 +209,31 @@ async function routeResponse(session: Session, route: Route) {
       session.requestWaiters.shift()?.();
     }
   }
+}
+
+async function openPage(session: Session, input: URL) {
+  const deadline = Date.now() + 25000;
+  let url = input;
+  for (let hop = 0; hop <= MAX_NAVIGATION_REDIRECTS; hop++) {
+    const timeout = deadline - Date.now();
+    if (timeout <= 0) throw new Error('网页连接超时，请点击重试。');
+    const requestUrl = new URL(url);
+    requestUrl.hash = '';
+    const opening: NonNullable<Session['openingNavigation']> = {url:requestUrl.href};
+    session.openingNavigation = opening;
+    session.navigationError = undefined;
+    try {
+      const response = await session.page.goto(url.href,{waitUntil:'domcontentloaded',timeout});
+      if (response && response.status() >= 400) throw new Error(`目标网站返回 HTTP ${response.status()}，请检查链接或稍后重试。`);
+      return;
+    } catch (error) {
+      if (session.navigationError || !opening.redirect) throw session.navigationError ?? error;
+      url = opening.redirect;
+    } finally {
+      session.openingNavigation = undefined;
+    }
+  }
+  throw new Error('目标网站重定向次数过多，请检查链接。');
 }
 
 function serialize<T>(session: Session, operation: () => Promise<T>): Promise<T> {
@@ -168,14 +247,22 @@ function serialize<T>(session: Session, operation: () => Promise<T>): Promise<T>
 
 async function frame(session: Session): Promise<Frame> {
   return serialize(session, async () => {
+    const redirect = session.pendingRedirect;
+    session.pendingRedirect = undefined;
+    if (redirect?.page === session.page) await openPage(session,redirect.url);
     if (session.page.isClosed()) throw new Error('网页已关闭，请重新打开采集会话。');
     if (++session.frames > 2000) throw new Error('采集画面刷新次数已达上限，请结束本次采集后重新开始。');
     const image = await session.page.screenshot({ type:'jpeg', quality:62, timeout:15000,
       animations:'disabled', mask:[session.page.locator('input[type="password"],input[type="email"],input[type="tel"],input[type="file"]')] }).catch(async () =>
       session.page.screenshot({ type:'jpeg', quality:48, timeout:15000, animations:'disabled' }));
-    const meta = await session.page.evaluate(() => ({ width:innerWidth, height:innerHeight, title:document.title, url:location.href,
+    const { visibleText, ...meta } = await session.page.evaluate(() => ({ width:innerWidth, height:innerHeight, title:document.title, url:window.location.href,
+      visibleText:document.body?.innerText.slice(0,12000) ?? '',
       scrollHeight:Math.max(document.documentElement.scrollHeight,document.body?.scrollHeight ?? 0) }));
-    return { image:'data:image/jpeg;base64,' + image.toString('base64'), ...meta, failedResources:session.failedResources };
+    const target = session.target;
+    const highlight = target && target.url === meta.url ? await locatePageElement(session.page, target.selector,false,target.selectors) : undefined;
+    const blocked = isWebsiteVerificationPage(meta.title,visibleText) ? verificationPageMessage : undefined;
+    if (blocked) session.diagnostics.delete(meta.url);
+    return { blocked, location:highlight, image:'data:image/jpeg;base64,' + image.toString('base64'), ...meta, failedResources:session.failedResources, resourceFailures:{...session.resourceFailures} };
   });
 }
 
@@ -194,7 +281,12 @@ const actionShape = (raw: unknown) => {
     return { action:'key' as const, key:value.key, shift:value.shift===true };
   }
   if (value.action === 'text' && typeof value.text === 'string' && value.text.length <= 500) return { action:'text' as const, text:value.text };
+  if (value.action === 'locate' && typeof value.url === 'string' && typeof value.selector === 'string' && value.selector.length <= 2000) {
+    const selectors = Array.isArray(value.selectors) ? value.selectors.slice(0,300).filter((item): item is string => typeof item === 'string' && item.length <= 2000) : [];
+    return { action:'locate' as const, url:value.url, selector:value.selector, selectors };
+  }
   if (value.action === 'reload') return { action:'reload' as const };
+  if (value.action === 'back') return { action:'back' as const };
   throw new Error('网页操作暂不支持。');
 };
 
@@ -204,7 +296,11 @@ async function perform(session: Session, raw: unknown) {
     if (++session.actions > 1500) throw new Error('本次采集的网页操作次数已达上限，请结束后重新开始。');
     const page = session.page;
     if (page.isClosed()) throw new Error('网页已关闭，请重新打开采集会话。');
-    if (action.action === 'click') await page.mouse.click(action.x, action.y);
+    if (action.action === 'locate') {
+      if (page.url() !== action.url) throw new Error('网页已切换，请重新选择问题。');
+      session.target = {url:action.url,selector:action.selector,selectors:action.selectors};
+      await locatePageElement(page,action.selector,true,action.selectors);
+    } else if (action.action === 'click') await page.mouse.click(action.x, action.y);
     else if (action.action === 'move') await page.mouse.move(action.x, action.y, { steps:1 });
     else if (action.action === 'pointerDown') { await page.mouse.move(action.x,action.y); await page.mouse.down(); }
     else if (action.action === 'pointerMove') await page.mouse.move(action.x,action.y);
@@ -214,10 +310,14 @@ async function perform(session: Session, raw: unknown) {
       await page.mouse.wheel(0, action.delta);
       await page.waitForTimeout(120);
     } else if (action.action === 'key') await page.keyboard.press((action.shift ? 'Shift+' : '') + (action.key==='Space'?' ':action.key));
-    else if (action.action === 'text') await page.keyboard.type(action.text, { delay:5 });
-    else {
+    else if (action.action === 'text') await page.keyboard.insertText(action.text);
+    else if (action.action === 'back') {
+      session.target = undefined;
+      await page.goBack({waitUntil:'domcontentloaded',timeout:10000}).catch(() => null);
+    } else {
       session.failedResources = 0;
-      await page.reload({ waitUntil:'domcontentloaded', timeout:20000 }).catch(() => {});
+      session.resourceFailures = {};
+      await openPage(session,parsePublicUrl(page.url()));
       await page.waitForTimeout(350);
     }
     if (action.action === 'click' || action.action === 'key' || action.action === 'text') await page.waitForTimeout(180);
@@ -226,8 +326,18 @@ async function perform(session: Session, raw: unknown) {
 }
 
 export async function startManagedBrowserSession(input: unknown, ownerUserId: string, authSessionId: string) {
-  if (sessions.size >= MAX_SESSIONS) throw new Error('当前实时采集会话较多，请稍后再试。');
   const url = parsePublicUrl(normalizeCaptureUrl(typeof input === 'string' ? input : ''));
+  const opening = startQueue.then(() => openManagedBrowserSession(url,ownerUserId,authSessionId));
+  startQueue = opening.catch(() => {});
+  return opening;
+}
+
+async function openManagedBrowserSession(url: URL, ownerUserId: string, authSessionId: string) {
+  // A refresh or new capture replaces only this authenticated browser session's old capture.
+  await Promise.all([...sessions.values()]
+    .filter(session => session.ownerUserId === ownerUserId && session.authSessionId === authSessionId)
+    .map(closeSession));
+  if (sessions.size >= MAX_SESSIONS) throw new Error('当前实时采集会话较多，请稍后再试。');
   const executablePath = candidates.find(candidate => fs.existsSync(candidate));
   if (!executablePath) throw new Error('未找到 Chromium 或 Chrome，请设置 CHROME_PATH 后重启后端。');
   let browser: Browser | undefined;
@@ -240,7 +350,7 @@ export async function startManagedBrowserSession(input: unknown, ownerUserId: st
     await context.routeWebSocket('**/*', socket => socket.close());
     const controller = new AbortController();
     session = { id:randomUUID(), ownerUserId, authSessionId, browser, context, page:await context.newPage(), controller,
-      budget:{remaining:NETWORK_BUDGET}, requests:0, activeRequests:0, requestWaiters:[], failedResources:0, actions:0, frames:0, queue:Promise.resolve(), expires:setTimeout(()=>{},0), closed:false };
+      budget:{remaining:NETWORK_BUDGET}, requests:0, activeRequests:0, requestWaiters:[], failedResources:0, resourceFailures:{}, actions:0, frames:0, queue:Promise.resolve(), expires:setTimeout(()=>{},0), closed:false, diagnostics:new Map(), replay:new Map(),replayBytes:0,replayDocuments:new WeakMap() };
     clearTimeout(session.expires);
     session.expires = setTimeout(()=>void closeSession(session!), SESSION_TTL);
     session.expires.unref?.();
@@ -266,11 +376,7 @@ export async function startManagedBrowserSession(input: unknown, ownerUserId: st
     context.on('page',watchPage);
     watchPage(session.page);
     session.page.setDefaultTimeout(8000);
-    try {
-      await session.page.goto(url.href,{ waitUntil:'domcontentloaded', timeout:25000 });
-    } catch (error) {
-      throw session.navigationError ?? error;
-    }
+    await openPage(session,url);
     await session.page.waitForTimeout(700);
     const initial = await frame(session);
     return { id:session.id, frame:initial };
@@ -292,19 +398,60 @@ export async function actManagedBrowserSession(id: string, ownerUserId: string, 
   return perform(ownedSession(id,ownerUserId,authSessionId),action);
 }
 
-export async function captureManagedBrowserSession(id: string, ownerUserId: string, authSessionId: string) {
+export async function diagnoseManagedBrowserPage(id: string, ownerUserId: string, authSessionId: string, input: unknown) {
   const session = ownedSession(id,ownerUserId,authSessionId);
+  const {url,refresh} = (input ?? {}) as {url?:unknown;refresh?:unknown};
+  if (typeof url !== 'string' || url.length > 2048) throw new Error('检测页面地址无效。');
+  return serialize(session,async () => {
+    const page = session.page;
+    if (session.pendingRedirect || page.url() !== url) throw new Error('网页已切换，请重试检测。');
+    await requireTargetPage(page);
+    const cached = session.diagnostics.get(url);
+    if (cached && !cached.coverage?.stillLoading && refresh !== true) return cached;
+    const result = await diagnosePage(page,url,{waitForContent:true});
+    if (session.page !== page) throw new Error('网页已切换，请重试检测。');
+    if (!cached && session.diagnostics.size >= 50) session.diagnostics.delete(session.diagnostics.keys().next().value!);
+    session.diagnostics.set(url,result);
+    return result;
+  });
+}
+
+export async function captureManagedBrowserSession(id: string, ownerUserId: string, authSessionId: string, expectedUrl?: unknown) {
+  const session = ownedSession(id,ownerUserId,authSessionId);
+  if (expectedUrl !== undefined && (typeof expectedUrl !== 'string' || expectedUrl.length > 2048)) throw new Error('采集页面地址无效。');
   const project = await serialize(session,async () => {
     const page = session.page;
+    const checkPage = () => {
+      if (expectedUrl !== undefined && (session.pendingRedirect || session.page !== page || page.url() !== expectedUrl)) {
+        throw new Error('网页已切换，请重新选择要修复的问题。');
+      }
+    };
+    checkPage();
+    await requireTargetPage(page);
     const cdp=await session.context.newCDPSession(page);
     try {
       await cdp.send('Page.setBypassCSP',{enabled:true});
       await page.addScriptTag({ path:path.join(ROOT,'node_modules/axe-core/axe.min.js') });
-      await page.addScriptTag({ path:path.join(ROOT,'browser-extension/capture.js') });
-      const captured = await page.evaluate(async () => {
-        const capture = (globalThis as typeof globalThis & {a11yStudioCapture?:()=>Promise<Record<string,unknown>>}).a11yStudioCapture;
+      await page.addScriptTag({ path:path.join(ROOT,'apps/api/capture-page.js') });
+      const imageUrls = await page.evaluate(() => [...new Set(Array.from(document.images, image => image.currentSrc))].filter(Boolean).slice(0,600));
+      const archivedImages: Record<string,string> = Object.create(null);
+      let imageBudget = 600_000;
+      for (const url of imageUrls) {
+        const asset = session.replay.get(hash(url.split('#')[0]));
+        const type = asset?.type.split(';')[0].toLowerCase();
+        if (!asset || !type || !/^image\/(?:png|jpeg|gif|webp|avif)$/.test(type) || asset.body.length > 400_000) continue;
+        const data = 'data:' + type + ';base64,' + asset.body;
+        if (data.length > imageBudget) continue;
+        archivedImages[url] = data;
+        imageBudget -= data.length;
+      }
+      const captured = await page.evaluate(async images => {
+        const capture = (globalThis as typeof globalThis & {a11yStudioCapture?:(images:Record<string,string>)=>Promise<Record<string,unknown>>}).a11yStudioCapture;
         if (!capture) throw new Error('无障碍页面采集脚本未能启动。');
-        return capture();
+        return capture(images);
+      }, archivedImages).catch((error: Error) => {
+        const captureError = error.message.match(/^(?:page\.evaluate: )?(?:Error: )?((?:精简图片和样式后，页面副本仍超过 4 MB|页面元素超过 8000 个|无障碍页面采集脚本未能启动)[^\r\n]*?)(?:\s+at\s|\r?\n|$)/);
+        throw new Error(captureError?.[1] ?? '保存网页副本失败，请重试。');
       });
       const dimensions = await page.evaluate(() => ({ width:document.documentElement.scrollWidth, height:document.documentElement.scrollHeight }));
       const mask = [page.locator('input[type="password"],input[type="email"],input[type="tel"],input[type="file"]')];
@@ -323,7 +470,18 @@ export async function captureManagedBrowserSession(id: string, ownerUserId: stri
       const payload = { ...captured, screenshot:'data:image/png;base64,'+Buffer.from(screenshot).toString('base64'), screenshotFullPage,
         viewport:{width:VIEWPORT.width,height:VIEWPORT.height}, violations:violations.slice(0,300), limitations:limitations.slice(0,20) };
       if (Buffer.byteLength(JSON.stringify(payload)) > 10_500_000) throw new Error('当前页面采集结果过大，请减少页面内容后再试。');
-      return importBrowserCaptureData(payload,ownerUserId);
+      await requireTargetPage(page);
+      checkPage();
+      const project = await importBrowserCaptureData(payload,ownerUserId);
+      const entry = session.replayDocuments.get(page);
+      if (entry) {
+        const directory=path.join(DATA,'browser-replays');
+        try {
+          fs.mkdirSync(directory,{recursive:true,mode:0o700});
+          fs.writeFileSync(path.join(directory,project.id+'.json'),JSON.stringify({version:1,entry:entry.url,entryKey:entry.key,resources:Object.fromEntries(session.replay)}),{mode:0o600});
+        } catch (error) { console.warn('动态回放资源保存失败:',(error as Error).message); }
+      }
+      return project;
     } finally {
       await cdp.send('Page.setBypassCSP',{enabled:false}).catch(()=>{});
       await cdp.detach().catch(()=>{});

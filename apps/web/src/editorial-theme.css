@@ -66,18 +66,6 @@
 .app.editorial .project-strip { align-items: center; padding: 14px 17px; }
 .app.editorial .project-symbol { background: var(--paper-tint); color: var(--accent); }
 .app.editorial .project-title b { font-size: 17px; }
-.app.editorial .project-title span { margin-top: 3px; color: var(--muted); font-size: 13px; }
-.app.editorial .project-actions > :is(button, select) {
-  min-height: 44px;
-  border-color: #d7cdbd;
-  border-radius: 7px;
-  color: #3d4648;
-  background-color: var(--paper-raised);
-}
-.app.editorial .project-actions select {
-  background-color: var(--paper-raised);
-  border-color: #d7cdbd;
-}
 .app.editorial .button,
 .app.editorial .secondary { min-height: 44px; border-radius: 7px; }
 .app.editorial .secondary { color: #3d4648; background: var(--paper-raised); border-color: #d7cdbd; }
@@ -86,7 +74,6 @@
 .app.editorial .button.dark:hover:not(:disabled) { background: #833a29; border-color: #833a29; }
 .app.editorial .record-link,
 .app.editorial .bottom-note button,
-.app.editorial .versions button { color: var(--blue); }
 
 /* The page evidence is the main canvas. The issue and repair rail stays visible at its side. */
 .app.editorial .workbench {
@@ -96,7 +83,9 @@
   align-items: stretch;
 }
 .app.editorial .evidence-column { grid-area: evidence; min-width: 0; }
-.app.editorial .workbench-controls { grid-area: controls; min-width: 0; grid-template-rows: auto auto minmax(0, 1fr); }
+.app.editorial .workbench-controls { grid-area: controls; min-width: 0; display: flex; flex-direction: column; }
+.app.editorial .workbench-controls > :not(.control-panel, .issue-list) { flex: 0 0 auto; }
+.app.editorial .workbench-controls > .control-panel { flex: 1 1 auto; }
 .app.editorial .review-rail-heading {
   display: flex;
   align-items: center;
@@ -128,15 +117,16 @@
 .app.editorial .list-tabs { margin-top: 0; background: #f2ece1; }
 .app.editorial .list-tabs button { min-height: 42px; }
 .app.editorial .filter-row { padding-inline: 13px; font-size: 13px; }
-.app.editorial .issue-list { display: grid; align-content: start; gap: 5px; padding: 4px 10px 12px; }
+.app.editorial .filter-row select { min-width: 0; max-width: 70%; }
+.app.editorial .issue-list { display: grid; align-content: start; gap: 7px; padding: 4px 10px 12px; }
 .app.editorial .issue {
   width: 100%;
   min-width: 0;
   min-height: 58px;
-  padding: 9px 8px;
-  border-color: transparent;
+  padding: 10px;
+  border-color: #e8ded1;
   border-radius: 8px;
-  background: transparent;
+  background: #fffdfa;
 }
 .app.editorial .issue:hover { background: #f8f2e9; }
 .app.editorial .issue.selected { background: #f7eee7; border-color: #d9ab94; }
@@ -145,7 +135,7 @@
 .app.editorial .issue-dot { border-radius: 6px; background: #f8ebda; color: #874522; }
 .app.editorial .issue-summary { grid-template-columns: minmax(0, 1fr) max-content; justify-content: normal; align-items: start; column-gap: 7px; }
 .app.editorial .issue-summary b { min-width: 0; overflow-wrap: anywhere; }
-.app.editorial .issue-summary .severity { justify-self: start; }
+.app.editorial .issue-summary .severity { justify-self: end; white-space: nowrap; }
 .app.editorial .issue-summary small { grid-column: 1 / -1; min-width: 0; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .app.editorial .issue > svg { align-self: center; margin-left: auto; }
 .app.editorial .severity { border-radius: 4px; font-size: 12px; }
@@ -252,9 +242,6 @@
 @media (max-width: 720px) {
   .app.editorial .page-intro { align-items: flex-start; padding-bottom: 13px; }
   .app.editorial .page-intro h1 { font-size: 29px; }
-  .app.editorial .project-strip { grid-template-columns: auto minmax(0, 1fr); }
-  .app.editorial .version-controls { grid-column: 1 / -1; }
-  .app.editorial .project-actions { grid-template-columns: minmax(0, 1fr) auto auto; }
   .app.editorial .review-rail-heading { padding-inline: 13px; }
   .app.editorial .issue-impact { grid-template-columns: 34px minmax(0, 1fr); }
   .app.editorial .issue-impact-review { grid-column: 2; }
@@ -262,3 +249,20 @@
   .app.editorial :is(.version-comparison-toolbar, .page-comparison-toolbar) { grid-template-columns: minmax(0, 1fr); }
   .app.editorial :is(.version-comparison-toolbar, .page-comparison-toolbar) > button { grid-column: auto; justify-self: stretch; }
 }
+
+.app.editorial .workspace-page-status {
+  margin: 0 12px 10px;
+  padding: 8px 10px;
+  border-radius: 6px;
+  background: var(--paper);
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+.app.editorial .workspace-page-status p { margin: 0 0 3px; }
+.app.editorial .workspace-page-status button { margin-top: 6px; }
+.workspace-page-rescan { display: flex; flex-wrap: wrap; align-items: baseline; column-gap: 8px; }
+.workspace-page-review { padding: 8px 4px; }
+.workspace-page-review details { margin-block: 6px; }
+.workspace-page-review ul { padding-inline-start: 20px; }
+.workspace-live-path { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; overflow-wrap: anywhere; }
+.workspace-live-path .secondary[aria-pressed="true"] { border-color: #a75b45; color: #853e2b; }

@@ -6,7 +6,7 @@ import { test } from 'node:test';
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(),'a11y-source-safety-'));
 process.env.A11Y_DATA_DIR = path.join(root,'db');
-const { compileSourcePlan, writeSourceCandidate, checkSourceCandidate } = await import('../apps/api/source-repair');
+const { compileSourcePlan, sourceReviewChanges, writeSourceCandidate, checkSourceCandidate } = await import('../apps/api/source-repair');
 const { auditCandidate, withRepairPage } = await import('../apps/api/scan');
 const { checkOtherPages } = await import('../apps/api/page-regression');
 const { inspectCssEvidence } = await import('../apps/api/css-evidence');
@@ -57,4 +57,23 @@ test('浏览器证据包含继承、变量、媒体查询、内联优先级与�
   assert.ok(evidence[0].normal.pseudoElements?.some(item=>item.type==='before'));
   assert.ok(evidence[1].normal.inherited?.some(item=>item.rules.some(rule=>rule.media?.some(media=>media.includes('max-width')))));
   assert.notEqual(evidence[0].contrast.ratio,evidence[1].contrast.ratio);
+});
+
+test('浏览器采集的大型 HTML 可生成并写入局部补丁，审核只返回改动片段', t=>{
+  const dir=fs.mkdtempSync(path.join(os.tmpdir(),'a11y-large-capture-'));
+  t.after(()=>fs.rmSync(dir,{recursive:true,force:true}));
+  const entry='index.html';
+  const file=path.join(dir,entry);
+  const original='<!doctype html><html><body><!--'+'x'.repeat(1_400_000)+'-->\n<button id="target"></button></body></html>';
+  fs.writeFileSync(file,original);
+  const issue={id:'issue',ruleId:'button-name',selector:'#target',impact:'critical',help:'',description:'',helpUrl:'',html:'<button id="target"></button>',bounds:null};
+  const plan={kind:'button',mode:'aria',value:'打开菜单'};
+  assert.throws(()=>compileSourcePlan({dir,entry,issue},plan,'补丁'),/64 KiB/);
+  const candidate=compileSourcePlan({dir,entry,issue,capturedEntry:true},plan,'补丁');
+  const review=sourceReviewChanges(candidate.changes)[0];
+  assert.equal(review.excerpt,true);
+  assert.ok(review.after.length<1024);
+  assert.match(review.after,/aria-label="打开菜单"/);
+  writeSourceCandidate(dir,candidate);
+  assert.equal(fs.readFileSync(file,'utf8'),original.replace('id="target"','id="target" aria-label="打开菜单"'));
 });

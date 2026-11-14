@@ -8,6 +8,9 @@ const passages = JSON.parse(fs.readFileSync(path.join(ROOT, 'knowledge/wcag/pass
 // Map only supported, independently identified issue types to relevant criteria.
 // The model's query can refine ranking but cannot redefine the detected issue.
 const issueProfiles: Record<string, { hint: string; refs: string[] }> = {
+  'image-text-legibility': { hint: '图中文字 图片 低对比 可读性 重建', refs: ['1.4.5', '1.4.3'] },
+  'graphic-contrast': { hint: '非文本对比度 图表 图标 图形 颜色 邻接', refs: ['1.4.11', '1.4.1', '1.1.1'] },
+  'color-only-graphic': { hint: '颜色唯一 区分 图例 标签 纹理', refs: ['1.4.1', '1.4.11'] },
   'image-alt': { hint: '图片 图像 image alt 替代文本', refs: ['1.1.1'] },
   label: { hint: '表单 控件 label 名称 输入', refs: ['3.3.2', '1.3.1', '4.1.2'] },
   'select-name': { hint: '下拉表单 选择 控件 label 名称', refs: ['3.3.2', '1.3.1', '4.1.2'] },

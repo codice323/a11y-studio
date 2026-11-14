@@ -34,16 +34,20 @@ const planSchema = z.discriminatedUnion('kind', [
 
 type Plan = z.infer<typeof planSchema>;
 type Audit = Awaited<ReturnType<typeof runAudit>>;
-export type SourceContext = { projectId: string; snapshotId: string; dir: string; entry: string; issue: Issue; baseline: Audit; engineering?: boolean };
+export type SourceContext = { projectId: string; snapshotId: string; dir: string; entry: string; issue: Issue; baseline: Audit; engineering?: boolean; capturedEntry?: boolean };
 type Candidate = {
   plan: Plan; changes: SourceChange[]; target: string; newId?: string;
 };
 
-function readFile(dir: string, relative: string) {
+const sourceLimit = 64 * 1024;
+const capturedEntryLimit = 4 * 1024 * 1024;
+
+function readFile(dir: string, relative: string, limit = sourceLimit) {
   const resolved = safePath(dir, relative);
   if (!fs.realpathSync(resolved).startsWith(fs.realpathSync(dir) + path.sep)) throw new Error('文件超出项目快照。');
   const stat = fs.lstatSync(resolved);
-  if (!stat.isFile() || stat.size > 64 * 1024) throw new Error('源码文件超过 64 KiB 或不是普通文件。');
+  if (!stat.isFile()) throw new Error('源码路径必须指向普通文件。');
+  if (stat.size > limit) throw new Error(limit === sourceLimit ? '源码文件超过 64 KiB。' : '浏览器采集的 HTML 副本超过修复大小上限。');
   return fs.readFileSync(resolved, 'utf8');
 }
 
@@ -76,7 +80,7 @@ function editAttribute(source: string, location: any, name: string, value: strin
   return { start: at, end: at, text: ' ' + replacement };
 }
 
-export function compileSourcePlan(ctx: Pick<SourceContext, 'dir' | 'entry' | 'issue' | 'engineering'>, rawPlan: unknown, reason: string): Candidate {
+export function compileSourcePlan(ctx: Pick<SourceContext, 'dir' | 'entry' | 'issue' | 'engineering' | 'capturedEntry'>, rawPlan: unknown, reason: string): Candidate {
   const parsed = planSchema.safeParse(rawPlan);
   if (!parsed.success) throw new Error('计划不符合允许的源码修复格式。');
   const plan = parsed.data;
@@ -89,7 +93,7 @@ export function compileSourcePlan(ctx: Pick<SourceContext, 'dir' | 'entry' | 'is
     return {plan,...compileReactRepair(ctx.dir,ctx.issue.source,plan,reason)};
   }
   if(plan.kind==='alt')throw new Error('快照图片使用现有替代文本修复路径。');
-  const html = readFile(ctx.dir, ctx.entry);
+  const html = readFile(ctx.dir, ctx.entry, ctx.capturedEntry ? capturedEntryLimit : sourceLimit);
   const $ = cheerio.load(html, { sourceCodeLocationInfo: true });
   const node = $(ctx.issue.selector);
   const element = node[0];
@@ -411,9 +415,25 @@ export async function checkSourceCandidate(ctx: SourceContext, candidate: Candid
   ];
 }
 
+export function sourceReviewChanges(changes: SourceChange[]) {
+  return changes.map(change => {
+    const { before, after } = change;
+    if (Buffer.byteLength(before) <= sourceLimit) return change;
+    let start = 0;
+    const length = Math.min(before.length, after.length);
+    while (start < length && before[start] === after[start]) start++;
+    let tail = 0;
+    while (tail < length - start && before[before.length - 1 - tail] === after[after.length - 1 - tail]) tail++;
+    const offset = Math.max(0, start - 240);
+    const context = (source: string) => source.slice(offset, source.length - Math.max(0, tail - 240));
+    return { ...change, before: context(before), after: context(after), excerpt: true,
+      startLine: before.slice(0, offset).split('\n').length };
+  });
+}
+
 export function writeSourceCandidate(dir: string, candidate: Candidate) {
   for (const change of candidate.changes) {
-    if (readFile(dir, change.file) !== change.before) throw new Error('文件内容与预览不符。');
+    if (readFile(dir, change.file, Math.max(sourceLimit, Buffer.byteLength(change.before))) !== change.before) throw new Error('文件内容与预览不符。');
     fs.writeFileSync(safePath(dir, change.file), change.after);
   }
 }
@@ -421,7 +441,7 @@ export function writeSourceCandidate(dir: string, candidate: Candidate) {
 export async function proposeSourceRepair(ctx: SourceContext, userIntent: unknown, signal?: AbortSignal) {
   const started = performance.now();
   const baseHash = treeHash(ctx.dir);
-  const html = readFile(ctx.dir, ctx.entry);
+  const html = readFile(ctx.dir, ctx.entry, ctx.capturedEntry ? capturedEntryLimit : sourceLimit);
   const $ = cheerio.load(html);
   const react=isReactProject(ctx.dir);
   if(react&&!ctx.issue.source)throw new Error('无法唯一定位原始组件；重复渲染和动态生成节点需人工处理。');
@@ -562,6 +582,7 @@ export async function proposeSourceRepair(ctx: SourceContext, userIntent: unknow
       inspect_browser: { description: '读取目标真实 DOM、计算样式与无障碍树', run: () =>
         withRepairPage(ctx.dir, ctx.entry, signal, async page => ({
           ...await browserTarget(page, ctx.issue.selector),
+          ...(kind === 'contrast' ? {contrast:await measurePageContrast(page,ctx.issue.selector)} : {}),
           ...((kind === 'contrast' || kind === 'focus') ? {cssEvidence:await inspectCssEvidence(page,ctx.issue.selector)} : {}),
         })) },
       ...(needsVisual ? { read_visual: { description: '分析图标截图及邻近语境；无法确认用途时返回待人工确认', run: async () =>

@@ -13,6 +13,7 @@ export function eraseProjectRecords(projectId:string, ownerId:string) {
   const files=[
     ['browser-captures',projectId+'.png'],
     ['browser-captures',projectId+'.json'],
+    ['browser-replays',projectId+'.json'],
     ...(db.prepare('SELECT id FROM audits WHERE project_id=?').all(projectId) as {id:string}[])
       .map(({id})=>['screenshots',id+'.png']),
     ...(db.prepare('SELECT id FROM panorama_captures WHERE project_id=?').all(projectId) as {id:string}[])

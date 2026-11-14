@@ -78,7 +78,9 @@ test('注册登录、真实校园项目修复、双账号资源隔离及旧项�
       await pageA.getByRole('button',{name:'ZIP',exact:true}).click();
       await pageA.locator('input[type=file]').setInputFiles(files.zip);
       const list=pageA.getByRole('region',{name:'待处理问题'});
-      await list.getByRole('button').filter({hasText:'#hero-help'}).waitFor();
+      const issueButton=(selector:string)=>list.getByRole('button').filter({has:pageA.getByTitle(selector,{exact:true})});
+      await issueButton('#hero-help').waitFor();
+      await pageA.locator('[data-entry-audited=true]').waitFor();
       const [project]=await json(a,'/api/projects');
       const route='/api/projects/'+project.id;
       const baseState=await json(a,route);
@@ -89,10 +91,11 @@ test('注册登录、真实校园项目修复、双账号资源隔离及旧项�
       async function repair(selector:string,value:string,inputLabel:string) {
         await pageA.getByRole('tab',{name:'问题与历史'}).click();
         await pageA.getByRole('button',{name:/^待处理/}).click();
-        await list.getByRole('button').filter({hasText:selector}).click();
+        await issueButton(selector).click();
+        if (inputLabel === '修复颜色') await pageA.getByText('自选颜色',{exact:true}).click();
         await pageA.getByLabel(inputLabel,{exact:true}).fill(value);
         const proposed=pageA.waitForResponse(r=>r.request().method()==='POST'&&r.url().endsWith('/proposals'));
-        await pageA.getByRole('button',{name:'生成补丁预览'}).click();
+        await pageA.getByRole('button',{name:inputLabel === '修复颜色' ? '预览所选颜色' : '生成补丁预览'}).click();
         const proposal=await proposed;
         assert.ok(proposal.ok(),await proposal.text());
         const result=await proposal.json();
@@ -127,7 +130,7 @@ test('注册登录、真实校园项目修复、双账号资源隔离及旧项�
       await register(pageB,'owner-b@example.test');
       assert.deepEqual(await json(b,'/api/projects'),[]);
       await pageB.getByRole('button',{name:/慢绿生活/}).click();
-      await pageB.getByRole('heading',{name:'网页无障碍工作台',exact:true}).waitFor();
+      await pageB.getByRole('heading',{name:'网页无障碍审阅',exact:true}).waitFor();
       const [other]=await json(b,'/api/projects');
       const otherRoute='/api/projects/'+other.id;
       const otherState=await json(b,otherRoute);
@@ -147,6 +150,12 @@ test('注册登录、真实校园项目修复、双账号资源隔离及旧项�
       assert.equal((await a.request.post(base+route+'/rollback',{data:{snapshotId:v0}})).status(),403);
       assert.equal((await mutate(a,'/api/auth/sign-out',{},'POST','https://outside.example')).status(),403);
 
+      await Promise.all(([[pageA,route],[pageB,otherRoute]] as const).map(async ([tab,projectRoute])=>{
+        const closed=tab.waitForResponse(response=>response.request().method()==='DELETE' &&
+          new URL(response.url()).pathname.startsWith(projectRoute+'/live/') && response.ok());
+        await tab.getByRole('button',{name:'切换项目'}).click();
+        await closed;
+      }));
       const left=await mutate(a,route+'/live',{left:v0,right:v2});
       assert.ok(left.ok(),await left.text());
       const liveA=await left.json();

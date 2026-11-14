@@ -2,7 +2,9 @@ import { workspaceFetch as fetch } from './workspace-fetch';
 import { useEffect, useRef, useState, type ReactNode } from 'react';
 import type { scanLive } from '../../api/live-comparison';
 import type { LiveAction, LiveComparison as LiveResult, LiveSide } from '../../../packages/shared/live-comparison';
+import { liveEditingKeys } from '../../../packages/shared/live-comparison';
 import type { PageInspection } from './Panorama';
+import type { PageDiagnostics, PageTarget, WorkspacePageDiagnostics } from '../../../packages/shared/page-diagnostics';
 
 type Scan = Awaited<ReturnType<typeof scanLive>>;
 type RepairState = {stateId:string;version:string;path:string;issue:Scan['findings'][number]};
@@ -10,24 +12,32 @@ const sides = ['left','right'] as const;
 const label = {left:'左侧',right:'右侧'};
 const actionNames: Record<LiveAction['action'],string> = {
   click:'点击',activate:'激活控件',fill:'填入测试值',validate:'表单验证',tab:'Tab','shift-tab':'Shift+Tab',
-  escape:'Esc',refresh:'重新获取画面',scroll:'滚动',zoom:'缩放',
+  escape:'Esc',back:'返回上一页',locate:'定位',refresh:'重新获取画面',scroll:'滚动',zoom:'缩放',
+  text:'输入文字',key:'按键',
 };
+const editingKeys = new Set<string>(liveEditingKeys);
 type Activity = { time:string; title:string; detail:string };
+const savedSessionKey = 'a11y-studio:live-comparison-session';
 const dimensions = {route:'路由',dom:'DOM',semantics:'无障碍语义',focus:'焦点',visual:'画面'};
 
-export function LiveComparison({ project, left, right, names, start, current, onInspection, onRepair, onClose, versions, projectMode }: {
-  project:string; left:string; right:string; names:Record<LiveSide,string>; start?:string; current:string;
+export function LiveComparison({ project, left, right, names, start, current, onInspection, onRepair, onClose, versions, projectMode, proposalId, leftSelector, rightSelector, stateId, transition, onDiagnostics, diagnosticsCache, scanRevision=0, target, single=false, initialScroll, positionRef, onOpenUncapturedLink }: {
+  single?:boolean; initialScroll?:number; positionRef?:{current:number}; project:string; left:string; right:string; names:Record<LiveSide,string>; start?:string; current:string;
   onInspection:(value:PageInspection)=>void;
-  onRepair:(value:RepairState)=>void; onClose:()=>void; versions?:ReactNode; projectMode?:'snapshot'|'static-source'|'react-source';
+  onDiagnostics?:(value:WorkspacePageDiagnostics)=>void;
+  onOpenUncapturedLink?:(url:string)=>void;
+  diagnosticsCache?:Map<string,PageDiagnostics>; scanRevision?:number; target?:PageTarget;
+  transition:{current:Promise<void>}; proposalId?:string; stateId?:string; leftSelector?:string; rightSelector?:string;
+  onRepair:(value:RepairState)=>void; onClose?:()=>void; versions?:ReactNode; projectMode?:'snapshot'|'static-source'|'react-source';
 }) {
   const route = '/api/projects/'+encodeURIComponent(project)+'/live';
   const [session,setSession] = useState<LiveResult>();
   const [error,setError] = useState('');
+  const [uncapturedLink,setUncapturedLink] = useState<{url:string;reason:string}>();
   const [task,setTask] = useState('');
   const [recordOpen,setRecordOpen] = useState(false);
   const activity = useRef<Activity[]>([]);
-  const busy = Boolean(task);
-  const [sync,setSync] = useState(true);
+
+  const [sync,setSync] = useState(!single);
   const [scanErrors,setScanErrors] = useState<Partial<Record<LiveSide,{path:string; reason:string}>>>({});
   const [scans,setScans] = useState<Partial<Record<LiveSide,Scan>>>({});
   const [targets,setTargets] = useState({left:'',right:''});
@@ -38,29 +48,64 @@ export function LiveComparison({ project, left, right, names, start, current, on
   const scrollQueue = useRef<{side:LiveSide;delta:number;x?:number;y?:number}[]>([]);
   const scrollTimer = useRef<ReturnType<typeof setTimeout>|undefined>(undefined);
   const pump = useRef<()=>void>(()=>{});
-  const syncRef = useRef(true);
+  const syncRef = useRef(!single);
   const drag = useRef<{id:number;y:number;travel:number}|undefined>(undefined);
   const dragged = useRef(false);
   const screens = useRef<Partial<Record<LiveSide,HTMLButtonElement | null>>>({});
+  const typing = useRef<HTMLTextAreaElement>(null);
+  const composing = useRef(false);
   const [restart,setRestart] = useState(0);
-  const transition = useRef(Promise.resolve());
   const generation = useRef(0);
+  const [diagnosticSide,setDiagnosticSide] = useState<LiveSide>(single || right === current ? 'right' : 'left');
+  const diagnosticLock = useRef(false);
+  const busy = Boolean(task);
+  const pendingActions = useRef<{side:LiveSide;operation:LiveAction}[]>([]);
+  const resumeActions = useRef<()=>void>(()=>{});
+  const [settled,setSettled] = useState(0);
+  const diagnosedRevision = useRef(scanRevision);
+  const notify = useRef(onDiagnostics);
+  notify.current = onDiagnostics;
+  const diagnosticsEnabled = Boolean(onDiagnostics);
+  const activePath = session?.[diagnosticSide].path;
+  const activeTitle = session?.[diagnosticSide].title;
+  const activeVersion = diagnosticSide === 'left' ? left : right;
+  const diagnosticSession = session?.id;
+  const activePageScope = JSON.stringify([project,activeVersion,activePath]);
   useEffect(() => {
     let active = true;
     generation.current++;
+    setUncapturedLink(undefined);
     lock.current = true;
-    setTask('正在打开网页对比…');
+    diagnosticLock.current = false;
+    setTask(single ? '正在打开网页…' : '正在打开网页对比…');
     setError('');
     latest.current=undefined;
+    if (diagnosticsEnabled && !target) notify.current?.({kind:'live',projectId:project,version:single || right === current ? right : left,path:'',status:'pending'});
     setSession(undefined);
+    setDiagnosticSide(single || right === current ? 'right' : 'left');
     setScans({});
     setScanErrors({});
     setTargets({left:'',right:''});
     activity.current=[];
-    const opening = transition.current.then(() => active ? post<LiveResult>(route,{left,right,start}) : undefined);
+    const input = {single,initialScroll,left,right,start,proposalId,stateId,selectors:leftSelector||rightSelector?{left:leftSelector,right:rightSelector}:undefined};
+    const opening = transition.current.then(async () => {
+      // A full-page reload can finish closing its old session after the new page mounts.
+      for (let attempt=0; active; attempt++) {
+        try {
+          const replaceSession = sessionStorage.getItem(savedSessionKey);
+          return await post<LiveResult>(route,{...input,replaceSession:replaceSession || undefined});
+        }
+        catch (problem) {
+          if (attempt >= 9 || !(problem instanceof Error) || problem.message !== '当前已有实时对比，请先关闭另一处预览。') throw problem;
+          await new Promise(resolve=>window.setTimeout(resolve,200));
+        }
+      }
+    });
     let openedId: string | undefined;
     function closeSession(id:string) {
-      return fetch(route+'/'+id,{method:'DELETE',keepalive:true});
+      return fetch(route+'/'+id,{method:'DELETE',keepalive:true}).then(response=>{
+        if (response.ok && sessionStorage.getItem(savedSessionKey)===id) sessionStorage.removeItem(savedSessionKey);
+      });
     }
     const closeOnPageExit = () => {
       if (openedId) void closeSession(openedId).catch(()=>{});
@@ -70,11 +115,16 @@ export function LiveComparison({ project, left, right, names, start, current, on
     void opening.then(async initial => {
       openedId = initial?.id;
       if (active && initial) {
+        sessionStorage.setItem(savedSessionKey,initial.id);
         await decodeFrames(initial);
         if (active) {latest.current=initial;setSession(initial);}
       }
     }, problem => {
-      if (active) setError((problem as Error).message);
+      if (active) {
+        const message = (problem as Error).message;
+        setError(message);
+        notify.current?.({kind:'live',projectId:project,version:single || right === current ? right : left,path:'',status:'failed',error:message});
+      }
     }).catch(problem=>{if (active) setError((problem as Error).message);}).finally(() => {
       if (active) {setTask('');lock.current=false;}
     });
@@ -85,11 +135,17 @@ export function LiveComparison({ project, left, right, names, start, current, on
       clearTimeout(scrollTimer.current);
       scrollTimer.current=undefined;
       scrollQueue.current=[];
+      pendingActions.current=[];
+      composing.current=false;
       transition.current = opening.then(async initial => {
         if (initial) await closeSession(initial.id);
       }).catch(()=>{});
     };
-  }, [route,left,right,start,restart]);
+  }, [route,left,right,start,restart,proposalId,leftSelector,rightSelector,stateId,transition,current,diagnosticsEnabled,project,single,initialScroll]);
+
+  useEffect(() => {
+    if (positionRef && session) positionRef.current = session.right.scroll;
+  }, [positionRef, session]);
 
   function record(title:string, detail:string) {
     activity.current.push({time:new Date().toISOString(),title,detail});
@@ -97,6 +153,11 @@ export function LiveComparison({ project, left, right, names, start, current, on
   }
 
   async function run<T>(request:()=>Promise<T>, done:(value:T)=>void,failed?:(reason:string)=>void, feedback?:string) {
+    if (lock.current && diagnosticLock.current) {
+      const pending = generation.current;
+      while (diagnosticLock.current && generation.current === pending) await new Promise(resolve=>window.setTimeout(resolve,40));
+      if (generation.current !== pending) return;
+    }
     if (lock.current) {
       if (feedback) setError('这次操作未执行，请稍后重试。');
       return;
@@ -114,16 +175,29 @@ export function LiveComparison({ project, left, right, names, start, current, on
         else setError(reason);
       }
     } finally {
-      if (requestGeneration === generation.current) {if (feedback) setTask('');lock.current=false;pump.current();}
+      if (requestGeneration === generation.current) {if (feedback) setTask('');lock.current=false;setSettled(value=>value+1);resumeActions.current();}
     }
   }
 
   function act(side:LiveSide, operation:LiveAction) {
     const previous=latest.current;
-    if (!previous) return;
+    if (!previous) return false;
     if (lock.current) {
-      if (operation.action==='click' && 'x' in operation) setError('这次点击未执行，请再点一次。');
-      return;
+      if (!diagnosticLock.current && operation.action==='click' && 'x' in operation) {
+        setError('这次点击未执行，请再点一次。');
+        return false;
+      }
+      const last=pendingActions.current.at(-1);
+      if (last?.side===side && last.operation.action==='text' && operation.action==='text' &&
+        last.operation.text.length+operation.text.length<=500) {
+        last.operation.text+=operation.text;
+      } else if (pendingActions.current.length<64) {
+        pendingActions.current.push({side,operation});
+      } else {
+        setError('还有操作正在处理，请稍后再试。');
+        return false;
+      }
+      return true;
     }
     if (operation.action!=='scroll') scrollQueue.current=[];
     let refreshed=false;
@@ -142,7 +216,11 @@ export function LiveComparison({ project, left, right, names, start, current, on
       for (const side of sides) if (!next[side].image) next[side].image=previous[side].image;
       latest.current=next;
       const outcome=next.outcome;
+      if (operation.action!=='scroll') {
+        setUncapturedLink(outcome?.uncapturedUrl && outcome.reason ? {url:outcome.uncapturedUrl,reason:outcome.reason} : undefined);
+      }
       if (refreshed) {
+        pendingActions.current=pendingActions.current.filter(item=>item.side!==side || !['text','key'].includes(item.operation.action));
         record(label[side]+'点击未执行','页面已变化，已重新获取画面。请再点击目标。');
         setError('页面已变化，已重新获取画面，请再点击目标。');
       } else if (outcome) {
@@ -151,24 +229,39 @@ export function LiveComparison({ project, left, right, names, start, current, on
         const positions=sides.flatMap(key=>outcome.scroll?.[key] ? [label[key]+' '+outcome.scroll[key].position+'px'] : []);
         const result=outcome.matched===true?'两侧已同步':outcome.matched===false?'同步失败 · '+(outcome.reason??'请重试')+'。可核对目标或关闭同步后重试。':'仅操作当前侧';
         record(label[side]+actionNames[operation.action]+(outcome.target?' · '+outcome.target:''),[result,...paths,...positions].join('；'));
-        if (operation.action!=='scroll') setError('');
+        if (outcome.executions?.[side]?.status==='failed') {
+          if (operation.action==='click') pendingActions.current=pendingActions.current.filter(item=>item.side!==side || !['text','key'].includes(item.operation.action));
+          setError(outcome.reason ?? '网页操作未执行。');
+        }
+        else if (operation.action!=='scroll') setError('');
       }
       setSession(next);
+      if (operation.action !== 'locate' && operation.action !== 'refresh' && operation.action !== 'scroll') {
+        setDiagnosticSide(syncRef.current && next.left.path === next.right.path && right === current && !proposalId ? 'right' : side);
+      }
       if (operation.action!=='scroll' || next.capture.count>0) {
         setScans({});
         setScanErrors({});
       }
-      if (operation.action !== 'refresh' && operation.action !== 'scroll') {
+      if (operation.action !== 'refresh' && operation.action !== 'scroll' && operation.action !== 'locate') {
         setTargets({left:'',right:''});
         const currentFrame = left===current ? next.left : right===current ? next.right : undefined;
         if (currentFrame) onInspection({projectId:project,version:current,path:currentFrame.path,scoped:true,findings:[],scanStatus:'unscanned'});
       }
     },reason=>{
       scrollQueue.current=[];
+      pendingActions.current=[];
       record(label[side]+actionNames[operation.action]+'失败',reason);
       setError(reason);
     },operation.action==='refresh'?'正在重新获取画面…':undefined);
+    return true;
   }
+
+  resumeActions.current=()=>{
+    const queued=pendingActions.current.shift();
+    if (queued) act(queued.side,queued.operation);
+    else pump.current();
+  };
 
   pump.current=()=>{
     if (!latest.current || lock.current || scrollTimer.current || !scrollQueue.current.length) return;
@@ -206,7 +299,7 @@ export function LiveComparison({ project, left, right, names, start, current, on
         const underPointer=document.elementFromPoint(event.clientX,event.clientY);
         if (!screen.matches(':hover') || !screen.contains(underPointer)) return;
         event.preventDefault();
-        const unit = event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? 700 : 1;
+        const unit = event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? Number(screen.dataset.viewportHeight || 700) : 1;
         scrollInput.current(side,event.deltaY*unit,screenPoint(screen,event.clientX,event.clientY));
       };
       screen?.addEventListener('wheel',wheel,{passive:false});
@@ -214,6 +307,67 @@ export function LiveComparison({ project, left, right, names, start, current, on
     });
     return () => cleanup.forEach(remove=>remove());
   }, [session?.id]);
+
+  useEffect(() => {
+    if (!diagnosticsEnabled || !activePath || !diagnosticSession) return;
+    if (proposalId && diagnosticSide === 'right') return;
+    const scope = {kind:'live' as const,projectId:project,version:activeVersion,path:activePath,title:activeTitle};
+    const key = activePageScope;
+    const cached = diagnosticsCache?.get(key);
+    const refresh = diagnosedRevision.current !== scanRevision;
+    diagnosedRevision.current = scanRevision;
+    if (cached && !refresh) {
+      notify.current?.({...scope,...cached,status:'ready'});
+      return;
+    }
+    notify.current?.({...scope,status:'pending'});
+    const controller = new AbortController();
+    const timer = window.setTimeout(() => {
+      void (async () => {
+        while (lock.current && !controller.signal.aborted) await new Promise(resolve=>window.setTimeout(resolve,40));
+        if (controller.signal.aborted) return;
+        if (latest.current?.id !== diagnosticSession || latest.current[diagnosticSide].path !== activePath) return;
+        lock.current = true;
+        diagnosticLock.current = true;
+        try {
+          const report = await post<PageDiagnostics>(route+'/'+diagnosticSession+'/diagnostics/'+diagnosticSide,{path:activePath});
+          if (controller.signal.aborted) return;
+          if (report.path !== activePath || !Array.isArray(report.findings)) throw new Error('检测结果与当前网页不一致，请重试。');
+          if (diagnosticsCache && !cached && diagnosticsCache.size >= 100) diagnosticsCache.delete(diagnosticsCache.keys().next().value!);
+          diagnosticsCache?.set(key,report);
+          notify.current?.({...scope,...report,status:'ready'});
+        } catch (problem) {
+          if (!controller.signal.aborted) notify.current?.({...scope,status:'failed',error:(problem as Error).message});
+        } finally {
+          if (latest.current?.id === diagnosticSession) {
+            lock.current = false;
+            diagnosticLock.current = false;
+            setSettled(value=>value+1);
+            resumeActions.current();
+          }
+        }
+      })();
+    },0);
+    return () => {
+      controller.abort();
+      clearTimeout(timer);
+    };
+  },[activePath,activeVersion,diagnosticSession,diagnosticSide,diagnosticsCache,diagnosticsEnabled,project,proposalId,route,scanRevision,activePageScope]);
+
+  const located = useRef('');
+  useEffect(() => {
+    if (!diagnosticsEnabled || !target?.selector || !diagnosticSession || target.path !== activePath || lock.current) return;
+    const key = JSON.stringify([diagnosticSession,diagnosticSide,target.id,target.path,target.selector]);
+    if (located.current === key) return;
+    located.current = key;
+    act(diagnosticSide,{action:'locate',path:target.path,selector:target.selector,selectors:target.selectors});
+  },[activePath,diagnosticSession,diagnosticSide,diagnosticsEnabled,settled,target]);
+
+  function commitReplayText(input:HTMLTextAreaElement,side:LiveSide) {
+    const value=input.value;
+    input.value='';
+    for (const text of value.match(/[\s\S]{1,250}/gu) ?? []) act(side,{action:'text',text});
+  }
 
   function scan(side:LiveSide) {
     if (!session) return;
@@ -240,34 +394,49 @@ export function LiveComparison({ project, left, right, names, start, current, on
     setTimeout(()=>URL.revokeObjectURL(url),1000);
   }
 
-  return <section aria-label="双侧网页交互对比" data-live-revision={session?.revision}>
+  return <section aria-label={single ? "网页交互" : "双侧网页交互对比"} data-live-revision={session?.revision}>
     <div className="live-toolbar panorama-bar">
       {versions}
-      <label><input type="checkbox" checked={sync} onChange={event=>{
+      {!single && <label><input type="checkbox" checked={sync} onChange={event=>{
         scrollQueue.current=[];
         syncRef.current=event.target.checked;
         setSync(event.target.checked);
-      }} />同步操作</label>
+      }} />同步操作</label>}
+      {diagnosticsEnabled && <button type="button" className="secondary" disabled={busy||!session}
+        onClick={()=>act(diagnosticSide,{action:'back'})}>返回上一页</button>}
+      {(leftSelector || rightSelector) && <button type="button" className="secondary" disabled={busy||!session}
+        onClick={()=>act(single ? 'right' : 'left',{action:'refresh'})}>重新定位</button>}
       <button type="button" className="secondary" aria-expanded={advanced} aria-controls="live-options" onClick={()=>setAdvanced(value=>!value)}>更多操作</button>
-      <button type="button" className="secondary" onClick={onClose}>退出对比</button>
+      {onClose && <button type="button" className="secondary" onClick={onClose}>返回诊断工作台</button>}
     </div>
     <span className="screen-reader-only" role="status">{task}</span>
     {!session && task && <p aria-hidden="true" className="live-connection">{task}</p>}
+    {error && <div className="panorama-bar live-feedback"><p role="alert">{error}</p>
+      {onOpenUncapturedLink && uncapturedLink && uncapturedLink.reason===error &&
+        <button type="button" className="secondary" disabled={busy} onClick={()=>{
+          setError('');
+          setUncapturedLink(undefined);
+          onOpenUncapturedLink(uncapturedLink.url);
+        }}>在工作台检测链接</button>}
+      {(!session || /会话已|会话过期|过期画面|画面已过期/.test(error)) && <button type="button" className="secondary" disabled={busy} onClick={()=>setRestart(value=>value+1)}>{single ? '重新打开网页' : '重新打开对比'}</button>}
+      <button type="button" className="secondary" onClick={()=>setError('')}>关闭提示</button></div>}
     <div id="live-options" hidden={!advanced} className="live-options">
       <div className="panorama-bar">
-        <button type="button" className="secondary" disabled={busy||!session} onClick={()=>act('left',{action:'refresh'})}>重新获取画面</button>
-        {sides.map(side=><button key={side} type="button" className="secondary" disabled={busy||!session}
-          onClick={()=>scan(side)}>检测{label[side]}状态</button>)}
+        <button type="button" className="secondary" disabled={busy||!session} onClick={()=>act(single ? 'right' : 'left',{action:'refresh'})}>重新获取画面</button>
+        {sides.filter(side=>single ? side==='right' : !proposalId||side==='left').map(side=><button key={side} type="button" className="secondary" disabled={busy||!session}
+          onClick={()=>scan(side)}>检测{single ? '当前页面' : label[side]+'状态'}</button>)}
         <button type="button" className="secondary" disabled={!activity.current.length} onClick={download}>下载操作与检测记录</button>
       </div>
       <details><summary>页面信息</summary>
         <p>导入类型 · {projectMode==='react-source'?'React 源码工程':projectMode==='static-source'?'静态源码工程':'静态网页（HTML、ZIP 或 URL）'}</p>
-        <p>{session?.modes.left==='source' && session.modes.right==='source'
+        <p>{session?.modes.left==='replay' && session.modes.right==='replay'
+          ? '使用已采集资源离线回放脚本；网络请求、登录状态和未采集资源可能无法重现。修复仅在目标元素匹配时应用。'
+          : session?.modes.left==='source' && session.modes.right==='source'
           ? '隔离环境支持站内导航和本地脚本交互。输入使用测试值，禁止真实提交。'
           : '静态页面支持站内导航与原生控件，原网站脚本不执行，依赖脚本的菜单、弹窗等操作可能不可用。'}</p>
       </details>
     </div>
-    {session && <details className="live-record" onToggle={event=>setRecordOpen(event.currentTarget.open)}>
+    {session && !single && <details className="live-record" onToggle={event=>setRecordOpen(event.currentTarget.open)}>
       <summary>操作记录</summary>
       {recordOpen && <div className="live-record-content">
       {activity.current.length ? <ol>{activity.current.map((item,index)=><li key={index}>
@@ -292,17 +461,38 @@ export function LiveComparison({ project, left, right, names, start, current, on
       })() : <p>两侧路由或可核对的操作序列不同，暂不判定新增或消失的问题。</p>)}
       </div>}
     </details>}
-    {session && <div className="panorama-pair live-pair">
-      {sides.map(side=>{
+    {session && <div className="panorama-pair live-pair" data-single={single}>
+      {(single ? ['right'] as const : sides).map(side=>{
         const frame = session[side];
         const target = frame.controls[Number(targets[side])];
         const report = scans[side];
-        return <section key={side} aria-label={label[side]+'网页交互对比'}>
-          <h3>{label[side]} · {names[side]}</h3>
-          <button type="button" className="live-screen" ref={element=>{screens.current[side]=element;}} aria-label={label[side]+'可操作网页画面'} onClick={event=>{
+        const directInput = single && session.modes[side]==='replay';
+        const boxes = frame.location?.highlights ?? (frame.location?.bounds ? [frame.location.bounds] : []);
+        return <section key={side} aria-label={single ? '当前网页' : label[side]+'网页交互对比'}>
+          <h3>{single ? names[side] : label[side]+' · '+names[side]}</h3>
+          {diagnosticsEnabled && <p className="workspace-live-path" title={frame.path}>
+            {!single && <button type="button" className="secondary" aria-pressed={diagnosticSide===side}
+              disabled={Boolean(proposalId) && side==='right'} onClick={()=>setDiagnosticSide(side)}>
+              {label[side]}问题
+            </button>}<span>{frame.title || frame.path}</span>
+          </p>}
+          {frame.location && <p className="muted" role="status">{{
+            located:'已标出问题位置',missing:'此版本没有唯一的匹配元素',hidden:'已找到节点，此元素没有可高亮的画面区域',outside:'问题位置在当前画面之外',
+          }[frame.location.status]}</p>}
+          <div className="live-screen-wrap">
+          <button type="button" className="live-screen" style={{aspectRatio:`${frame.width ?? 900} / ${frame.height ?? 700}`}} data-viewport-width={frame.width ?? 900} data-viewport-height={frame.height ?? 700} ref={element=>{screens.current[side]=element;}} aria-label={single ? '可操作网页画面' : label[side]+'可操作网页画面'} onClick={event=>{
             if (dragged.current) {dragged.current=false;return;}
-            if (event.detail===0) {act(side,{action:'activate'});return;}
-            act(side,{action:'click',...screenPoint(event.currentTarget,event.clientX,event.clientY)});
+            if (event.detail===0) {
+              if (directInput) typing.current?.focus({preventScroll:true});
+              else act(side,{action:'activate'});
+              return;
+            }
+            const point=screenPoint(event.currentTarget,event.clientX,event.clientY);
+            if (act(side,{action:'click',...point}) && directInput && typing.current) {
+              typing.current.style.left=point.x/(frame.width ?? 900)*100+'%';
+              typing.current.style.top=point.y/(frame.height ?? 700)*100+'%';
+              typing.current.focus({preventScroll:true});
+            }
           }} onPointerDown={event=>{
             dragged.current=false;
             if (event.pointerType!=='touch') return;
@@ -316,7 +506,7 @@ export function LiveComparison({ project, left, right, names, start, current, on
             gesture.travel+=Math.abs(delta);
             if (gesture.travel<5) return;
             dragged.current=true;
-            enqueueScroll(side,delta*700/event.currentTarget.clientHeight,screenPoint(event.currentTarget,event.clientX,event.clientY));
+            enqueueScroll(side,delta*(frame.height ?? 700)/event.currentTarget.clientHeight,screenPoint(event.currentTarget,event.clientX,event.clientY));
           }} onLostPointerCapture={()=>{drag.current=undefined;}} onKeyDown={event=>{
             if (event.key==='Escape' && event.shiftKey) {event.preventDefault();setKeyboard(undefined);return;}
             const delta=({ArrowUp:-48,ArrowDown:48,PageUp:-600,PageDown:600} as Record<string,number>)[event.key];
@@ -324,12 +514,27 @@ export function LiveComparison({ project, left, right, names, start, current, on
             if (keyboard!==side || !['Tab','Escape','Enter',' '].includes(event.key)) return;
             event.preventDefault();
             act(side,{action:event.key==='Tab' ? event.shiftKey?'shift-tab':'tab' : event.key==='Escape'?'escape':'activate'});
-          }}><img draggable={false} alt="" src={frame.image} width={900} height={700} /></button>
+          }}><img draggable={false} alt="" src={frame.image} width={frame.width ?? 900} height={frame.height ?? 700} />{boxes.map((bounds,index) => <span key={index} className="highlight" aria-hidden="true" style={{
+            left:bounds.x/(frame.width ?? 900)*100+'%',top:bounds.y/(frame.height ?? 700)*100+'%',
+            width:bounds.width/(frame.width ?? 900)*100+'%',height:bounds.height/(frame.height ?? 700)*100+'%',
+          }} />)}</button>
+          {directInput && <textarea ref={typing} className="live-screen-typing" tabIndex={-1}
+            aria-label="在回放网页中输入" autoComplete="off" autoCapitalize="off" spellCheck={false}
+            onKeyDown={event=>{
+              if (composing.current || event.nativeEvent.isComposing || event.nativeEvent.keyCode===229 ||
+                event.ctrlKey || event.metaKey || event.altKey || !editingKeys.has(event.key)) return;
+              event.preventDefault();
+              act(side,{action:'key',key:event.key as typeof liveEditingKeys[number],shift:event.shiftKey});
+            }}
+            onCompositionStart={()=>{composing.current=true;}}
+            onCompositionEnd={event=>{composing.current=false;commitReplayText(event.currentTarget,side);}}
+            onInput={event=>{if (!composing.current) commitReplayText(event.currentTarget,side);}} />}
+          </div>
           <details className="live-more" hidden={!advanced}>
-            <summary>{label[side]}更多操作</summary>
-            <p className="muted">{frame.path} · 焦点 {frame.focus||'文档'} · 滚动 {frame.scroll}px。聚焦画面后可用方向键或翻页键滚动。隔离浏览器使用固定测试值，禁止真实提交，会话最长 5 分钟。</p>
+            <summary>{single ? '网页控件' : label[side]+'更多操作'}</summary>
+            <p className="muted">{frame.path} · 焦点 {frame.focus||'文档'} · 滚动 {frame.scroll}px。{directInput ? '点击网页里的输入框即可打字。' : '聚焦画面后可用方向键或翻页键滚动。语义控件使用固定测试值。'} 会话最长 5 分钟。</p>
             <div className="panorama-bar">
-              <label><input type="checkbox" checked={keyboard===side} onChange={event=>setKeyboard(event.target.checked?side:undefined)} />转发网页画面中的 Tab（Shift+Esc 退出）</label>
+              {!directInput && <label><input type="checkbox" checked={keyboard===side} onChange={event=>setKeyboard(event.target.checked?side:undefined)} />转发网页画面中的 Tab（Shift+Esc 退出）</label>}
               <button type="button" className="secondary" disabled={busy} onClick={()=>act(side,{action:'tab'})}>Tab</button>
               <button type="button" className="secondary" disabled={busy} onClick={()=>act(side,{action:'escape'})}>Esc</button>
               <label>缩放<select disabled={busy} value={frame.zoom} onChange={event=>act(side,{action:'zoom',percent:Number(event.target.value) as 75|100|125|150})}>
@@ -357,17 +562,15 @@ export function LiveComparison({ project, left, right, names, start, current, on
         </section>;
       })}
     </div>}
-    {error && <div className="panorama-bar live-feedback"><p role="alert">{error}</p>
-      {(!session || /会话已|会话过期|过期画面/.test(error)) && <button type="button" className="secondary" disabled={busy} onClick={()=>setRestart(value=>value+1)}>重新打开对比</button>}
-      <button type="button" className="secondary" onClick={()=>setError('')}>关闭提示</button></div>}
-    {session?.outcome?.matched === false && <p className="live-feedback" role="alert">操作匹配失败 · {session.outcome.reason}。可核对目标，或关闭同步后重试。</p>}
+    {!single && session?.outcome?.matched === false && <p className="live-feedback" role="alert">操作匹配失败 · {session.outcome.reason}。</p>}
   </section>;
 }
 
 function screenPoint(screen:HTMLElement,clientX:number,clientY:number) {
   const rect=screen.getBoundingClientRect();
-  return {x:Math.min(899,Math.max(0,Math.floor((clientX-rect.left)/rect.width*900))),
-    y:Math.min(699,Math.max(0,Math.floor((clientY-rect.top)/rect.height*700)))};
+  const width=Number(screen.dataset.viewportWidth || 900),height=Number(screen.dataset.viewportHeight || 700);
+  return {x:Math.min(width-1,Math.max(0,Math.floor((clientX-rect.left)/rect.width*width))),
+    y:Math.min(height-1,Math.max(0,Math.floor((clientY-rect.top)/rect.height*height)))};
 }
 
 async function decodeFrames(next:LiveResult,previous?:LiveResult) {

@@ -125,8 +125,7 @@ test('Chrome 实时双侧比较：校园 ZIP 导航及 React 独立状态、动�
     const right=page.getByRole('region',{name:'右侧网页交互对比',exact:true});
     async function action(click:()=>Promise<void>) {
       const response=page.waitForResponse(r=>r.request().method()==='POST'&&r.url().endsWith('/action'));
-      await click();
-      const received=await response;
+      const [received]=await Promise.all([response,click()]);
       const body=await received.json();
       assert.ok(received.ok(),JSON.stringify(body));
       trace.push({outcome:body.outcome,left:{path:body.left.path,focus:body.left.focus,scroll:body.left.scroll},
@@ -148,8 +147,12 @@ test('Chrome 实时双侧比较：校园 ZIP 导航及 React 独立状态、动�
     };
     const sessions:string[] = [];
     async function openLive() {
+      const inline=page.locator('.inline-interactive');
+      await inline.getByRole('button',{name:'左侧可操作网页画面'}).waitFor().catch(async problem=>{
+        throw new Error(`${problem.message}\n${(await page.getByRole('alert').allTextContents()).join('\n')}`);
+      });
       const waiting=page.waitForResponse(r=>r.request().method()==='POST'&&r.url().endsWith('/live'));
-      await page.getByRole('button',{name:'网页交互对比',exact:true}).click();
+      await page.getByRole('button',{name:'交互验证',exact:true}).click();
       const response=await waiting;
       assert.ok(response.ok(),response.ok()?'':await response.text());
       sessions.push(response.url()+'/'+(await response.json()).id);
@@ -175,7 +178,7 @@ test('Chrome 实时双侧比较：校园 ZIP 导航及 React 独立状态、动�
       const file = {name,mimeType:'application/zip',buffer:bytes};
       if (mode === '源码工程') await openImportedFixture(page,origin,file,'source');
       else await page.locator('input[type=file]').setInputFiles(file);
-      await page.getByRole('heading',{name:'网页无障碍工作台',exact:true}).waitFor();
+      await page.getByRole('heading',{name:'网页无障碍审阅',exact:true}).waitFor();
       const projects=await (await fetch(origin+'/api/projects')).json();
       const project=projects.find((p:{name:string})=>p.name===name);
       assert.ok(project);
@@ -184,6 +187,29 @@ test('Chrome 实时双侧比较：校园 ZIP 导航及 React 独立状态、动�
     try {
       const campusSource=await campusFixtures(path.join(data,'campus-fixtures'));
       const campus=await upload('campus-multipage.zip',await readFile(campusSource.zip),'ZIP');
+      const inlineScreen=page.locator('.inline-interactive').getByRole('button',{name:'左侧可操作网页画面'});
+      await inlineScreen.waitFor().catch(async problem=>{
+        throw new Error(`${problem.message}\n${(await page.getByRole('alert').allTextContents()).join('\n')}\n${JSON.stringify(netLog.slice(-22))}`);
+      });
+      const inlineScroll=await action(()=>inlineScreen.press('PageDown'));
+      assert.equal(inlineScroll.outcome.action,'scroll');
+      const rail=page.getByRole('region',{name:'待处理问题'});
+      await rail.getByRole('button',{name:/图片缺少替代文本/}).first().waitFor();
+      const pageStatus=page.locator('.workspace-page-status');
+      await pageStatus.getByText(/已完成当前页面自动检测|自动检测暂未确认问题/).waitFor();
+      const nextAudit=page.waitForResponse(response=>/\/live\/[^/]+\/diagnostics\/right$/.test(response.url()));
+      await control(left,'课程中心 (link)');
+      const nextPage=await nextAudit;
+      assert.ok(nextPage.ok(),await nextPage.text());
+      const nextReport=await nextPage.json();
+      assert.equal(nextReport.path,'/pages/courses.html');
+      await pageStatus.locator('[title="/pages/courses.html"]').waitFor();
+      await pageStatus.getByText(/已完成当前页面自动检测|自动检测暂未确认问题/).waitFor();
+      const completedScans=netLog.filter(item=>/\/live\/[^/]+\/diagnostics\//.test(item.url)).length;
+      await action(()=>page.getByRole('button',{name:'返回上一页',exact:true}).click());
+      await pageStatus.locator('[title="/index.html"]').waitFor();
+      await rail.getByRole('button',{name:/图片缺少替代文本/}).first().waitFor();
+      assert.equal(netLog.filter(item=>/\/live\/[^/]+\/diagnostics\//.test(item.url)).length,completedScans,'返回 ZIP 已检测页面应复用结果');
       await openLive();
       if (process.env.A11Y_LIVE_EXPIRY_CHECK) {
         await delay(301_000);
@@ -242,7 +268,7 @@ test('Chrome 实时双侧比较：校园 ZIP 导航及 React 独立状态、动�
         .run(next,project.id,project.currentSnapshot,'index.html',treeHash(nextDir),now(),'live test fixture');
       db.prepare('UPDATE projects SET current_snapshot=? WHERE id=?').run(next,project.id);
       await page.reload();
-      await page.getByRole('heading',{name:'网页无障碍工作台',exact:true}).waitFor();
+      await page.getByRole('heading',{name:'网页无障碍审阅',exact:true}).waitFor();
       await openLive();
       assert.equal(await page.getByLabel('左侧版本').inputValue(),project.currentSnapshot);
       assert.equal(await page.getByLabel('右侧版本').inputValue(),next);
@@ -358,7 +384,7 @@ test('Chrome 实时双侧比较：校园 ZIP 导航及 React 独立状态、动�
       const top=await action(()=>page.mouse.wheel(0,-1600));
       assert.equal(top.right.scroll,0);
       await page.evaluate(()=>document.body.style.minHeight='1800px');
-      await page.getByRole('button',{name:'退出对比'}).hover();
+      await page.getByRole('button',{name:'返回诊断工作台'}).hover();
       await page.waitForFunction(()=>!document.querySelector('.live-screen:hover'));
       const outside=await page.evaluate(()=>scrollY);
       await page.mouse.wheel(0,150);
@@ -481,6 +507,17 @@ test('Chrome 实时双侧比较：校园 ZIP 导航及 React 独立状态、动�
       await page.getByLabel('我已核对修复内容和页面用途，确认适合应用').check();
       await page.getByRole('button',{name:'确认应用并复测'}).click();
       await page.getByText('已在同一交互状态中验证按钮名称，当前版本已更新。').waitFor({timeout:65000});
+      const verifyIssue = page.getByRole('button',{name:'在网页中验证',exact:true});
+      const openingVerification = page.waitForResponse(response=>response.request().method()==='POST' && response.url().endsWith('/live'));
+      await verifyIssue.click();
+      const verified = await openingVerification;
+      const verification = await verified.json();
+      assert.ok(verified.ok(),JSON.stringify(verification));
+      assert.equal(verification.left.location?.status,'located');
+      assert.equal(verification.right.location?.status,'located');
+      await page.getByRole('button',{name:'返回诊断工作台'}).click();
+      await page.waitForFunction(()=>document.activeElement?.textContent==='在网页中验证');
+
       await openLive();
       await control(right,'Review tickets (button)');
       const museumLeft=await scan(left,'museum-replayed-original');
@@ -507,7 +544,12 @@ test('Chrome 实时双侧比较：校园 ZIP 导航及 React 独立状态、动�
       await page.mouse.wheel(0,96);
       await rolling;
       const newLive=page.waitForResponse(response=>response.request().method()==='POST' && response.url().endsWith('/live'));
-      await page.getByLabel('右侧版本').selectOption(await page.getByLabel('左侧版本').inputValue());
+      const rightVersion=page.getByLabel('右侧版本');
+      const selectedVersion=await rightVersion.inputValue();
+      const alternative=await rightVersion.locator('option').evaluateAll((options,selected)=>options
+        .map(option=>(option as HTMLOptionElement).value).find(value=>value && value!==selected),selectedVersion);
+      assert.ok(alternative);
+      await rightVersion.selectOption(alternative);
       const newSession=await newLive;
       assert.ok(newSession.ok(),await newSession.text());
       const ownedSession=newSession.url()+'/'+(await newSession.json()).id;
@@ -528,10 +570,10 @@ test('Chrome 实时双侧比较：校园 ZIP 导航及 React 独立状态、动�
       await page.mouse.wheel(0,96);
       await closingWheel;
       const removed=page.waitForResponse(response=>response.url()===ownedSession && response.request().method()==='DELETE');
-      await page.getByRole('button',{name:'退出对比'}).click();
+      await page.getByRole('button',{name:'返回诊断工作台'}).click();
       assert.equal((await removed).status(),204);
       assert.ok(!(await fetch(ownedSession+'/scan/right',{method:'POST'})).ok);
-      assert.equal(await right.isVisible(),false);
+      assert.equal(await page.getByRole('region',{name:'交互验证工作区'}).count(),0);
       if(output) await page.screenshot({path:path.join(output,'museum-repair-workbench.png'),fullPage:true});
     } finally {
       await Promise.allSettled(sessions.map(url=>fetch(url,{method:'DELETE'})));

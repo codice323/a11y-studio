@@ -66,7 +66,7 @@ export function compareSnapshots(projectId: string, leftId: string, rightId: str
       ...(scan?.detection?.ai?.findings ?? []).filter(item => item.decision === 'needs-review')
         .map(item => ({ label: 'AI 语义复核', detail: item.candidate.selector + ' · ' + item.explanation })),
     ];
-    return { scan, evidence: { id, auditId: scan?.id, screenshot: scan?.screenshot, selector: target }, review };
+    return { scan, evidence: { id, auditId: scan?.id, screenshot: scan?.screenshot, selector: target, bounds: issue?.bounds, size: scan?.size }, review };
   }
 
   const before = side(leftId);

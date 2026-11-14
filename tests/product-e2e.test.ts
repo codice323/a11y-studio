@@ -213,7 +213,7 @@ test('URL 快照从首页导入，经真实扫描、修复和三视图复测后�
       assert.equal(await page.getByRole('button', { name: '确认应用修复' }).count(), 0);
       await page.getByRole('button', { name: '查看历史补丁' }).click();
       assert.match(await page.getByLabel('已保存的源码差异').innerText(), /aria-label="打开导航"/);
-      await page.getByRole('button', { name: '页面对照' }).click();
+      await page.getByRole('button', { name: '扫描截图' }).click();
       assert.equal(await page.locator('.shots img').count(), 2);
       await page.waitForFunction(() => document.querySelectorAll('.shots .highlight').length === 2);
       await page.getByRole('button', { name: '仅修复后' }).click();
@@ -376,7 +376,7 @@ test('真实快照可双向对比，分叉及切换项目后仍使用正确的�
       assert.equal(await left.inputValue(), v0);
       assert.equal(await right.inputValue(), v3);
       assert.match(await summary.innerText(), /右侧不再报告 3 个问题/);
-      await show('页面对照');
+      await show('扫描截图');
       const original = await waitForImages();
       assert.notEqual(original[0], original[1]);
       if (process.env.A11Y_COMPARE_SCREENSHOT) await page.screenshot({ path: process.env.A11Y_COMPARE_SCREENSHOT });
@@ -398,7 +398,7 @@ test('真实快照可双向对比，分叉及切换项目后仍使用正确的�
 
       await right.selectOption(v3);
       await diff.locator('ins').filter({ hasText: '#1c2731' }).waitFor();
-      await show('页面对照');
+      await show('扫描截图');
       const third = await waitForImages();
       assert.deepEqual(third, [second[1], original[1]]);
       const [oldPixels, newPixels] = await Promise.all(third.map(src => fetch(base + src).then(res => res.arrayBuffer())));
@@ -433,7 +433,7 @@ test('真实快照可双向对比，分叉及切换项目后仍使用正确的�
       assert.equal((await api(route)).project.currentSnapshot, branch);
       await page.route('**/screenshot', request => request.continue());
       fs.unlinkSync(path.join(dataDir, 'screenshots', branchState.current.id + '.png'));
-      await show('页面对照');
+      await show('扫描截图');
       await evidence.getByText('截图缺失或加载失败。').waitFor();
       assert.equal(await images.count(), 1);
 

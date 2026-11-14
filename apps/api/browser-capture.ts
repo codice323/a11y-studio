@@ -42,17 +42,21 @@ export async function importBrowserCaptureData(raw:unknown, ownerUserId?:string)
   return created;
 }
 
-export async function importBrowserCapture(file?: Express.Multer.File, ownerUserId?: string) {
-  if (!file || !/\.json$/i.test(file.originalname)) throw new Error('请选择浏览器扩展生成的 JSON 采集文件。');
-  let raw:unknown;
-  try { raw=JSON.parse(file.buffer.toString('utf8')); } catch { throw new Error('浏览器采集文件不是有效的 JSON。'); }
-  return importBrowserCaptureData(raw,ownerUserId);
+export function hasBrowserCapture(projectId:string) {
+  return fs.existsSync(path.join(dir,projectId+'.json'));
 }
 
 export function browserCapture(projectId:string) {
   const file=path.join(dir,projectId+'.json');
   if (!fs.existsSync(file)) return null;
-  return {...JSON.parse(fs.readFileSync(file,'utf8')),screenshot:`/api/projects/${projectId}/browser-capture/screenshot`};
+  const image=path.join(dir,projectId+'.png');
+  let screenshotSize:{width:number;height:number}|undefined;
+  if(fs.existsSync(image)) {
+    const descriptor=fs.openSync(image,'r');
+    try {const header=Buffer.alloc(24);if(fs.readSync(descriptor,header,0,24,0)===24) screenshotSize={width:header.readUInt32BE(16),height:header.readUInt32BE(20)};}
+    finally {fs.closeSync(descriptor);}
+  }
+  return {...JSON.parse(fs.readFileSync(file,'utf8')),screenshotSize,dynamicReplay:fs.existsSync(path.join(DATA,'browser-replays',projectId+'.json')),screenshot:`/api/projects/${projectId}/browser-capture/screenshot`};
 }
 
 export function browserCaptureScreenshot(projectId:string) {

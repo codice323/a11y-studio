@@ -2,7 +2,7 @@ import { workspaceFetch as fetch } from './workspace-fetch';
 import type { Bounds } from './types';
 
 export type ContrastEvidence = { ratio: number; required: number; valid: boolean; uncertain: boolean; foreground?: string };
-export type PreviewSide = { semantics: Semantics; screenshot: string | null; contrast: ContrastEvidence | null };
+export type PreviewSide = { semantics: Semantics; screenshot: string | null; contrast: ContrastEvidence | null; additionalContrast?: ContrastEvidence[] };
 export type ProposalPreview = { proposalId: string; before: PreviewSide; after: PreviewSide };
 export type Semantics = {
   role: string | null;

@@ -2,17 +2,20 @@ import {createTwoFilesPatch} from 'diff';import fs from 'node:fs';import path fr
 import {db,id,now,hash,ROOT,safePath,snapshotDir,project,snapshot,audit,proposal,treeHash} from './storage';import {runAudit, withRepairPage, inspectPageElement, measurePageContrast} from './scan';
 import os from 'node:os';
 import type { ImageSemanticReview, RepairAnalysis } from '../../packages/shared/types';
+import { suggestContrastColors } from './ai/contrast-repair';
 import { collectVisualContext } from './ai/visual-context';
 import { suggestImageAlt, suggestIconLabel } from './ai/visual-repair';
 import { searchWcag } from './knowledge-search';
 import { runRepairAgent, type AgentTrace } from './repair-agent';
 import { reviewRepairIssue, sourceRepairKinds, type SourceReview } from '../../packages/shared/source-repair';
 import { panoramaRepairScope, previewPanorama, verifyPanorama } from './panorama';
-import { checkSourceCandidate, compileSourcePlan, proposeSourceRepair, writeSourceCandidate } from './source-repair';
+import { checkSourceCandidate, compileSourcePlan, proposeSourceRepair, sourceReviewChanges, writeSourceCandidate } from './source-repair';
+import { hasBrowserCapture } from './browser-capture';
 import type { Issue } from '../../packages/shared/types';
 const knowledge:Record<string,any>=JSON.parse(fs.readFileSync(path.join(ROOT,'knowledge/wcag/rules.json'),'utf8'));
 const rules:Record<string,string>={'image-alt':'set-alt','label':'set-label','button-name':'set-name','link-name':'set-name','color-contrast':'set-color'};
-const Patch=z.object({issueId:z.string().min(1),ruleId:z.string().min(1),targetFile:z.string().min(1),selector:z.string().min(1),fileHash:z.string().length(64),operation:z.enum(['set-alt','set-label','set-name','set-color']),value:z.string().max(160)}).strict();
+const ContrastTarget=z.object({issueId:z.string().min(1),selector:z.string().min(1),value:z.string().regex(/^#[0-9a-f]{6}$/i)}).strict();
+const Patch=z.object({issueId:z.string().min(1),ruleId:z.string().min(1),targetFile:z.string().min(1),selector:z.string().min(1),fileHash:z.string().length(64),operation:z.enum(['set-alt','set-label','set-name','set-color']),value:z.string().max(160),contrastTargets:z.array(ContrastTarget).min(2).max(300).optional()}).strict();
 const locks=new Set<string>();
 function latestAudit(pid:string,sid:string){const row:any=db.prepare("SELECT * FROM audits WHERE project_id=? AND snapshot_id=? AND status='completed' ORDER BY rowid DESC LIMIT 1").get(pid,sid);if(!row)throw new Error('请先扫描当前版本。');return audit(row.id).result;}
 function findIssue(pid:string,sid:string,issueId:string): Issue {
@@ -37,7 +40,7 @@ export async function createSourceProposal(pid:string, issueId:string, expectedS
  if(manualLabel&&!reactImage&&(!manualRules.includes(issue.ruleId)||
     typeof intent!=='string'||!intent.trim()))throw new Error('请填写受支持的修复值。');
  if(!reactImage&&!Object.hasOwn(sourceRepairKinds,issue.ruleId))throw new Error('此问题没有受支持的 Agent 源码策略。');
- const ctx={projectId:pid,snapshotId:sid,dir:snapshotDir(pid,sid),entry:p.entry,issue,engineering:p.mode!=='snapshot',baseline:latestAudit(pid,sid)};
+ const ctx={projectId:pid,snapshotId:sid,dir:snapshotDir(pid,sid),entry:p.entry,issue,engineering:p.mode!=='snapshot',capturedEntry:hasBrowserCapture(pid),baseline:latestAudit(pid,sid)};
  const result=await proposeSourceRepair(ctx,intent,signal);
  signal?.throwIfAborted();
  if(project(pid).current_snapshot!==sid||treeHash(ctx.dir)!==result.baseHash)throw new Error('页面版本已变化，请重新分析。');
@@ -48,7 +51,7 @@ export async function createSourceProposal(pid:string, issueId:string, expectedS
  if(!result.candidate)return analysis;
  const {candidate,checks}=result.candidate;
  const value='value' in candidate.plan ? candidate.plan.value : '';
- const review:SourceReview={changes:candidate.changes,checks,attempts:result.attempts,elapsedMs:result.elapsedMs,usage:result.usage};
+ const review:SourceReview={changes:sourceReviewChanges(candidate.changes),checks,attempts:result.attempts,elapsedMs:result.elapsedMs,usage:result.usage};
  const guide=knowledge[issue.ruleId]||{};
  const data={id:id(),projectId:pid,snapshotId:sid,issueId,source:manualLabel?'manual':'agent',status:'pending',
   patch:{issueId,ruleId:issue.ruleId,targetFile:p.entry,selector:issue.selector,operation:'source',value},
@@ -56,13 +59,25 @@ export async function createSourceProposal(pid:string, issueId:string, expectedS
   wcagTitle:guide.title||'',guidance:guide.guidance||'',risk:'请确认文案、引用和视觉改动符合实际业务。复测运行隔离快照。',
   analysis:{...analysis,suggestedValue:value||null},agentTrace:result.trace,sources:result.sources,
   ...(reactImage?{imagePurpose}:{}),
-  before:candidate.changes[0].before,after:candidate.changes[0].after,
+  before:review.changes[0].before,after:review.changes[0].after,
   sourcePatch:{plan:candidate.plan,baseHash:result.baseHash},sourceReview:review};
  db.prepare('INSERT INTO proposals VALUES(?,?,?,?,?,?,?)').run(data.id,pid,sid,issueId,'pending',JSON.stringify(data),now());
  return data;
 }
 function signature(source:string){const $=cheerio.load(source);return $('*').toArray().map(el=>{const e=$(el);const attrs=Object.entries((el as any).attribs||{}).filter(([k])=>!['aria-label','alt','style'].includes(k)).sort(([a],[b])=>a.localeCompare(b));return [(el as any).tagName,attrs,e.contents().filter((_,c)=>(c as any).type==='text').text()];});}
-function applySource(source:string,patch:any){const $=cheerio.load(source,{sourceCodeLocationInfo:true});let nodes;try{nodes=$(patch.selector)}catch{throw new Error('无法匹配目标选择器。')}if(nodes.length!==1)throw new Error('目标节点不唯一或已变化。');const node=nodes.first();const element=node[0] as any;const tag=element.tagName?.toLowerCase();let name='',value=patch.value;
+function applySource(source:string,patch:z.infer<typeof Patch>){
+ const $=cheerio.load(source,{sourceCodeLocationInfo:true});
+ const targets=patch.contrastTargets ?? [patch];
+ const edits=targets.map(target=>sourceEdit($,source,{...patch,...target})).sort((a,b)=>b.start-a.start);
+ let boundary=source.length+1;
+ for(const edit of edits){
+  if(edit.start>=boundary||edit.end>boundary)throw new Error('多处修复匹配到了同一个元素，请重新检测。');
+  source=source.slice(0,edit.start)+edit.text+source.slice(edit.end);
+  boundary=edit.start;
+ }
+ return source;
+}
+function sourceEdit($:cheerio.CheerioAPI,source:string,patch:z.infer<typeof Patch>){let nodes;try{nodes=$(patch.selector)}catch{throw new Error('无法匹配目标选择器。')}if(nodes.length!==1)throw new Error('目标节点不唯一或已变化。');const node=nodes.first();const element=node[0] as any;const tag=element.tagName?.toLowerCase();let name='',value=patch.value;
  if(patch.operation==='set-alt'){if(tag!=='img')throw new Error('补丁目标不是图片。');name='alt';}
  else if(patch.operation==='set-label'){if(!['input','textarea','select'].includes(tag))throw new Error('补丁目标不是表单控件。');name='aria-label';}
  else if(patch.operation==='set-name'){if(!['button','a','input'].includes(tag))throw new Error('补丁目标不是按钮或链接。');name='aria-label';}
@@ -70,8 +85,8 @@ function applySource(source:string,patch:any){const $=cheerio.load(source,{sourc
  else throw new Error('不支持的补丁操作。');
  const location=element.sourceCodeLocation?.startTag;if(!location)throw new Error('无法定位原始 HTML 源码。');
  const encoded=String(value).replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;').replace(/>/g,'&gt;');const attr=`${name}="${encoded}"`;const existing=location.attrs?.[name];
- if(existing)return source.slice(0,existing.startOffset)+attr+source.slice(existing.endOffset);
- const startTag=source.slice(location.startOffset,location.endOffset);const match=startTag.match(/\s*\/?\s*>$/);if(!match)throw new Error('无法定位元素起始标签。');const insertion=location.endOffset-match[0].length;return source.slice(0,insertion)+' '+attr+source.slice(insertion);
+ if(existing)return {start:existing.startOffset,end:existing.endOffset,text:attr};
+ const startTag=source.slice(location.startOffset,location.endOffset);const match=startTag.match(/\s*\/?\s*>$/);if(!match)throw new Error('无法定位元素起始标签。');const insertion=location.endOffset-match[0].length;return {start:insertion,end:insertion,text:' '+attr};
 }
 export async function previewIssueImage(pid: string, issueId: string, snapshotId: string) {
  const current = project(pid).current_snapshot;
@@ -80,22 +95,83 @@ export async function previewIssueImage(pid: string, issueId: string, snapshotId
  if (issue.ruleId !== 'image-alt') throw new Error('该问题没有图片预览。');
  return collectVisualContext({projectId:pid,snapshotId:current,selector:issue.selector,mode:'image-resource'});
 }
-export async function createProposal(pid:string,issueId:string,input:{source?:string;value?:string;imagePurpose?:unknown}){const p=project(pid),sid=p.current_snapshot,issue=findIssue(pid,sid,issueId),operation=rules[issue.ruleId];if(!operation)throw new Error('此问题需要人工处理，当前没有受支持的补丁策略。');const guide=knowledge[issue.ruleId]||{};let value=input.value, reason='由用户填写并审核的修复建议。',source='manual';let analysis:RepairAnalysis|undefined;let agentTrace:AgentTrace[]|undefined;let sources:Awaited<ReturnType<typeof runRepairAgent>>['sources']|undefined;
+export async function createProposal(pid:string,issueId:string,input:{source?:string;value?:string;imagePurpose?:unknown;contrastIssueIds?:unknown; snapshotId?:string}){const p=project(pid),sid=p.current_snapshot,issue=findIssue(pid,sid,issueId),operation=rules[issue.ruleId];if(!operation)throw new Error('此问题需要人工处理，当前没有受支持的补丁策略。');const guide=knowledge[issue.ruleId]||{};let value=input.value, reason='由用户填写并审核的修复建议。',source='manual';let analysis:RepairAnalysis|undefined;let agentTrace:AgentTrace[]|undefined;let sources:Awaited<ReturnType<typeof runRepairAgent>>['sources']|undefined;
  if(p.mode==='react-source'&&(!(input.source==='agent'||input.source==='ai')||issue.ruleId!=='image-alt'))
   throw new Error('React 工程修复必须定位和验证原始组件，不能使用快照补丁。');
  const snap=snapshot(pid,sid),dir=snapshotDir(pid,sid),file=safePath(dir,snap.entry),before=fs.readFileSync(file,'utf8');
- if(input.source==='ai'||input.source==='agent'){
+ const requestedSource=input.source;
+ const aiRequested=requestedSource==='ai'||requestedSource==='agent';
+ const extraIds=z.array(z.string().min(1).max(2000)).max(299).optional().parse(input.contrastIssueIds) ?? [];
+ const group=[issue];
+ if(extraIds.length){
+  if(operation!=='set-color'||p.mode!=='snapshot'||input.snapshotId!==sid)
+   throw new Error('当前版本或修复类型不支持这组补丁，请重新选择问题。');
+  const auditIssues=new Map<string,Issue>((latestAudit(pid,sid).issues as Issue[]).map(item=>[item.id,item]));
+  for(const id of new Set(extraIds)){
+   const target=auditIssues.get(id);
+   if(!target||target.ruleId!==issue.ruleId||target.impact!==issue.impact||
+      group.some(item=>item.selector===target.selector))
+    throw new Error('同组问题的位置已变化，请重新检测后再修复。');
+   group.push(target);
+  }
+ }
+ const automaticColor=operation==='set-color'&&(aiRequested||value===undefined||value==='');
+ let contrastTargets:z.infer<typeof ContrastTarget>[]|undefined;
+ const measuredColorReason='根据浏览器实测的背景，选择对比度更高的黑色或白色文字。';
+ if(automaticColor){
+  const measurements=await withRepairPage(dir,snap.entry,undefined,async page=>{
+   const results=[];
+   for(const target of group)results.push(await measurePageContrast(page,target.selector));
+   return results;
+  });
+  const measurable=measurements.flatMap(check=>check.suggestedColor&&check.backgroundLuminance!==undefined
+   ? [{...check,suggestedColor:check.suggestedColor,backgroundLuminance:check.backgroundLuminance}] : []);
+  if(measurable.length!==measurements.length)
+   throw new Error(group.length>1 ? '组内有位置无法可靠测量背景，请核对页面后选择单处修复。' :
+     '无法可靠测量当前背景。请在网页中核对文字和背景后，自选颜色预览。');
+  value=measurable[0].suggestedColor;
+  reason=measuredColorReason;
+  let palette: string[] | undefined;
+  if(aiRequested){
+   const ai=await suggestContrastColors(measurable,issue.help);
+   palette=ai.candidate?.colors;
+   if(palette){
+    value=palette[0];
+    source=requestedSource;
+    reason=ai.reason;
+   }else{
+    reason='AI 配色未通过全部位置的检查。'+measuredColorReason;
+   }
+   agentTrace=[...ai.trace,...(palette ? [] : [{tool:'validate_contrast',summary:'各位置使用实测对比度更高的黑色或白色'}])];
+   sources=ai.sources;
+   analysis={status:'repair-review',suggestedValue:value??null,reason,sources,agentTrace,
+    agentRun:{attempts:ai.attempts,elapsedMs:ai.elapsedMs,usage:ai.usage}};
+  }
+  if(group.length>1)contrastTargets=group.map((target,index)=>({
+   issueId:target.id,selector:target.selector,value:palette?.[index] ?? measurable[index].suggestedColor,
+  }));
+ }
+ if(aiRequested && operation!=='set-color'){
   const target={projectId:pid,snapshotId:sid,selector:issue.selector};
   const issueHtml=String(issue.html).slice(0,1500);
   if(operation==='set-alt'||(issue.ruleId==='button-name'&&/<(?:svg|img)\b|aria-hidden\s*=|\bicon[-_]/i.test(issueHtml))){
    sources=searchWcag(issue.ruleId,operation==='set-alt' ? '图片 装饰 内容 功能 替代文本' : '图标 按钮 名称 用途').map(({keywords:_keywords,...passage})=>passage);
-   const context={wcag:sources.map(({refs,text})=>({refs,text}))};
+   const context={wcag:[...sources,...(operation==='set-alt' ? [
+    ...searchWcag('image-text-legibility','图片文字 低对比 重建',1),
+    ...searchWcag('graphic-contrast','淡色 图形 邻接 对比 颜色',1),
+    ...searchWcag('color-only-graphic','图例 标签 纹理',1),
+   ] : [])].map(({refs,text})=>({refs,text}))};
    if(operation==='set-alt'){
     const image = await suggestImageAlt(target,context);
     const query = image.purpose==='decorative' ? '装饰 图片 空 替代文本' : image.purpose==='informative' ? '图片 内容 功能 用途 替代文本' : '图片 内容 装饰 功能 替代文本';
     sources=searchWcag(issue.ruleId,query).map(({keywords:_keywords,...passage})=>passage);
+    if(image.legibility){
+     const profile = image.legibility.kind==='image-text' ? 'image-text-legibility'
+      : image.legibility.kind==='color-only' ? 'color-only-graphic' : 'graphic-contrast';
+     sources.push(...searchWcag(profile,image.legibility.observation,2).map(({keywords:_keywords,...passage})=>passage));
+    }
     return {...image,sources,agentTrace:[{tool:'visual_evidence',summary:image.media ? '读取实际图片像素与页面语境并调用视觉模型' : '无法获取视觉分析，需要人工确认'},
-      {tool:'search_wcag',summary:'按图片用途检索相关规范摘要'}]};
+      {tool:'search_wcag',summary:'按图片用途和视觉观察检索相关规范摘要'}]};
    }
    analysis={...await suggestIconLabel(target,context),sources};
    agentTrace=[{tool:'search_wcag',summary:'检索图标按钮的名称与用途规范'},
@@ -109,10 +185,12 @@ export async function createProposal(pid:string,issueId:string,input:{source?:st
    value=ai.value?.trim()||undefined;reason=ai.reason;agentTrace=ai.trace;sources=ai.sources;
    analysis={status:'repair-review',suggestedValue:value??null,reason,sources};
   }
-  if(!value||(operation==='set-color'&&!/^#[0-9a-fA-F]{6}$/.test(value)))return {...analysis,suggestedValue:null};
-  source=input.source;
+  if(!value)return {...analysis,suggestedValue:null};
+  source=requestedSource;
  }
  if(typeof value!=='string'||value.length>160||(!value.trim()&&operation!=='set-alt'))throw new Error('请填写修复内容。');if(operation==='set-color'&&!/^#[0-9a-fA-F]{6}$/.test(value))throw new Error('颜色应为六位十六进制，例如 #233c2b。');
+ if(group.length>1&&!contrastTargets)
+  contrastTargets=group.map(target=>({issueId:target.id,selector:target.selector,value:value!}));
  const imagePurpose=input.imagePurpose;
  if(operation==='set-alt'){
   if(imagePurpose!==undefined&&imagePurpose!=='informative'&&imagePurpose!=='decorative')throw new Error('请选择图片用途。');
@@ -120,7 +198,7 @@ export async function createProposal(pid:string,issueId:string,input:{source?:st
   if(imagePurpose!=='decorative'&&!value.trim())throw new Error('内容性图片需要非空替代文本；纯装饰图片请显式选择装饰性图片。');
  }
  if(project(pid).current_snapshot!==sid||fs.readFileSync(file,'utf8')!==before)throw new Error('页面版本或文件已变化，请重新生成建议。');
- const patch=Patch.parse({issueId,ruleId:issue.ruleId,targetFile:snap.entry,selector:issue.selector,fileHash:hash(before),operation,value});const after=applySource(before,patch);
+ const patch=Patch.parse({issueId,ruleId:issue.ruleId,targetFile:snap.entry,selector:issue.selector,fileHash:hash(before),operation,value,contrastTargets});const after=applySource(before,patch);
  const data={id:id(),projectId:pid,snapshotId:sid,issueId,patch,reason,impact:issue.description,wcag:guide.refs||[],wcagTitle:guide.title||'',wcagUrl:guide.url||issue.helpUrl,guidance:guide.guidance||'',risk:'请核对名称、图片语义与视觉效果；自动检测不能代替人工复核。',source,analysis,agentTrace,sources,before,after,status:'pending',imagePurpose:operation==='set-alt'?imagePurpose:undefined};
  db.prepare('INSERT INTO proposals VALUES(?,?,?,?,?,?,?)').run(data.id,pid,sid,issueId,'pending',JSON.stringify(data),now());return data;}
 export async function createPanoramaProposal(pid: string, input: unknown, signal: AbortSignal) {
@@ -172,7 +250,7 @@ export async function createPanoramaProposal(pid: string, input: unknown, signal
  } finally { fs.rmSync(temporary, {recursive: true, force: true}); }
 }
 
-export async function previewProposal(proposalId: string, signal?: AbortSignal) {
+export async function withProposalCandidate<T>(proposalId: string, inspect: (candidate: { directory:string; original:string; entry:string; issue:Issue; selector:string; stateId?:string; projectId:string; version:string; groupSelectors:string[] }) => Promise<T>) {
  const pr=proposal(proposalId);
  const p=project(pr.project_id);
  if(pr.status!=='pending'||p.current_snapshot!==pr.snapshot_id)throw new Error('补丁已处理或版本已变化。');
@@ -187,8 +265,8 @@ export async function previewProposal(proposalId: string, signal?: AbortSignal) 
   fs.cpSync(dir,copy,{recursive:true});
   if(source){
    if(treeHash(dir)!==source.baseHash)throw new Error('源文件已变化。');
-   const candidate=compileSourcePlan({dir,entry:scoped?.entry ?? p.entry,issue,engineering:Boolean(scoped)||p.mode!=='snapshot'},source.plan,pr.data.reason);
-   if(JSON.stringify(candidate.changes)!==JSON.stringify(pr.data.sourceReview.changes))throw new Error('补丁与预览不一致。');
+   const candidate=compileSourcePlan({dir,entry:scoped?.entry ?? p.entry,issue,engineering:Boolean(scoped)||p.mode!=='snapshot',capturedEntry:!scoped&&hasBrowserCapture(p.id)},source.plan,pr.data.reason);
+   if(JSON.stringify(sourceReviewChanges(candidate.changes))!==JSON.stringify(pr.data.sourceReview.changes))throw new Error('补丁与预览不一致。');
    writeSourceCandidate(copy,candidate);
    target=candidate.target;
   }else{
@@ -198,7 +276,15 @@ export async function previewProposal(proposalId: string, signal?: AbortSignal) 
    if(hash(before)!==patch.fileHash)throw new Error('源文件已变化。');
    fs.writeFileSync(file,applySource(before,patch),'utf8');
   }
-  const read=(directory:string,selector:string)=>withRepairPage(directory,p.entry,signal,async page=>{
+  return await inspect({directory:copy, original:dir, entry:scoped?.entry ?? p.entry, issue, selector:target,
+    stateId:pr.data.panoramaState, projectId:p.id, version:p.current_snapshot,
+    groupSelectors:(pr.data.patch.contrastTargets ?? []).slice(1).map((target:{selector:string})=>target.selector)});
+ }finally{fs.rmSync(temporary,{recursive:true,force:true});}
+}
+
+export function previewProposal(proposalId: string, signal?: AbortSignal) {
+ return withProposalCandidate(proposalId, async ({directory,original,entry,issue,selector,stateId,projectId,version,groupSelectors})=>{
+  const read=(directory:string,selector:string)=>withRepairPage(directory,entry,signal,async page=>{
    const semantics=await inspectPageElement(page,selector);
    const contrast=issue.ruleId==='color-contrast'?await measurePageContrast(page,selector):null;
    if(issue.ruleId==='focus-style-unchanged'){
@@ -211,14 +297,19 @@ export async function previewProposal(proposalId: string, signal?: AbortSignal) 
    const {width,height}=semantics.size;
    const screenshot=width*height<=4_000_000&&width<=2500&&height<=5000
     ? 'data:image/jpeg;base64,'+(await page.screenshot({fullPage:true,type:'jpeg',quality:75,timeout:8000})).toString('base64') : null;
-   return {semantics,contrast,screenshot};
+   const additionalContrast=[];
+   for(const target of groupSelectors){
+    signal?.throwIfAborted();
+    additionalContrast.push(await measurePageContrast(page,target));
+   }
+   return {semantics,contrast,screenshot,additionalContrast};
   });
-  const readVersion=(directory:string,selector:string)=>scoped
-   ? previewPanorama(p.id,p.current_snapshot,pr.data.panoramaState,directory,selector,signal)
+  const readVersion=(directory:string,selector:string)=>stateId
+   ? previewPanorama(projectId,version,stateId,directory,selector,signal)
    : read(directory,selector);
-  const before=await readVersion(dir,issue.selector),after=await readVersion(copy,target);
+  const before=await readVersion(original,issue.selector),after=await readVersion(directory,selector);
   return {proposalId,before,after};
- }finally{fs.rmSync(temporary,{recursive:true,force:true});}
+ });
 }
 export async function applyProposal(proposalId:string,signal?:AbortSignal,semanticReviewed=false,sourceReviewed=false){const pr=proposal(proposalId),pid=pr.project_id;
  const imagePurpose=pr.data.imagePurpose;
@@ -241,13 +332,17 @@ export async function applyProposal(proposalId:string,signal?:AbortSignal,semant
  if(issue.ruleId!==patch.ruleId||issue.selector!==patch.selector||patch.targetFile!==entry)throw new Error('补丁目标与问题不匹配。');
  const sourceDir=snapshotDir(pid,p.current_snapshot),file=safePath(sourceDir,patch.targetFile),before=fs.readFileSync(file,'utf8');
  const baseline=latestAudit(pid,p.current_snapshot);
- const ctx={projectId:pid,snapshotId:p.current_snapshot,dir:sourceDir,entry,issue,engineering:Boolean(scoped)||p.mode!=='snapshot',baseline};
+ const contrastTargets: z.infer<typeof ContrastTarget>[] = patch.contrastTargets ?? [];
+ if(contrastTargets.length && !contrastTargets.every(target=>baseline.issues.some((finding:Issue)=>
+   finding.id===target.issueId && finding.selector===target.selector && finding.ruleId===issue.ruleId && finding.impact===issue.impact)))
+  throw new Error('同组问题的位置已变化，请重新生成修复建议。');
+ const ctx={projectId:pid,snapshotId:p.current_snapshot,dir:sourceDir,entry,issue,engineering:Boolean(scoped)||p.mode!=='snapshot',capturedEntry:!scoped&&hasBrowserCapture(pid),baseline};
  let candidate:ReturnType<typeof compileSourcePlan>|undefined;
  let after=before;
  if(sourcePatch){
   if(treeHash(sourceDir)!==sourcePatch.baseHash)throw new Error('源文件已变化，请重新生成建议。');
   candidate=compileSourcePlan(ctx,sourcePatch.plan,pr.data.reason);
-  if(JSON.stringify(candidate.changes)!==JSON.stringify(pr.data.sourceReview.changes))throw new Error('源码补丁与预览不符。');
+  if(JSON.stringify(sourceReviewChanges(candidate.changes))!==JSON.stringify(pr.data.sourceReview.changes))throw new Error('源码补丁与预览不符。');
  }else{
   if(hash(before)!==patch.fileHash)throw new Error('源文件已变化，请重新生成建议。');
   after=applySource(before,patch);
@@ -260,8 +355,11 @@ export async function applyProposal(proposalId:string,signal?:AbortSignal,semant
   if(candidate)writeSourceCandidate(dest,candidate);
   else fs.writeFileSync(safePath(dest,patch.targetFile),after,'utf8');
  }catch(error){fs.rmSync(dest,{recursive:true,force:true});throw error;}
- const diff=candidate ? candidate.changes.map(change=>createTwoFilesPatch(change.file,change.file,change.before,change.after,'修复前','修复后')).join('\n') :
-  createTwoFilesPatch(patch.targetFile,patch.targetFile,before,after,'修复前','修复后');
+ const diff=candidate
+  ? pr.data.sourceReview.changes.some((change: SourceReview['changes'][number])=>change.excerpt)
+    ? undefined
+    : candidate.changes.map(change=>createTwoFilesPatch(change.file,change.file,change.before,change.after,'修复前','修复后')).join('\n')
+  : createTwoFilesPatch(patch.targetFile,patch.targetFile,before,after,'修复前','修复后');
  const reviewedTarget=scoped||issue.ruleId==='focus-style-unchanged'||issue.ruleId==='aria-broken-idref'?issue:undefined;
  const reviewDetails=candidate ? { sourceReview:pr.data.sourceReview, sourceTarget:candidate.target, reviewedTarget, panoramaState:pr.data.panoramaState } :
   { reviewFiles:[{file:p.entry,selector:patch.selector,before,after}] };
@@ -273,7 +371,7 @@ export async function applyProposal(proposalId:string,signal?:AbortSignal,semant
  try{
   const contrastSelector=candidate?.plan.kind==='contrast'?candidate.target:patch.operation==='set-color'?patch.selector:undefined;
   if(contrastSelector)contrastBefore=await withRepairPage(sourceDir,p.entry,signal,page=>measurePageContrast(page,issue.selector));
-  scanned=await runAudit(pid,candidateId,signal,contrastSelector);
+  scanned=await runAudit(pid,candidateId,signal,contrastSelector,contrastTargets.slice(1).map(target=>target.selector));
   if(candidate&&!scoped)sourceChecks=await checkSourceCandidate(ctx,candidate,dest,scanned,signal);
   const panoramaCheck=await verifyPanorama(pid,p.current_snapshot,dest,signal,scoped&&candidate
    ? {stateId:scoped.recipe.id,issueId:issue.id,target:candidate.target,value:patch.value} : undefined,candidateId);
@@ -283,8 +381,12 @@ export async function applyProposal(proposalId:string,signal?:AbortSignal,semant
  const failure={...reviewDetails,sourceChecks:null,imageReview,id:id(),projectId:pid,proposalId,fromSnapshot:p.current_snapshot,toSnapshot:candidateId,baselineAudit:baseline.id,audit:scanned?.id??null,resolved:[],remaining:baseline.issues,added:[],targetFixed:false,structurePassed:true,patch,proposalReason:pr.data.reason,analysis:pr.data.analysis,agentTrace:pr.data.agentTrace,sources:pr.data.sources,wcag:pr.data.wcag,wcagUrl:pr.data.wcagUrl,diff,status:'failed',reason:`复测无法完成，已保留原版本：${(error as Error).message}`,createdAt:now(),beforeHash,afterHash};
  db.transaction(()=>{db.prepare('INSERT INTO verifications VALUES(?,?,?,?,?,?)').run(failure.id,pid,proposalId,'failed',JSON.stringify(failure),now());db.prepare('UPDATE proposals SET status=? WHERE id=?').run('failed',proposalId);db.prepare('UPDATE snapshots SET description=? WHERE id=?').run('验证失败',candidateId)})();return failure;
  }
- const initialIds=new Set(baseline.issues.map((i:any)=>i.id)),currentIds=new Set(scanned.issues.map((i:any)=>i.id));const resolved=baseline.issues.filter((i:any)=>!currentIds.has(i.id));const remaining=baseline.issues.filter((i:any)=>currentIds.has(i.id));const added=scanned.issues.filter((i:any)=>!initialIds.has(i.id));const targetFixed=Boolean(scoped)||!currentIds.has(patch.issueId);const contrastPassed=patch.operation!=='set-color'||scanned.contrastCheck?.valid===true;const functionPassed=JSON.stringify(baseline.functionChecks)===JSON.stringify(scanned.functionChecks);const passed=targetFixed&&added.length===0&&contrastPassed&&functionPassed;
- const report={...reviewDetails,sourceChecks,contrastBefore,imageReview,id:id(),projectId:pid,proposalId,fromSnapshot:p.current_snapshot,toSnapshot:candidateId,baselineAudit:baseline.id,audit:scanned.id,resolved,remaining,added,targetFixed,structurePassed:true,functionPassed,contrastCheck:scanned.contrastCheck,patch,proposalReason:pr.data.reason,analysis:pr.data.analysis,agentTrace:pr.data.agentTrace,sources:pr.data.sources,wcag:pr.data.wcag,wcagUrl:pr.data.wcagUrl,diff,status:passed?'passed':'failed',reason:passed?'目标问题已解决，结构与键盘聚焦检查通过，未发现新增自动检测问题。':!functionPassed?'交互控件或键盘聚焦检查发生变化，已保留原版本。':!contrastPassed?'文字对比度未通过独立核验或需要人工检查，已保留原版本。':!targetFixed?'目标问题未通过复测，已保留原版本。':'复测发现新增问题，已保留原版本。',createdAt:now(),beforeHash,afterHash};
+ const initialIds=new Set(baseline.issues.map((i:any)=>i.id)),currentIds=new Set(scanned.issues.map((i:any)=>i.id));const resolved=baseline.issues.filter((i:any)=>!currentIds.has(i.id));const remaining=baseline.issues.filter((i:any)=>currentIds.has(i.id));const added=scanned.issues.filter((i:any)=>!initialIds.has(i.id));const targetFixed=Boolean(scoped)||[patch.issueId,...contrastTargets.map(target=>target.issueId)].every(id=>!currentIds.has(id));const contrastPassed=patch.operation!=='set-color'||(scanned.contrastCheck?.valid===true&&scanned.additionalContrast.every(check=>check.valid));const functionPassed=JSON.stringify(baseline.functionChecks)===JSON.stringify(scanned.functionChecks);const passed=targetFixed&&added.length===0&&contrastPassed&&functionPassed;
+ const measured=[scanned.contrastCheck,...scanned.additionalContrast].find(check=>check&&!check.valid);
+ const contrastFailure=measured && !measured.uncertain
+  ? `候选文字对比度为 ${measured.ratio.toFixed(2)}:1，要求 ${measured.required}:1。已保留原版本。`
+  : '当前文字或背景无法可靠测量，请人工复核。已保留原版本。';
+ const report={...reviewDetails,sourceChecks,contrastBefore,imageReview,id:id(),projectId:pid,proposalId,fromSnapshot:p.current_snapshot,toSnapshot:candidateId,baselineAudit:baseline.id,audit:scanned.id,resolved,remaining,added,targetFixed,structurePassed:true,functionPassed,contrastCheck:scanned.contrastCheck,additionalContrast:scanned.additionalContrast,patch,proposalReason:pr.data.reason,analysis:pr.data.analysis,agentTrace:pr.data.agentTrace,sources:pr.data.sources,wcag:pr.data.wcag,wcagUrl:pr.data.wcagUrl,diff,status:passed?'passed':'failed',reason:passed?(contrastTargets.length ? `同组 ${contrastTargets.length} 处对比度均已通过复测，未发现新增自动检测问题。` : '目标问题已解决，结构与键盘聚焦检查通过，未发现新增自动检测问题。'):!functionPassed?'交互控件或键盘聚焦检查发生变化，已保留原版本。':!contrastPassed?contrastFailure:!targetFixed?'目标问题未通过复测，已保留原版本。':'复测发现新增问题，已保留原版本。',createdAt:now(),beforeHash,afterHash};
  db.transaction(()=>{db.prepare('INSERT INTO verifications VALUES(?,?,?,?,?,?)').run(report.id,pid,proposalId,report.status,JSON.stringify(report),now());db.prepare('UPDATE proposals SET status=? WHERE id=?').run(passed?'applied':'failed',proposalId);db.prepare('UPDATE snapshots SET description=? WHERE id=?').run(passed?'已验证修复':'验证失败',candidateId);if(passed)db.prepare('UPDATE projects SET current_snapshot=? WHERE id=?').run(candidateId,pid)})();return report;
  }finally{locks.delete(pid)}}
 export function rejectProposal(proposalId:string){const pr=proposal(proposalId);if(pr.status!=='pending')throw new Error('建议已处理。');db.prepare('UPDATE proposals SET status=? WHERE id=?').run('rejected',proposalId);return {status:'rejected'};}

@@ -8,9 +8,10 @@ import path from 'node:path';
 import type { AddressInfo } from 'node:net';
 import { chromium } from 'playwright-core';
 import { unzipSync } from 'fflate';
+import { seedBrowserCapture } from './helpers/project-import';
 import { registerTestAccount, attachTestAccount, testFetch } from './helpers/account';
 
-test('工作台可导入浏览器采集文件并分别展示原页面与副本检测', {timeout:60000}, async () => {
+test('工作台在同一可交互副本内定位和验证旧采集项目', {timeout:60000}, async () => {
   const dir=fs.mkdtempSync(path.join(os.tmpdir(),'a11y-capture-ui-'));
   const socket=http.createServer();
   await new Promise<void>(resolve=>socket.listen(0,'127.0.0.1',resolve));
@@ -24,11 +25,10 @@ test('工作台可导入浏览器采集文件并分别展示原页面与副本�
     assert.ok(ready,'服务未启动');
     await registerTestAccount(base);
     const screenshot=fs.readFileSync('tests/fixtures/vision/bars.png');
-    const file=path.join(dir,'capture.json');
-    fs.writeFileSync(file,JSON.stringify({format:'a11y-studio-browser-capture',version:1,title:'已登录账户',capturedAt:new Date().toISOString(),
-      html:'<!doctype html><html lang="zh-CN"><title>账户</title><main><h1>已登录账户</h1><button id="missing"></button></main></html>',
+    const payload={format:'a11y-studio-browser-capture',version:1,title:'已登录账户',capturedAt:new Date().toISOString(),
+      html:'<!doctype html><html lang="zh-CN"><title>账户</title><body style="margin:0"><a id="aging-total-page" role="pagedescription" aria-label="页面导览" tabindex="0" style="display:inline"></a><main><h1>已登录账户</h1><div style="height:2500px"></div><button id="missing"></button><input id="unlabelled"></main></body></html>',
       screenshot:'data:image/png;base64,'+screenshot.toString('base64'),viewport:{width:900,height:700},
-      violations:[{id:'button-name',help:'按钮缺少名称',impact:'critical',count:1}],incomplete:0,limitations:['副本不运行原站脚本。']}));
+      violations:[{id:'button-name',help:'按钮缺少名称',impact:'critical',count:1}],incomplete:0,limitations:['副本不运行原站脚本。']};
     const browser=await chromium.launch({executablePath:process.env.CHROME_PATH||'/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',headless:true});
     try {
       const page=await browser.newPage();
@@ -41,18 +41,51 @@ test('工作台可导入浏览器采集文件并分别展示原页面与副本�
       await page.getByRole('button',{name:'URL',exact:true}).click();
       assert.equal(await page.getByRole('button',{name:'浏览器采集',exact:true}).count(),0);
       assert.equal(await page.getByLabel('网页地址').isVisible(),true);
-      await page.getByRole('button',{name:'导入已有的浏览器采集 JSON'}).click();
-      await page.getByText('导入已有的浏览器采集文件').waitFor();
-      await page.getByRole('button',{name:'返回 URL 采集'}).click();
-      assert.equal(await page.getByLabel('网页地址').isVisible(),true);
-      await page.getByRole('button',{name:'导入已有的浏览器采集 JSON'}).click();
-      await page.locator('input[type=file]').setInputFiles(file);
-      await page.getByText('浏览器原始页面证据', {exact:false}).waitFor({timeout:40000});
-      await page.getByText('原页面发现 1 处问题', {exact:false}).waitFor();
-      const image=page.getByRole('img',{name:'采集时浏览器可见区域截图'});
-      await image.waitFor();
-      assert.equal(await image.evaluate((element:HTMLImageElement)=>element.complete && element.naturalWidth>0),true);
-      await page.getByText('下方工作台使用本地副本重新检测', {exact:false}).waitFor();
+      assert.equal(await page.getByRole('button',{name:/浏览器采集 JSON/}).count(),0);
+      assert.equal((await page.request.post(base+'/api/projects/import-browser-capture',{headers:{origin:base}})).status(),404);
+      const project=await seedBrowserCapture(page,base,dir,payload);
+      const audit=await page.request.post(base+'/api/projects/'+project.id+'/audits',{headers:{origin:base}});
+      assert.equal(audit.status(),202);
+      await page.reload();
+      await page.getByRole('button',{name:project.name,exact:true}).click();
+      const workspace=page.getByRole('region',{name:'诊断工作区'});
+      const interactive=workspace.locator('.inline-interactive');
+      const frame=interactive.frameLocator('iframe');
+      await frame.getByRole('heading',{name:'已登录账户'}).waitFor({timeout:40000});
+      assert.equal(await interactive.locator('iframe').count(),1);
+      assert.equal(await workspace.getByRole('button',{name:'扫描截图',exact:true}).count(),0);
+      const issueList=page.getByRole('region',{name:'待处理问题'});
+      const ruleFilter=page.getByLabel('问题类型');
+      await ruleFilter.selectOption('button-name');
+      await issueList.getByRole('button',{name:/按钮缺少名称/}).click();
+      const marker=frame.getByText('问题位置',{exact:true});
+      await marker.waitFor();
+      assert.ok(await frame.locator('html').evaluate(()=>scrollY)>100);
+      await frame.locator('#unlabelled').fill('交互输入');
+      assert.equal(await frame.locator('#unlabelled').inputValue(),'交互输入');
+      await frame.locator('html').evaluate(()=>scrollTo(0,0));
+      await marker.waitFor({state:'hidden'});
+      await workspace.getByRole('button',{name:'在网页中验证'}).click();
+      await marker.waitFor();
+      assert.equal(await interactive.locator('iframe').count(),1);
+      await page.getByLabel('建议的文本内容').fill('打开菜单');
+      await page.getByRole('button',{name:'生成补丁预览'}).click();
+      await page.getByText('待应用预览',{exact:false}).waitFor();
+      assert.equal(await frame.locator('#missing').getAttribute('aria-label'),null);
+      await page.getByRole('button',{name:'确认应用修复',exact:true}).click();
+      await page.getByRole('button',{name:'确认应用并复测'}).click();
+      await workspace.locator('.assistant-body').getByRole('heading',{name:'复测通过'}).waitFor();
+      const toggle=workspace.getByRole('checkbox',{name:'查看原始状态'});
+      await frame.getByRole('button',{name:'打开菜单',exact:true}).waitFor();
+      await toggle.check();
+      await frame.locator('#missing').waitFor();
+      assert.equal(await frame.locator('#missing').getAttribute('aria-label'),null);
+      await toggle.uncheck();
+      await frame.getByRole('button',{name:'打开菜单',exact:true}).waitFor();
+      assert.equal(await interactive.locator('iframe').count(),1);
+      await page.getByRole('button',{name:'结果报告',exact:true}).click();
+      await page.getByRole('heading',{name:'结果报告',exact:true}).waitFor();
+      await page.getByRole('button',{name:'诊断工作台',exact:true}).click();
       const projects=await (await testFetch(base+'/api/projects')).json() as {id:string}[];
       const exported=await testFetch(base+'/api/projects/'+projects[0].id+'/export');
       assert.equal(exported.status,200);

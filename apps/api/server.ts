@@ -1,16 +1,17 @@
 import {setTimeout as delay} from 'node:timers/promises';
 import { explorerPlanner } from './explorer';
 import express from 'express';import multer from 'multer';import fs from 'node:fs';import path from 'node:path';import {zipSync,strToU8} from 'fflate';import 'dotenv/config';
-import {db,id,now,ROOT,DATA,project,proposal,audit,snapshotDir,walk,safePath} from './storage';import {createProject} from './import';import {captureUrlSnapshot} from './url-snapshot';import {runAudit,inspectAuditElement} from './scan';import {createProposal,createSourceProposal,createPanoramaProposal,previewProposal,previewIssueImage,applyProposal,rejectProposal,rollback,getKnowledge} from './repair';
+import {db,id,now,ROOT,DATA,project,proposal,audit,snapshotDir,walk,safePath} from './storage';import {createProject} from './import';import {captureUrlSnapshot} from './url-snapshot';import {runAudit,inspectAuditElement} from './scan';import {createProposal,createSourceProposal,createPanoramaProposal,previewProposal,withProposalCandidate,previewIssueImage,applyProposal,rejectProposal,rollback,getKnowledge} from './repair';
 import { projectState as state, renameSnapshot } from './version-state';
 import { compareSnapshots } from './version-compare';
 import { collectPanorama, collectSite, exploreSite, panoramaInput, panoramaInventory, panoramaScreenshot, siteReport } from './panorama';
 import { imageVisionConfigured } from './ai/vision';
 import { missingImageEvidence } from './ai/visual-context';
 import { decideAiFinding, requestAiAudit } from './audit-ai';
-import {closeAccountSession,closeLive,hasLiveProject,openLiveRepair,operateLive,scanLive,startLive} from './live-comparison';
-import { importBrowserCapture, browserCaptureScreenshot } from './browser-capture';
-import { actManagedBrowserSession, captureManagedBrowserSession, closeManagedBrowserSession, closeManagedCaptureSessionsForAuth, getManagedBrowserFrame, startManagedBrowserSession } from './managed-browser-capture';
+import {closeAccountSession,closeLive,diagnoseLivePage,hasLiveProject,openLiveRepair,operateLive,scanLive,startLive} from './live-comparison';
+import { browserCaptureScreenshot } from './browser-capture';
+import { captureComparison } from './capture-comparison';
+import { actManagedBrowserSession, captureManagedBrowserSession, closeManagedBrowserSession, closeManagedCaptureSessionsForAuth, diagnoseManagedBrowserPage, getManagedBrowserFrame, startManagedBrowserSession } from './managed-browser-capture';
 import {accountFor,authEndpoints,initializeAccounts,requireSession,verifyRequest} from './auth';
 import {cleanExpiredGuests,releaseGuestProject,useGuestBudget} from './guests';
 import {eraseProjectRecords,flushProjectFiles,migrateProjectDeletion} from './project-deletion';
@@ -120,7 +121,7 @@ function diagnosticStatus(projectId:string,snapshotId:string) {
    {id:string;status:string;error:string|null} | undefined;
 }
 let activeDiagnostics=0;
-function startDiagnostics(projectId:string,snapshotId:string,guest:boolean) {
+function startDiagnostics(projectId:string,snapshotId:string,guest:boolean,entryOnly=false) {
  const active=diagnosticStatus(projectId,snapshotId);
  if (active && ['queued','running'].includes(active.status)) return active.id;
  const ticket=job('diagnostics',projectId,async(signal,progress)=>{
@@ -131,6 +132,7 @@ function startDiagnostics(projectId:string,snapshotId:string,guest:boolean) {
     progress('正在检查网站',{snapshotId});
     await runAudit(projectId,snapshotId,signal);
     signal.throwIfAborted();
+    if (entryOnly) return {snapshotId};
     const result=await exploreSite(projectId,snapshotId,guest,signal,
       (message,payload)=>progress(message,{...payload,snapshotId}));
     signal.throwIfAborted();
@@ -155,17 +157,9 @@ app.get('/api/projects',(_req,res)=>res.json(db.prepare(`SELECT p.id,p.name,p.en
  LEFT JOIN audits a ON a.id=(SELECT id FROM audits WHERE project_id=p.id AND snapshot_id=s.id ORDER BY rowid DESC LIMIT 1)
  WHERE p.owner_user_id=? ORDER BY updatedAt DESC,p.rowid DESC`).all(accountFor(res).user.id)));
 app.post('/api/projects',guestBudget('projects'),upload.single('file'),async(req,res,next)=>{try{const user=accountFor(res).user;
- const created=await createProject({ownerUserId:user.id,fixture:req.body.fixture,file:req.file,engineering:req.body.mode==='source'});
- if(req.body.diagnostics==='true') startDiagnostics(created.id,created.currentSnapshot,Boolean(user.isAnonymous));
+ const created=await createProject({ownerUserId:user.id,fixture:req.body.fixture,file:req.file,engineering:req.body.mode==='source',autoSource:req.body.mode==='auto'});
+ if(req.body.diagnostics==='true' || req.body.diagnostics==='entry') startDiagnostics(created.id,created.currentSnapshot,Boolean(user.isAnonymous),req.body.diagnostics==='entry');
  res.status(201).json(created);}catch(e){next(e)}});
-app.post('/api/projects/import-browser-capture',guestBudget('projects'),upload.single('file'),async(req,res,next)=>{
- try {
-  const user=accountFor(res).user;
-  const created=await importBrowserCapture(req.file,user.id);
-  if(req.body.diagnostics==='true') startDiagnostics(created.id,created.currentSnapshot,Boolean(user.isAnonymous));
-  res.status(201).json(created);
- } catch(e){next(e)}
-});
 let activeUrlImports = 0;
 app.post('/api/projects/import-url', guestBudget('projects'), async (req,res,next) => {
  const url = req.body?.url;
@@ -203,11 +197,17 @@ app.post('/api/browser-capture-sessions/:id/action',async(req,res,next)=>{
   res.set('Cache-Control','no-store').json(await actManagedBrowserSession(req.params.id,account.user.id,account.session.id,req.body));
  }catch(error){next(error);}
 });
+app.post('/api/browser-capture-sessions/:id/diagnostics',async(req,res,next)=>{
+ try{
+  const account=accountFor(res);
+  res.set('Cache-Control','no-store').json(await diagnoseManagedBrowserPage(req.params.id,account.user.id,account.session.id,req.body));
+ }catch(error){next(error);}
+});
 app.post('/api/browser-capture-sessions/:id/capture',guestBudget('projects'),async(req,res,next)=>{
  try{
   const account=accountFor(res);
-  const created=await captureManagedBrowserSession(req.params.id,account.user.id,account.session.id);
-  startDiagnostics(created.id,created.currentSnapshot,Boolean(account.user.isAnonymous));
+  const created=await captureManagedBrowserSession(req.params.id,account.user.id,account.session.id,req.body?.expectedUrl);
+  startDiagnostics(created.id,created.currentSnapshot,Boolean(account.user.isAnonymous),true);
   res.status(201).json(created);
  }catch(error){next(error);}
 });
@@ -227,6 +227,18 @@ app.use('/api/projects/:id/audits/:auditId',(req,res,next)=>{
  next();
 });
 app.get('/api/projects/:id/browser-capture/screenshot',(req,res,next)=>{try{res.set('Cache-Control','no-store').sendFile(browserCaptureScreenshot(req.params.id));}catch(e){next(e)}});
+app.get('/api/projects/:id/browser-capture/comparison/:version',guestRead,(req,res,next)=>{
+ try {
+  res.set('Cache-Control','private, no-store').json(captureComparison(req.params.id,req.params.version));
+ } catch(error) { next(error); }
+});
+app.get('/api/proposals/:id/interactive-candidate',guestRead,async(req,res,next)=>{
+ try {
+  const data=await projectWork(res.locals.resourceProjectId,res,()=>withProposalCandidate(req.params.id,async candidate=>
+   captureComparison(candidate.projectId,candidate.version,candidate)));
+  res.set('Cache-Control','private, no-store').json(data);
+ } catch(error) { next(error); }
+});
 app.get('/api/projects/:id',(req,res,next)=>{try{res.json(state(req.params.id));}catch(e){next(e)}});
 app.patch('/api/projects/:id',(req,res)=>{
  const name=typeof req.body?.name==='string'?req.body.name.trim():'';
@@ -261,6 +273,13 @@ app.post('/api/projects/:id/live',async(req,res,next)=>{
 });
 app.post('/api/projects/:id/live/:session/action',async(req,res,next)=>{
  try{res.set('Cache-Control','no-store').json(await projectWork(req.params.id,res,()=>operateLive(req.params.id,req.params.session,req.body,accountFor(res).session.id)));}catch(error){next(error);}
+});
+app.post('/api/projects/:id/live/:session/diagnostics/:side',async(req,res,next)=>{
+ try{
+  const {id,session,side}=req.params;
+  if(side!=='left'&&side!=='right')return res.status(400).json({error:'无效的比较侧。'});
+  res.set('Cache-Control','no-store').json(await projectWork(id,res,()=>diagnoseLivePage(id,session,side,req.body,accountFor(res).session.id)));
+ }catch(error){next(error);}
 });
 app.post('/api/projects/:id/live/:session/scan/:side',async(req,res,next)=>{
  try{
@@ -411,11 +430,11 @@ app.get('/api/projects/:id/export',guestRead,(req,res,next)=>{try{const report=s
  }
  const exportedReport={...structuredClone(report),site:exportedSite};
  if(exportedReport.browserCapture){entries['report/screenshots/browser-original.png']=fs.readFileSync(browserCaptureScreenshot(p.id));exportedReport.browserCapture.screenshot='screenshots/browser-original.png';}
- const auditIds=new Set<string>([report.baseline?.id,report.current?.id,...report.verifications.flatMap((v:any)=>[v.baselineAudit,v.audit])].filter(Boolean));for(const auditId of auditIds){if(!/^[0-9a-f-]{36}$/i.test(auditId)||!db.prepare('SELECT 1 FROM audits WHERE id=? AND project_id=?').get(auditId,p.id))continue;const image=path.join(DATA,'screenshots',auditId+'.png');if(fs.existsSync(image))entries['report/screenshots/'+auditId+'.png']=fs.readFileSync(image)}for(const scan of [exportedReport.baseline,exportedReport.current])if(scan?.id)scan.screenshot='screenshots/'+scan.id+'.png';entries['report/report.json']=strToU8(JSON.stringify(exportedReport,null,2));const escape=(x:any)=>String(x??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'} as Record<string,string>)[c]);const html=`<!doctype html><html lang="zh-CN"><meta charset="utf-8"><title>无障碍检测报告</title><body><h1>${escape(p.name)} · 检测报告</h1><p>当前版本：${escape(report.snapshots.find(item=>item.id===p.current_snapshot)?.name)}</p><p>初始 ${report.summary.initial??'未扫描'} / 已解决 ${report.summary.resolved} / 残留 ${report.summary.remaining} / 新增 ${report.summary.added}</p>${report.browserCapture?'<h2>浏览器原始页面</h2><p>采集时的原始页面画面；以下修复前后截图来自本地副本。</p><img alt="浏览器原始页面截图" style="max-width:100%" src="screenshots/browser-original.png">':''}<h2>修复前页面</h2>${report.baseline?.id?`<img alt="原始网页截图" style="max-width:100%" src="screenshots/${escape(report.baseline.id)}.png">`:''}<h2>当前页面</h2>${report.current?.id?`<img alt="当前网页截图" style="max-width:100%" src="screenshots/${escape(report.current.id)}.png">`:''}<h2>当前问题</h2><ul>${(report.current?.issues||[]).map((i:any)=>`<li>${escape(i.help)} · ${escape(i.selector)} · ${escape(i.impact)}</li>`).join('')}</ul><h2>页面与状态检测</h2>
+ const auditIds=new Set<string>([report.baseline?.id,report.current?.id,...report.verifications.flatMap((v:any)=>[v.baselineAudit,v.audit])].filter(Boolean));for(const auditId of auditIds){if(!/^[0-9a-f-]{36}$/i.test(auditId)||!db.prepare('SELECT 1 FROM audits WHERE id=? AND project_id=?').get(auditId,p.id))continue;const image=path.join(DATA,'screenshots',auditId+'.png');if(fs.existsSync(image))entries['report/screenshots/'+auditId+'.png']=fs.readFileSync(image)}for(const scan of [exportedReport.baseline,exportedReport.current])if(scan?.id)scan.screenshot='screenshots/'+scan.id+'.png';entries['report/report.json']=strToU8(JSON.stringify(exportedReport,null,2));const escape=(x:any)=>String(x??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'} as Record<string,string>)[c]);const html=`<!doctype html><html lang="zh-CN"><meta charset="utf-8"><title>无障碍检测报告</title><body><h1>${escape(p.name)} · 检测报告</h1><p>初始 ${report.summary.initial??'未扫描'} / 已解决 ${report.summary.resolved} / 残留 ${report.summary.remaining} / 新增 ${report.summary.added}</p>${report.browserCapture?'<h2>浏览器原始页面</h2><p>采集时的原始页面画面；以下修复前后截图来自本地副本。</p><img alt="浏览器原始页面截图" style="max-width:100%" src="screenshots/browser-original.png">':''}<h2>原始状态</h2>${report.baseline?.id?`<img alt="原始网页截图" style="max-width:100%" src="screenshots/${escape(report.baseline.id)}.png">`:''}<h2>当前状态</h2>${report.current?.id?`<img alt="当前网页截图" style="max-width:100%" src="screenshots/${escape(report.current.id)}.png">`:''}<h2>当前问题</h2><ul>${(report.current?.issues||[]).map((i:any)=>`<li>${escape(i.help)} · ${escape(i.selector)} · ${escape(i.impact)}</li>`).join('')}</ul><h2>页面与状态检测</h2>
  <ul>${exportedSite.pages.map(page=>`<li>${escape(page.path)} · ${escape(({completed:'已扫描',running:'扫描未完成',failed:'扫描失败',skipped:'跳过',unscanned:'尚未扫描'})[page.status])}${page.issues===null?'':` · ${page.issues} 项违规`}${page.error?` · ${escape(page.error)}`:''}</li>`).join('')}</ul>
  <p>全站确定性违规：${exportedSite.confirmed}。未检测的已知路径：${escape(exportedSite.untested.join('、') || '无')}。自动规则不代表完整覆盖。</p>
  ${exportedSite.states.map(item=>`<details><summary>${escape(item.path)} · ${escape(item.label)}</summary>${item.screenshot?`<img alt="状态截图" style="max-width:100%" src="${escape(item.screenshot)}">`:'截图缺失'}<ul>${item.issues.map(issue=>`<li>${escape(issue.ruleId)} · ${escape(issue.selector)}</li>`).join('')}</ul></details>`).join('')}
- <h2>人工复核</h2><p>自动检测不能替代键盘、屏幕阅读器及语义检查。</p><ul>${(report.current?.incomplete||[]).map((i:any)=>`<li>${escape(i.help)} · ${i.count} 项</li>`).join('')}</ul><h2>版本历史</h2><ul>${report.snapshots.map((item,index)=>`<li>V${index} · ${escape(item.name)}</li>`).join('')}</ul><h2>跨版本验证记录</h2><pre>${escape(JSON.stringify(report.verifications,null,2))}</pre></body></html>`;entries['report/report.html']=strToU8(html);entries['report/verification-log.json']=strToU8(JSON.stringify(report.verifications,null,2));res.attachment('a11y-studio-'+p.id.slice(0,8)+'.zip');res.send(Buffer.from(zipSync(entries,{level:6}))); }catch(e){next(e)}});
+ <h2>人工复核</h2><p>自动检测不能替代键盘、屏幕阅读器及语义检查。</p><ul>${(report.current?.incomplete||[]).map((i:any)=>`<li>${escape(i.help)} · ${i.count} 项</li>`).join('')}</ul><h2>修复验证记录</h2><pre>${escape(JSON.stringify(report.verifications,null,2))}</pre></body></html>`;entries['report/report.html']=strToU8(html);entries['report/verification-log.json']=strToU8(JSON.stringify(report.verifications,null,2));res.attachment('a11y-studio-'+p.id.slice(0,8)+'.zip');res.send(Buffer.from(zipSync(entries,{level:6}))); }catch(e){next(e)}});
 app.use('/api',(_req,res)=>denyResource(res));
 app.use(express.static(path.join(ROOT,'dist'),{index:'index.html'}));
 app.use((error:any,_req:express.Request,res:express.Response,_next:express.NextFunction)=>{if (!(error instanceof WorkspaceConflict)) console.error(error.message);if(!res.headersSent)res.status(error instanceof WorkspaceConflict ? error.status : 400).json({error:error.code==='LIMIT_FILE_SIZE'?'上传文件超过 8 MB 限制。':error.message||'处理失败。'});});

@@ -1,6 +1,6 @@
 import { diffArrays, diffLines } from 'diff';
 
-export type PatchFile = { file: string; selector: string; before: string; after: string };
+export type PatchFile = { excerpt?: boolean; startLine?: number; file: string; selector: string; before: string; after: string };
 type Part = { value: string; added?: boolean; removed?: boolean };
 export type Change = { kind: 'added' | 'removed' | 'modified'; old: string; next: string; before: string; after: string; line: number; label: string };
 
@@ -30,7 +30,7 @@ export function patchDiff(file: PatchFile) {
       [{ value: file.before, removed: true }, { value: file.after, added: true }];
   }
   const changes: Change[] = [];
-  let line = 1;
+  let line = file.startLine ?? 1;
   for (let i = 0; i < parts.length;) {
     const part = parts[i];
     if (!part.added && !part.removed) { line += part.value.split('\n').length - 1; i++; continue; }

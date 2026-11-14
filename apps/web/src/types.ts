@@ -34,6 +34,8 @@ export type Scan = {
 
 export type Snapshot = { id: string; parent_id: string | null; description: string; name: string; created_at: string };
 
+type ContrastTarget = { issueId: string; selector: string; value: string };
+
 export type Verification = {
   id: string;
   status: string;
@@ -60,8 +62,9 @@ export type Verification = {
   functionPassed?: boolean;
   contrastBefore?: ContrastEvidence | null;
   contrastCheck?: ContrastEvidence | null;
+  additionalContrast?: ContrastEvidence[];
   diff?: string;
-  patch?: { issueId: string; selector: string; targetFile: string };
+  patch?: { issueId: string; selector: string; targetFile: string; contrastTargets?: ContrastTarget[] };
   proposalReason?: string;
   wcag?: string[];
   wcagUrl?: string;
@@ -76,7 +79,7 @@ export type State = {
   baseline: Scan | null;
   current: Scan | null;
   browserCapture?: {title:string;capturedAt:string;viewport:{width:number;height:number};screenshot:string;
-    screenshotFullPage?:boolean;
+    screenshotFullPage?:boolean;dynamicReplay?:boolean;screenshotSize?:{width:number;height:number};
     violations:{id:string;help:string;impact:string|null;count:number}[];incomplete:number;limitations:string[]} | null;
   summary: { initial: number | null; resolved: number; remaining: number; added: number };
   resolved: { issue: Issue; verificationId: string }[];
@@ -97,19 +100,9 @@ export type Proposal = {
   risk: string;
   before: string;
   after: string;
-  patch: { operation: string; value: string; targetFile: string; selector: string };
+  patch: { operation: string; value: string; targetFile: string; selector: string; contrastTargets?: ContrastTarget[] };
   agentTrace?: { tool: string; summary: string }[];
   sources?: { id: string; title: string; refs: string[]; url: string; text: string }[];
 };
 
 export type HistoryItem = { issue: Issue; verification: Verification };
-
-export function versionLabel(state: State, id: string) {
-  const index = state.snapshots.findIndex(snapshot => snapshot.id === id);
-  return index < 0 ? '候选版本' : `V${index}`;
-}
-
-export function versionName(state: State, id: string) {
-  const name = state.snapshots.find(snapshot => snapshot.id === id)?.name;
-  return name ? `${versionLabel(state, id)} · ${name}` : versionLabel(state, id);
-}

@@ -3,32 +3,40 @@ import { z } from 'zod';
 import type { Locator, Page } from 'playwright-core';
 import type { Control, PanoramaStep } from '../../packages/shared/panorama';
 import type { LiveComparison, LiveFrame, LiveSide } from '../../packages/shared/live-comparison';
-import { act, adoptLiveRecipe, controlsFor } from './panorama';
+import { liveEditingKeys } from '../../packages/shared/live-comparison';
+import { act, adoptLiveRecipe, controlsFor, replayInteractiveState } from './panorama';
 import { withRepairPage, type BrowserRequestEvidence, type ResourceFailure } from './scan';
+import { replayAvailable, replayLink, UncapturedReplayPage, withReplayPage } from './browser-replay';
 import { createInteractionAudit, readInteractionState } from './interaction-audit';
 import { scanRules } from './scan-rules';
-import { db, hash, id, now, project as storedProject, snapshot, snapshotDir, walk } from './storage';
+import { diagnosePage, locatePageElement } from './page-diagnostics';
+import { db, hash, id, now, project as storedProject, proposal as storedProposal, snapshot, snapshotDir, walk } from './storage';
 import { validSnapshots } from './version-state';
+import { withProposalCandidate } from './repair';
 
 const localOrigin = 'http://a11y.local';
 const sides = ['left','right'] as const;
 const control = z.object({role:z.enum(['link','button','tab','textbox','combobox']),name:z.string().trim().min(1).max(100)});
-const startInput = z.object({left:z.uuid(),right:z.uuid(),start:z.string().max(240).optional()});
+const startInput = z.object({single:z.boolean().optional(),initialScroll:z.number().finite().min(0).max(10000000).optional(),left:z.uuid(),right:z.uuid(),start:z.string().max(240).optional(),proposalId:z.uuid().optional(),stateId:z.uuid().optional(), replaceSession:z.uuid().optional(),
+  selectors:z.object({left:z.string().max(2000).optional(),right:z.string().max(2000).optional()}).optional()});
 const actionInput = z.object({side:z.enum(sides),sync:z.boolean(),revision:z.number().int().min(0), operation:z.union([
-  z.object({action:z.literal('click'),x:z.number().int().min(0).max(899),y:z.number().int().min(0).max(699)}),
+  z.object({action:z.literal('click'),x:z.number().int().min(0).max(4095),y:z.number().int().min(0).max(4095)}),
+  z.object({action:z.literal('text'),text:z.string().min(1).max(500)}),
+  z.object({action:z.literal('key'),key:z.enum(liveEditingKeys),shift:z.boolean()}),
   z.object({action:z.enum(['click','fill','validate']),target:control}),
-  z.object({action:z.enum(['activate','tab','shift-tab','escape','refresh'])}),
+  z.object({action:z.literal('locate'),path:z.string().max(2048),selector:z.string().max(2000),selectors:z.array(z.string().max(2000)).max(300).optional()}),
+  z.object({action:z.enum(['activate','tab','shift-tab','escape','refresh','back'])}),
   z.object({action:z.literal('scroll'),delta:z.number().int().min(-1600).max(1600),
-    x:z.number().int().min(0).max(899).optional(),y:z.number().int().min(0).max(699).optional()}),
+    x:z.number().int().min(0).max(4095).optional(),y:z.number().int().min(0).max(4095).optional()}),
   z.object({action:z.literal('zoom'),percent:z.union([z.literal(75),z.literal(100),z.literal(125),z.literal(150)])}),
 ])});
 const pathFor = (file:string) => '/' + file.split('/').map(encodeURIComponent).join('/');
 const redact = (text:string) => text.replace(/[\w.+-]+@[\w.-]+\.[a-z]{2,}|\b\d(?:[\d -]{7,})\d\b/gi,'[已隐藏]').replace(/a11y-test-invalid/g,'[测试输入]');
 const risky = /支付|删除|发送|购买|付款|注销|下单|转账|提交订单|\b(?:pay|buy|delete|send|purchase|checkout|logout|transfer|order|unsubscribe)\b/i;
 type Target = Control | {role:'summary';name:string};
-type PageLease = {page:Page; start:string; mode:'source'|'snapshot'; resources:ResourceFailure[]; network:BrowserRequestEvidence[]};
+type PageLease = {page:Page; start:string; entryPath?:string; mode:'source'|'snapshot'|'replay'; resources:ResourceFailure[]; network:BrowserRequestEvidence[]};
 type Session = {
-  id:string; project:string; accountId:string; authSessionId:string; controller:AbortController; finished:Promise<unknown>[];
+  single?:boolean; id:string; project:string; accountId:string; authSessionId:string; controller:AbortController; finished:Promise<unknown>[];
   pages:Partial<Record<LiveSide,PageLease>>; pending:boolean; revision:number;
   observations:LiveComparison['observations'];
   auditors:Record<LiveSide,ReturnType<typeof createInteractionAudit>>;
@@ -36,27 +44,39 @@ type Session = {
   sequences:Record<LiveSide,string|null>;
   scans:Partial<Record<LiveSide,{id:string; revision:number; frame:string; selectors:Map<string,string>}>>;
   versions:Record<LiveSide,string>;
+  selectors?:Partial<Record<LiveSide,string>>;
+  locationGroups?:Partial<Record<LiveSide,string[]>>;
+  stateId?:string;
+  candidate:boolean;
   frameKeys:Partial<Record<LiveSide,string>>;
   frames:Partial<Record<LiveSide,{frame:LiveFrame;dom:string;ax:string}>>;
   actions:NonNullable<LiveComparison['outcome']>[];
 };
 const sessions = new Map<string,Session>();
+const replayPages = new WeakSet<Page>();
 
-function lease(session:Session, side:LiveSide, dir:string, entry:string, start?:string) {
+function lease(session:Session, side:LiveSide, dir:string, entry:string, start?:string, candidate=false) {
   const signal = session.controller.signal;
   return new Promise<void>((resolve,reject) => {
-    const finished = withRepairPage(dir,entry,signal,async (page,_product,resources,network) => {
+    const replay = !candidate && !session.stateId && replayAvailable(session.project) && (!start || start === entry);
+    const inspect = async (page:Page,_product:unknown,resources:ResourceFailure[],network:BrowserRequestEvidence[]) => {
       page.setDefaultTimeout(2500);
-      if (start && start !== entry) {
+      if(replay) replayPages.add(page);
+      if (session.stateId) {
+        await replayInteractiveState(session.project,session.stateId,page,entry,signal);
+        session.journals[side]=null;
+      } else if (start && start !== entry) {
         if (!/\.html?$/i.test(start) || !walk(dir).includes(start)) throw new Error('该版本缺少所选 HTML 页面。');
         const response = await page.goto(localOrigin + pathFor(start),{waitUntil:'load',timeout:5000});
         if (!response?.ok()) throw new Error('所选页面加载失败。');
       }
-      session.pages[side] = {page,resources,network,start:start ?? entry,mode:_product?'source':'snapshot'};
+      session.pages[side] = {page,resources,network,start:start ?? entry,entryPath:!start || start===entry ? livePagePath(page).split('#')[0] : undefined,mode:replay?'replay':_product?'source':'snapshot'};
       session.sequences[side] = hash(start ?? entry);
       resolve();
       if (!signal.aborted) await once(signal,'abort');
-    },3000,true,true).catch(error => {
+    };
+    const finished = (replay ? withReplayPage(session.project,session.versions[side],signal,page=>inspect(page,undefined,[],[])) :
+      withRepairPage(dir,entry,signal,inspect,3000,true,true)).catch(error => {
       reject(error);
       if (!signal.aborted) session.controller.abort();
     });
@@ -65,14 +85,19 @@ function lease(session:Session, side:LiveSide, dir:string, entry:string, start?:
 }
 
 export async function startLive(project:string, input:unknown, accountId:string, authSessionId:string) {
-  const {left,right,start} = startInput.parse(input);
+  const {single,initialScroll,left,right,start,proposalId,selectors,stateId,replaceSession} = startInput.parse(input);
   const versions = validSnapshots(project);
   const before = versions.find(version => version.id === left);
   const after = versions.find(version => version.id === right);
   if (!before || !after) throw new Error('只能对比本项目的有效版本。');
+  if (proposalId && storedProposal(proposalId).project_id !== project) throw new Error('修复建议不存在。');
+  const previous = replaceSession ? sessions.get(replaceSession) : undefined;
+  if (previous?.accountId===accountId && previous.authSessionId===authSessionId) {
+    await closeLive(previous.project,previous.id,authSessionId);
+  }
   if (sessions.size >= 2 || [...sessions.values()].some(session=>session.accountId===accountId)) throw new Error('当前已有实时对比，请先关闭另一处预览。');
   const controller = new AbortController();
-  const session:Session = {id:id(),project,accountId,authSessionId,controller,finished:[],pages:{},pending:true,revision:0,versions:{left,right},frameKeys:{},frames:{},actions:[],
+  const session:Session = {single,id:id(),project,accountId,authSessionId,controller,finished:[],pages:{},pending:true,revision:0,versions:{left,right},selectors,stateId,candidate:Boolean(proposalId),frameKeys:{},frames:{},actions:[],
     observations:{left:[],right:[]},auditors:{left:createInteractionAudit(),right:createInteractionAudit()},journals:{left:[],right:[]},sequences:{left:null,right:null},scans:{}};
   sessions.set(session.id,session);
   const expiration = setTimeout(() => controller.abort(),5 * 60 * 1000);
@@ -80,10 +105,24 @@ export async function startLive(project:string, input:unknown, accountId:string,
     clearTimeout(expiration);
     sessions.delete(session.id);
   },{once:true});
-  const ready = [lease(session,'left',snapshotDir(project,left),snapshot(project,left).entry,start),lease(session,'right',snapshotDir(project,right),snapshot(project,right).entry,start)];
   try {
-    await Promise.all(ready);
-    return await inspect(session);
+    const leftReady=single ? undefined : lease(session,'left',snapshotDir(project,left),snapshot(project,left).entry,start);
+    // A candidate directory must live as long as its isolated browser can request files.
+    const rightReady = proposalId ? new Promise<void>((resolve,reject) => {
+      void withProposalCandidate(proposalId,async candidate=>{
+        if(candidate.projectId!==project || candidate.version!==right) throw new Error('候选补丁与当前项目版本不匹配。');
+        session.selectors={...session.selectors,right:candidate.selector};
+        await lease(session,'right',candidate.directory,candidate.entry,undefined,true);
+        resolve();
+        await Promise.allSettled(session.finished);
+      }).catch(reject);
+    }) : lease(session,'right',snapshotDir(project,right),snapshot(project,right).entry,start);
+    await Promise.all([leftReady,rightReady]);
+    if (single && initialScroll) {
+      await session.pages.right!.page.evaluate(y => window.scrollTo({top:y,behavior:'instant'}),initialScroll);
+    }
+    await Promise.all((single ? ['right'] as const : sides).map(side=>locatePageElement(session.pages[side]!.page,session.selectors?.[side],true)));
+    return await inspect(session,undefined,undefined,false);
   } catch (error) {
     controller.abort();
     throw error;
@@ -112,9 +151,14 @@ export function closeAccountSession(authSessionId:string) {
   for (const session of sessions.values()) if (session.authSessionId === authSessionId) session.controller.abort();
 }
 
-async function pageState(page:Page) {
+function livePagePath(page:Page) {
   const url = new URL(page.url());
-  if (url.origin !== localOrigin || url.search) throw new Error('浏览器已离开可比较的本地页面。');
+  if (url.origin !== localOrigin || (url.search && !replayPages.has(page))) throw new Error('浏览器已离开可比较的本地页面。');
+  return url.pathname + (replayPages.has(page) ? url.search : '') + url.hash;
+}
+
+async function pageState(page:Page) {
+  const path = livePagePath(page);
   const evidence = await page.evaluate(() => {
     const {visible} = {visible(selector:string) {return [...document.querySelectorAll(selector)].filter(el => el.getClientRects().length > 0);}};
     const focused = document.activeElement;
@@ -131,7 +175,7 @@ async function pageState(page:Page) {
       scroll:window.scrollY,
     };
   });
-  return {...evidence,path:url.pathname + url.hash.split('?')[0],focus:redact(evidence.focus)};
+  return {...evidence,path,focus:redact(evidence.focus)};
 }
 
 type PageState = Awaited<ReturnType<typeof pageState>>;
@@ -158,36 +202,45 @@ async function settledState(page:Page) {
   throw new Error('页面仍在变化，请刷新画面后再试。');
 }
 
-async function liveImage(page:Page) {
+const sensitiveFields = 'input:is([type=password i],[type=email i],[type=tel i],[type=file i]),input[autocomplete]:not([autocomplete="off" i],[autocomplete="on" i]),textarea[autocomplete]:not([autocomplete="off" i],[autocomplete="on" i])';
+
+async function liveImage(page:Page, interactiveReplay=false) {
   return 'data:image/jpeg;base64,' + (await page.screenshot({type:'jpeg',quality:70,timeout:4000,caret:'hide',
-    mask:[page.locator('input:not([type=button],[type=submit],[type=checkbox],[type=radio]),textarea,[contenteditable]')]})).toString('base64');
+    mask:[page.locator(interactiveReplay ? sensitiveFields : 'input:not([type=button],[type=submit],[type=checkbox],[type=radio]),textarea,[contenteditable]')],maskColor:'#e8edf5'})).toString('base64');
 }
 
-async function inspect(session:Session, outcome?:LiveComparison['outcome'], scrolled?:Set<LiveSide>):Promise<LiveComparison> {
-  const [left,right] = await Promise.all(sides.map(async side => {
+async function inspect(session:Session, outcome?:LiveComparison['outcome'], scrolled?:Set<LiveSide>, advance=true):Promise<LiveComparison> {
+  const inspectSide = async (side: LiveSide) => {
     const page = session.pages[side]!.page;
     const state = await pageState(page);
     const dom = JSON.stringify(state.dom);
     const previous = session.frames[side];
     const reuse = scrolled && previous && previous.dom===dom && previous.frame.path===redact(state.path);
     const capture = !reuse || scrolled.has(side) || session.frameKeys[side]!==frameKey(state);
-    const ax = reuse ? previous.ax : redact(await page.locator('body').ariaSnapshot({timeout:2500})).slice(0,16000);
+    // The single-page view scans semantics separately. Taking an AX snapshot
+    // here would make scrolling and typing depend on the scan evidence.
+    const ax = session.single ? '' : reuse ? previous.ax : redact(await page.locator('body').ariaSnapshot({timeout:2500})).slice(0,16000);
     const started = performance.now();
-    const image = capture ? await liveImage(page) : previous!.frame.image;
+    const image = capture ? await liveImage(page,Boolean(session.single && replayPages.has(page))) : previous!.frame.image;
     const elapsedMs = capture ? performance.now()-started : 0;
     const controls = reuse ? previous.frame.controls : await controlsFor(page);
-    const frame:LiveFrame = {image,path:redact(state.path),title:redact(state.title),focus:state.focus,scroll:state.scroll,zoom:state.zoom,controls};
-    session.frameKeys[side] = frameKey(state);
-    session.frames[side] = {frame,dom,ax};
-    return {frame,dom,ax,elapsedMs,capture,sendImage:!scrolled || previous?.frame.image!==image};
-  }));
+    const size=page.viewportSize() ?? {width:900,height:700};
+    const frame:LiveFrame = {image,path:redact(state.path),title:redact(state.title),focus:state.focus,scroll:state.scroll,zoom:state.zoom,controls,...size,location:await locatePageElement(page,session.selectors?.[side],false,session.locationGroups?.[side])};
+    return {side,key:frameKey(state),frame,dom,ax,elapsedMs,capture,sendImage:!scrolled || previous?.frame.image!==image};
+  };
+  const [left,right] = await Promise.all([session.single ? undefined : inspectSide('left'),inspectSide('right')]);
+  for (const result of left ? [left,right] : [right]) {
+    session.frameKeys[result.side] = result.key;
+    session.frames[result.side] = {frame:result.frame,dom:result.dom,ax:result.ax};
+  }
+  if (advance) session.revision++;
   return {id:session.id,revision:session.revision,
-    capture:{count:Number(left.capture)+Number(right.capture),elapsedMs:left.elapsedMs+right.elapsedMs},
-    left:{...left.frame,image:left.sendImage?left.frame.image:''},right:{...right.frame,image:right.sendImage?right.frame.image:''},
+    capture:{count:Number(left?.capture ?? false)+Number(right.capture),elapsedMs:(left?.elapsedMs ?? 0)+right.elapsedMs},
+    left:left ? {...left.frame,image:left.sendImage?left.frame.image:''} : {...right.frame,image:'',controls:[],location:undefined},right:{...right.frame,image:right.sendImage?right.frame.image:''},
     outcome,observations:session.observations,
-    modes:{left:session.pages.left!.mode,right:session.pages.right!.mode},
-    differences:{route:left.frame.path !== right.frame.path,dom:left.dom !== right.dom,semantics:left.ax !== right.ax,
-      focus:left.frame.focus !== right.frame.focus,visual:left.frame.image !== right.frame.image}};
+    modes:{left:session.pages.left?.mode ?? session.pages.right!.mode,right:session.pages.right!.mode},
+    differences:{route:Boolean(left && left.frame.path !== right.frame.path),dom:Boolean(left && left.dom !== right.dom),semantics:Boolean(left && left.ax !== right.ax),
+      focus:Boolean(left && left.frame.focus !== right.frame.focus),visual:Boolean(left && left.frame.image !== right.frame.image)}};
 }
 
 type ScrollPosition = {container:string; position:number; changed:boolean};
@@ -271,7 +324,6 @@ async function operateScroll(session:Session, side:LiveSide, sync:boolean, input
     }
   }
   if (session.actions.length<100) session.actions.push(outcome);
-  session.revision++;
   const next=await inspect(session,outcome,changed);
   if (next.capture.count>0) session.scans={};
   else for (const saved of Object.values(session.scans)) saved.revision=session.revision;
@@ -335,23 +387,60 @@ async function describeTarget(page:Page, target:Target) {
 }
 
 export async function operateLive(project:string,key:string,input:unknown,authSessionId:string) {
-  const {side,sync,revision,operation} = actionInput.parse(input);
+  const {side,sync:requestedSync,revision,operation} = actionInput.parse(input);
   const session = getSession(project,key,authSessionId);
   if (session.pending || revision !== session.revision) throw new Error('操作所依据的画面已过期，请刷新实时预览。');
+  if (!session.pages[side]) throw new Error('该网页未打开。');
+  const sync = requestedSync && !session.single;
   const other = side === 'left' ? 'right' : 'left';
   const signal = session.controller.signal;
   const page = session.pages[side]!.page;
-  const opposite = session.pages[other]!.page;
+  const opposite = session.pages[other]?.page;
   session.pending = true;
   const outcome:NonNullable<LiveComparison['outcome']> = {action:operation.action,side,matched:null,executions:{}};
+  let uncapturedUrl:string|undefined;
   try {
+    if (operation.action === 'back') {
+      for (const targetSide of sync ? sides : [side]) {
+        const targetPage = session.pages[targetSide]!.page;
+        await targetPage.goBack({waitUntil:'domcontentloaded',timeout:5000}).catch(() => null);
+        if (session.selectors) delete session.selectors[targetSide];
+        session.journals[targetSide] = null;
+        session.sequences[targetSide] = null;
+      }
+      session.scans = {};
+      return await inspect(session);
+    }
+    if (operation.action === 'locate') {
+      if (redact(livePagePath(page)) !== operation.path) throw new Error('当前网页已切换，请重新选择问题。');
+      const matchingSides = sync && opposite && redact(livePagePath(opposite)) === operation.path ? sides : [side];
+      session.selectors ??= {};
+      for (const targetSide of matchingSides) {
+        session.selectors[targetSide] = operation.selector;
+        session.locationGroups ??= {};
+        session.locationGroups[targetSide] = operation.selectors;
+        await locatePageElement(session.pages[targetSide]!.page,operation.selector,true,operation.selectors);
+      }
+      return await inspect(session);
+    }
+    if (operation.action === 'refresh' && session.selectors) {
+      await Promise.all((session.single ? [side] : sides).map(current=>locatePageElement(session.pages[current]!.page,session.selectors?.[current],true,session.locationGroups?.[current])));
+    }
     if (operation.action==='scroll') return await operateScroll(session,side,sync,operation);
     if (operation.action !== 'refresh') {
       const before = await pageState(page);
-      if ('x' in operation && session.frameKeys[side]!==frameKey(before)) throw new Error('点击画面已经过期，请刷新实时画面。');
-      const oppositeBefore = sync ? await pageState(opposite) : undefined;
+      const replayInput = Boolean(session.single && replayPages.has(page));
+      const directClick = replayInput && operation.action==='click' && 'x' in operation;
+      const painted = session.frames[side]?.frame;
+      if ('x' in operation && (directClick
+        ? !painted || painted.path!==redact(before.path) || painted.scroll!==before.scroll || painted.zoom!==before.zoom
+        : session.frameKeys[side]!==frameKey(before))) throw new Error('点击画面已经过期，请刷新实时画面。');
+      if (operation.action==='text' || operation.action==='key') {
+        if (!replayInput) throw new Error('当前预览不支持直接输入。');
+      }
+      const oppositeBefore = sync && opposite ? await pageState(opposite) : undefined;
       const target = 'target' in operation ? operation.target :
-        'x' in operation ? await resolveHit(page,operation) : operation.action === 'activate' ? await resolveHit(page) : undefined;
+        'x' in operation && !directClick ? await resolveHit(page,operation) : operation.action === 'activate' ? await resolveHit(page) : undefined;
       const action = operation.action === 'activate' ? 'click' : operation.action;
       const descriptor = target ? await describeTarget(page,target) : undefined;
       if (target) {outcome.target = target.name; outcome.role = target.role;}
@@ -367,7 +456,39 @@ export async function operateLive(project:string,key:string,input:unknown,authSe
         let selected = '';
         let step:PanoramaStep | undefined;
         let invalid;
-        if (target && currentTarget && (action === 'click' || action === 'fill' || action === 'validate')) {
+        let submitControl = false;
+        if (replayInput && operation.action==='click' && 'x' in operation) {
+          const hit = await current.evaluate(({x,y})=>{
+            const element = document.elementFromPoint(x,y);
+            const anchor = element?.closest('a[href]');
+            const control = element?.closest('button,input');
+            const href = anchor?.getAttribute('href')?.trim();
+            return {
+              link: anchor instanceof HTMLAnchorElement && href && !href.startsWith('#') && !/^javascript:\s*void\(0\);?$/i.test(href)
+                ? {href:anchor.href,download:anchor.hasAttribute('download'),newTab:Boolean(anchor.target && anchor.target!=='_self')} : null,
+              submit: (control instanceof HTMLButtonElement || control instanceof HTMLInputElement) && control.type === 'submit',
+            };
+          },operation);
+          submitControl = hit.submit;
+          const destination = hit.link && replayLink(current,hit.link.href,hit.link.download,hit.link.newTab);
+          if (destination) await current.goto(destination,{waitUntil:'domcontentloaded',timeout:5000});
+          else await current.mouse.click(operation.x,operation.y);
+        } else if (operation.action==='text' || operation.action==='key') {
+          const field = await current.evaluate(selector=>{
+            const active=document.activeElement;
+            if (!(active instanceof HTMLElement)) return null;
+            return {sensitive:active.matches(selector),editable:active.isContentEditable ||
+              active instanceof HTMLTextAreaElement && !active.readOnly ||
+              active instanceof HTMLInputElement && !active.readOnly && ['text','search','url','number','email','tel','password'].includes(active.type)};
+          },sensitiveFields);
+          if (field?.sensitive) throw new Error('回放中请勿在敏感字段输入信息。');
+          if (operation.action==='text') {
+            if (!field?.editable) throw new Error('请先点击网页里的输入框。');
+            await current.keyboard.insertText(operation.text);
+          } else {
+            await current.keyboard.press((operation.shift?'Shift+':'')+operation.key);
+          }
+        } else if (target && currentTarget && (action === 'click' || action === 'fill' || action === 'validate')) {
           if (target.role === 'summary') {
             if (action !== 'click') throw new Error('此操作仅支持命名表单控件。');
             await currentTarget.locator.click({timeout:2500});
@@ -381,7 +502,14 @@ export async function operateLive(project:string,key:string,input:unknown,authSe
         } else if ('percent' in operation) {
           await current.evaluate(percent=>{document.documentElement.style.zoom=String(percent/100);},operation.percent);
         }
-        const result = await settledState(current);
+        let result = await (replayInput ? pageState(current) : settledState(current));
+        if (submitControl && frameKey(before) === frameKey(result)) {
+          await current.waitForTimeout(350);
+          result = await pageState(current);
+          if (frameKey(before) === frameKey(result)) {
+            throw new Error('当前回放未显示新的结果。回放只能使用已采集的页面和请求。');
+          }
+        }
         const previousSequence = session.sequences[targetSide];
         if (previousSequence) session.sequences[targetSide] = hash(JSON.stringify([previousSequence,
           step ?? {action,target,zoom:'percent' in operation ? operation.percent : undefined}]));
@@ -409,7 +537,7 @@ export async function operateLive(project:string,key:string,input:unknown,authSe
       };
       try {
         const actual = await execute(page,false);
-        if (sync) {
+        if (sync && opposite) {
           try {
             if (before.path !== oppositeBefore?.path) throw new Error('两侧当前页面不同，请独立导航或重新打开对比。');
             const replay = await execute(opposite,true);
@@ -433,18 +561,41 @@ export async function operateLive(project:string,key:string,input:unknown,authSe
         outcome.executions![side] = {status:'failed'};
         outcome.matched = false;
         outcome.reason = redact((error as Error).message.split('\n')[0]);
+        if (session.single && error instanceof UncapturedReplayPage && error.url.length <= 2048) uncapturedUrl = error.url;
       }
     }
     if (operation.action !== 'refresh' && session.actions.length < 100) session.actions.push(outcome);
-    session.revision++;
+    for (const targetSide of session.single ? [side] : sides) {
+      const nextPath = redact(livePagePath(session.pages[targetSide]!.page));
+      if (session.frames[targetSide]?.frame.path !== nextPath && session.selectors) delete session.selectors[targetSide];
+    }
     session.scans = {};
-    return await inspect(session,outcome);
+    return await inspect(session,uncapturedUrl ? {...outcome,uncapturedUrl} : outcome);
+  } finally { session.pending = false; }
+}
+
+export async function diagnoseLivePage(project:string,key:string,side:LiveSide,input:unknown,authSessionId:string) {
+  const {path} = z.object({path:z.string().max(2048)}).parse(input);
+  const session = getSession(project,key,authSessionId);
+  if (!session.pages[side]) throw new Error('该网页未打开。');
+  if (session.pending) throw new Error('请等待当前操作完成。');
+  if (session.candidate && side === 'right') throw new Error('请先应用候选补丁。');
+  const page = session.pages[side]!.page;
+  if (redact(livePagePath(page)) !== path) throw new Error('网页已切换，请重试检测。');
+  session.pending = true;
+  try {
+    const report = await diagnosePage(page,path);
+    return {...report,entry:livePagePath(page).split('#')[0] === session.pages[side]?.entryPath,title:redact(report.title),findings:report.findings.map(item=>({
+      ...item,selector:redact(item.selector) === item.selector ? item.selector : '',
+    }))};
   } finally { session.pending = false; }
 }
 
 export async function scanLive(project:string,key:string,side:LiveSide,authSessionId:string) {
   const session = getSession(project,key,authSessionId);
+  if (!session.pages[side]) throw new Error('该网页未打开。');
   if (session.pending) throw new Error('请等待当前操作完成。');
+  if (session.candidate && side === 'right') throw new Error('应用候选补丁后可保存此版本的检测结果。');
   session.pending = true;
   try {
     const {page,resources,network} = session.pages[side]!;

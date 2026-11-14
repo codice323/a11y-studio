@@ -292,47 +292,58 @@ export async function controlsFor(page: Page): Promise<Control[]> {
 
 type InteractionScan = NonNullable<NonNullable<PanoramaCapture['scan']>['interaction']>;
 
+async function replaySteps(page: Page, recipe: Recipe, entry: string, signal: AbortSignal) {
+  const start = recipe.start;
+  page.setDefaultTimeout(3000);
+  if (start !== entry) {
+    const response = await page.goto(origin + documentPath(start), {waitUntil: 'load', timeout: 5000});
+    if (!response?.ok()) throw new ReplayError('浏览器未成功加载页面。', 0);
+  }
+  if (recipe.stabilize) await stableExplorerFingerprint(page,false,signal);
+  const checkpoints = [await checkpoint(page)];
+  if (recipe.checkpoints[0] && !checkpointMatches(recipe.checkpoints[0], checkpoints[0])) {
+    throw new ReplayError('两个版本的起始页面无法可靠匹配。', 0);
+  }
+  const interaction: InteractionScan = {transitions:[],findings:[]};
+  const analyze = createInteractionAudit();
+  let before = recipe.steps.length ? await readInteractionState(page) : undefined;
+  for (const [index, step] of recipe.steps.entries()) {
+    try {
+      let activated = '';
+      const invalid = await act(page, step, signal, selector => {activated = selector;});
+      if (recipe.stabilize) await stableExplorerFingerprint(page,step.action === 'tab' || step.action === 'shift-tab',signal);
+      const actual = await checkpoint(page);
+      if ('target' in step && step.navigationPath && actual.path !== step.navigationPath) throw new Error('导航后未到达所发现的页面。');
+      const expected = recipe.checkpoints[index + 1];
+      if (expected && !checkpointMatches(expected, actual, step.action)) throw new Error('页面、状态、焦点或滚动位置不一致。');
+      const after = await readInteractionState(page);
+      const prior = before!;
+      interaction.transitions.push({step:index+1,action:step.action,fromPath:checkpoints.at(-1)!.path,toPath:actual.path,
+        beforeFocus:safeText(prior.focus),afterFocus:safeText(after.focus)});
+      interaction.findings.push(...analyze(prior,after,step.action,index+1,activated,invalid)
+        .map(finding => ({...finding,selector:safeText(finding.selector)})));
+      before = after;
+      checkpoints.push(actual);
+    } catch (error) {
+      signal.throwIfAborted();
+      throw new ReplayError((error as Error).message.split('\n')[0], index + 1);
+    }
+  }
+  return { checkpoints, interaction };
+}
+
+export async function replayInteractiveState(projectId: string, stateId: string, page: Page, entry: string, signal: AbortSignal) {
+  const recipe = recipes(projectId).find(item => item.id === stateId);
+  if (!recipe) throw new Error('未找到保存的交互状态。');
+  await replaySteps(page, recipe, entry, signal);
+}
+
 async function withReplay<T>(site: Site, recipe: Recipe, signal: AbortSignal, inspect: (
   page: Page, product: Awaited<ReturnType<typeof buildReactProject>> | undefined, checkpoints: Checkpoint[], resources: ResourceFailure[], interaction: InteractionScan
 ) => Promise<T>) {
-  const start = recipe.start;
-  if (start !== site.entry && !documents(site).includes(start)) throw new ReplayError('此版本中没有起始页面。');
+  if (recipe.start !== site.entry && !documents(site).includes(recipe.start)) throw new ReplayError('此版本中没有起始页面。');
   return withRepairPage(site.dir, site.entry, signal, async (page, product, resources) => {
-    page.setDefaultTimeout(3000);
-    if (start !== site.entry) {
-      const response = await page.goto(origin + documentPath(start), {waitUntil: 'load', timeout: 5000});
-      if (!response?.ok()) throw new ReplayError('浏览器未成功加载页面。', 0);
-    }
-    if (recipe.stabilize) await stableExplorerFingerprint(page,false,signal);
-    const checkpoints = [await checkpoint(page)];
-    if (recipe.checkpoints[0] && !checkpointMatches(recipe.checkpoints[0], checkpoints[0])) {
-      throw new ReplayError('两个版本的起始页面无法可靠匹配。', 0);
-    }
-    const interaction: InteractionScan = {transitions:[],findings:[]};
-    const analyze = createInteractionAudit();
-    let before = recipe.steps.length ? await readInteractionState(page) : undefined;
-    for (const [index, step] of recipe.steps.entries()) {
-      try {
-        let activated = '';
-        const invalid = await act(page, step, signal, selector => {activated = selector;});
-        if (recipe.stabilize) await stableExplorerFingerprint(page,step.action === 'tab' || step.action === 'shift-tab',signal);
-        const actual = await checkpoint(page);
-        if ('target' in step && step.navigationPath && actual.path !== step.navigationPath) throw new Error('导航后未到达所发现的页面。');
-        const expected = recipe.checkpoints[index + 1];
-        if (expected && !checkpointMatches(expected, actual, step.action)) throw new Error('页面、状态、焦点或滚动位置不一致。');
-        const after = await readInteractionState(page);
-        const prior = before!;
-        interaction.transitions.push({step:index+1,action:step.action,fromPath:checkpoints.at(-1)!.path,toPath:actual.path,
-          beforeFocus:safeText(prior.focus),afterFocus:safeText(after.focus)});
-        interaction.findings.push(...analyze(prior,after,step.action,index+1,activated,invalid)
-          .map(finding => ({...finding,selector:safeText(finding.selector)})));
-        before = after;
-        checkpoints.push(actual);
-      } catch (error) {
-        signal.throwIfAborted();
-        throw new ReplayError((error as Error).message.split('\n')[0], index + 1);
-      }
-    }
+    const {checkpoints,interaction} = await replaySteps(page,recipe,site.entry,signal);
     return inspect(page, product, checkpoints, resources, interaction);
   }, 6500, true);
 }

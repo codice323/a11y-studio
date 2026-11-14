@@ -4,10 +4,9 @@ import type { PanoramaCapture, PanoramaComparison, PanoramaIssue, PanoramaRecipe
 import { startJob, waitJob } from './jobs';
 import type { EvidenceView } from './Evidence';
 import type { VersionPair } from './VersionComparison';
-import { versionName, type State } from './types';
+import type { State } from './types';
 
-type Entry = {file: string; screenshot: string; size: {width: number; height: number}};
-type Inventory = {pages: string[]; recipes: PanoramaRecipe[]; interactive: boolean; limit: number; entries: Record<string, Entry>};
+type Inventory = {pages: string[]; recipes: PanoramaRecipe[]; interactive: boolean; limit: number};
 const pagePath = (file: string) => '/' + file.split('/').map(encodeURIComponent).join('/');
 type Request = {site?:true; start?: string; stateId?: string; step?: PanoramaStep; from?: 'left' | 'right'};
 const actions = {
@@ -25,11 +24,11 @@ export type PageInspection = {
   coverage?: string;
   comparison?: string;
 };
-export type PanoramaJump = {stateId: string; left: string; right: string; key: string};
+export type PanoramaJump = {stateId: string; key: string};
 
-export function Panorama({state, onInspection, disabled, jump, pair: versions, view, onScope, targetId, scopeTargetId, viewTools, screenshotTools, pageRequest, autoScanning}: {
+export function Panorama({state, onInspection, disabled, jump, pair: versions, view, onScope, targetId, viewTools, pageRequest, visiblePagePath, onChoosePage, autoScanning}: {
   autoScanning?:boolean; state: State; onInspection: (value: PageInspection) => void; disabled: boolean; jump?: PanoramaJump;
-  pair: VersionPair; view: EvidenceView; onScope:(scoped:boolean)=>void; targetId?:string; scopeTargetId?:string; viewTools?:(options:ReactNode)=>ReactNode; screenshotTools?:ReactNode; pageRequest?:{path:string};
+  pair: VersionPair; view: EvidenceView; onScope:(scoped:boolean)=>void; targetId?:string; viewTools?:(options:ReactNode)=>ReactNode; pageRequest?:{path:string}; visiblePagePath?:string; onChoosePage?:(path:string)=>void;
 }) {
   const {project} = state;
   const {left, right} = versions;
@@ -41,18 +40,12 @@ export function Panorama({state, onInspection, disabled, jump, pair: versions, v
   const [progress, setProgress] = useState('');
   const [listError, setListError] = useState('');
   const [captureError, setCaptureError] = useState('');
-  const [missing, setMissing] = useState<Record<string, boolean>>({});
-  const [zoom, setZoom] = useState(100);
   const [attempt, setAttempt] = useState(0);
   const [from, setFrom] = useState<'left' | 'right'>('left');
   const [controlIndex, setControlIndex] = useState('');
   const [action, setAction] = useState<'click' | 'validate' | 'fill'>('click');
   const [scroll, setScroll] = useState(0);
   const [batchFailures, setBatchFailures] = useState<{page:string;reason:string}[]>([]);
-  const [full, setFull] = useState(true);
-  const [sync, setSync] = useState(true);
-  const leftShot = useRef<HTMLDivElement>(null);
-  const rightShot = useRef<HTMLDivElement>(null);
   const routeQuery = route + '?' + new URLSearchParams({left, right});
   const inventory = loaded?.query === routeQuery ? loaded.inventory : undefined;
   const resultQuery = JSON.stringify([routeQuery,state.current?.id,selection,attempt]);
@@ -91,10 +84,10 @@ export function Panorama({state, onInspection, disabled, jump, pair: versions, v
       setProgress('正在加载页面列表');
       setListError('');
       setCaptureError('');
-      setMissing({});
       try {
         if (!await refresh() || signal.aborted) return;
-        if (autoScanning && selection.start===project.entry && !selection.step && !selection.site) return;
+        if (!jump && !selection.stateId && !selection.step && !selection.site &&
+            (view==='interactive' || autoScanning && selection.start===project.entry)) return;
         setProgress('准备采集本地页面');
         const id = await startJob(route, 'panorama', {left, right, ...selection}, signal);
         if (signal.aborted) return;
@@ -120,7 +113,7 @@ export function Panorama({state, onInspection, disabled, jump, pair: versions, v
       }
     })();
     return () => controller.abort();
-  }, [hasAudit, route, routeQuery, resultQuery, left, right, selection, attempt, project.entry, autoScanning]);
+  }, [hasAudit, route, routeQuery, resultQuery, left, right, selection, attempt, project.entry, autoScanning, jump, view]);
 
   // After an action, the returned recipe is the stable selection for version changes.
   const stateId = result?.stateId ?? selection.stateId;
@@ -158,7 +151,7 @@ export function Panorama({state, onInspection, disabled, jump, pair: versions, v
     else if (saved) selectRequest({stateId: saved.id});
   }
 
-  const lastPageRequest = useRef<{path:string} | undefined>(undefined);
+  const lastPageRequest = useRef<{path:string}|undefined>(undefined);
   useEffect(() => {
     if (!pageRequest || !inventory || lastPageRequest.current === pageRequest || busy) return;
     lastPageRequest.current = pageRequest;
@@ -169,13 +162,6 @@ export function Panorama({state, onInspection, disabled, jump, pair: versions, v
     if (!stateId || !canAct) return;
     setControlIndex('');
     selectRequest({stateId, step, from});
-  }
-
-  function mirror(source: HTMLDivElement, side: 'left' | 'right') {
-    const other = side === 'left' ? rightShot.current : leftShot.current;
-    if (sync && other && (Math.abs(other.scrollTop - source.scrollTop) > 1 || Math.abs(other.scrollLeft - source.scrollLeft) > 1)) {
-      other.scrollTo({top: source.scrollTop, left: source.scrollLeft});
-    }
   }
 
   const pair = result?.left.status === 'captured' && result.right.status === 'captured'
@@ -197,55 +183,23 @@ export function Panorama({state, onInspection, disabled, jump, pair: versions, v
       scanStatus,scanError,review:shown && {axe:shown.manual,behavior:shown.keyboard.findings.length,behaviorStatus:shown.keyboard.status,interaction:shown.scan?.interaction}});
   }, [onInspection, project.id, shownVersion, page, stateId, scoped, shown, coverage, comparison, scanStatus, scanError]);
 
-  function renderShot(position: 'left' | 'right', src: string, title: string, size: Entry['size'],
-    fullFile: string, bounds?: PanoramaIssue['bounds']) {
-    if (missing[src]) return <p role="alert">截图无法读取，请重试采集此状态。</p>;
-    return <>
-      <div className="panorama-shot" ref={position === 'left' ? leftShot : rightShot}
-        tabIndex={0} aria-label={position === 'left' ? '滚动左侧页面截图' : '滚动右侧页面截图'}
-        onScroll={event => mirror(event.currentTarget, position)}>
-        <div className="panorama-image" style={{aspectRatio: `${size.width} / ${size.height}`, width: zoom + '%'}}>
-          <img src={src} alt={title} onError={() => setMissing(files => ({...files, [src]: true}))} />
-          {bounds && <span className="panorama-highlight" aria-hidden="true" style={{
-            left: bounds.x / size.width * 100 + '%', top: bounds.y / size.height * 100 + '%',
-            width: bounds.width / size.width * 100 + '%', height: bounds.height / size.height * 100 + '%',
-          }} />}
-        </div>
-      </div>
-      <a href={fullFile} target="_blank" rel="noreferrer">在新标签页查看整页截图</a>
-    </>;
-  }
-
-  function renderSide(value: PanoramaSide | undefined, position: 'left' | 'right') {
-    const version = position === 'left' ? left : right;
+  function renderSide(value: PanoramaSide | undefined) {
     if (value?.status !== 'captured') {
-      const audit = [state.baseline, state.current].find(scan => scan?.snapshotId === version);
-      const entry = inventory?.entries?.[version] ??
-        (audit?.screenshot && audit.size ? {...audit, file: project.entry} : undefined);
-      const start = !selection.step && (active?.steps.length === 0 ? active.start : !selection.stateId ? selection.start : undefined);
       return <>
         {value ? <p role="status"><b>{value.status === 'unmatched' ? '状态无法可靠匹配' :
           value.status === 'failed' ? '此版本采集失败' : '此版本未采集'}</b><br />
           {value.step === undefined ? '' : '步骤 ' + value.step + ' · '}{value.error}</p> :
           <p className="muted">{listError ? '无法从页面列表读取此状态。' :
             captureError ? '本次未能采集此状态。' : busy ? '正在准备此版本的状态证据。' : '此版本尚未采集。'}</p>}
-        {entry && entry.file === start && value?.status !== 'unmatched' && (view === 'visual' ? <>
-          <p className="panorama-caption">首页整页截图 · 来自此版本的扫描记录</p>
-          {renderShot(position, entry.screenshot, '已扫描首页整页截图', entry.size, entry.screenshot)}
-        </> : <p className="muted">首页扫描截图已可查看。语义和键盘证据需完成全景采集。</p>)}
       </>;
     }
     const item = value.capture;
-    const bounds = full ? item.issues.find(found => found.id === (scopeTargetId ?? targetId))?.bounds : null;
-    const fullFile = route + '/captures/' + item.id + '/full';
-    const file = full ? fullFile : route + '/captures/' + item.id + '/viewport';
     return <>
       {Boolean(item.resourceFailures?.length) && <details><summary>{item.resourceFailures!.length} 个资源加载失败</summary>
         <ul>{item.resourceFailures!.map((item,index)=><li key={index}><code>{item.path}</code> · {item.reason}</li>)}</ul>
       </details>}
 
-      {view === 'visual' ? renderShot(position, file, (item.title || item.path) + (full ? ' 完整页面截图' : ' 视口截图'),
-        full ? item : {width: 900, height: 700}, fullFile, bounds) : view === 'semantics' ? <>
+      {view === 'semantics' ? <>
         <h4>浏览器无障碍语义</h4><pre tabIndex={0}>{item.ax || '未取得无障碍树内容。'}</pre>
         <details><summary>DOM 结构（已限制字段）</summary><pre tabIndex={0}>{item.dom}</pre></details>
         <details><summary>键盘检测</summary><p>采集时焦点：{item.focus || '文档'}。{item.keyboard.status !== 'completed' && '键盘探测未完成。'}</p>
@@ -277,17 +231,10 @@ export function Panorama({state, onInspection, disabled, jump, pair: versions, v
       {coverage && <p>{coverage}</p>}
       {comparison && <p>{comparison}</p>}
       {project.mode === 'snapshot' && <p>静态快照 · 动态交互状态未覆盖</p>}
-        {scoped && view === 'visual' && <div className="panorama-bar" role="group" aria-label="页面截图选项">
-          <label><input type="checkbox" checked={full} onChange={event => setFull(event.target.checked)} />完整页面</label>
-          <label><input type="checkbox" checked={sync} onChange={event => setSync(event.target.checked)} />同步滚动</label>
-          <label>截图缩放<select value={zoom} onChange={event => setZoom(Number(event.target.value))}>
-            {[50, 75, 100, 125, 150, 200].map(value => <option key={value} value={value}>{value}%</option>)}
-          </select></label>
-        </div>}
     </div>)}
-    <div className="shot-options page-comparison-toolbar" role="group" aria-label="页面和截图排列">
-        {screenshotTools}
-        <select aria-label="页面" value={page} disabled={busy} onChange={event => choosePage(event.target.value)}>
+    <div className="shot-options page-comparison-toolbar" role="group" aria-label="选择页面">
+        <select aria-label="页面" value={view==='interactive' && visiblePagePath && paths.includes(visiblePagePath) ? visiblePagePath : page}
+          disabled={busy} onChange={event => {choosePage(event.target.value);onChoosePage?.(event.target.value);}}>
           {paths.map(path => <option key={path} value={path}>{pathNames.get(path) ? pathNames.get(path) + ' · ' : ''}{path}</option>)}
         </select>
     </div>
@@ -298,16 +245,16 @@ export function Panorama({state, onInspection, disabled, jump, pair: versions, v
           onClick={() => void fetch('/api/jobs/' + job + '/cancel', {method: 'POST'})}>取消全景采集</button>}</p>}
         {listError && <p role="alert">{listError}</p>}
         {captureError && <p role="alert">全景采集未完成。{captureError}</p>}
-        {(listError || captureError || (result && !pair) || Object.values(missing).some(Boolean)) &&
+        {(listError || captureError || (result && !pair)) &&
           <button type="button" className="secondary" disabled={busy} onClick={() => setAttempt(value => value + 1)}>
             {listError ? '重试加载页面列表' : '重试采集'}
           </button>}
 
         {active && active.steps.length > 0 && <details className="panorama-steps"><summary>操作记录 · {active.steps.length} 步</summary>
           <ol>{active.steps.map((step, index) => <li key={index}>{stepName(step)}</li>)}</ol></details>}
-        {scoped && view !== 'diff' && <div className="panorama-pair">
-          <section><h3>左侧 · {versionName(state, left)}</h3>{renderSide(result?.left, 'left')}</section>
-          <section><h3>右侧 · {versionName(state, right)}</h3>{renderSide(result?.right, 'right')}</section>
+        {scoped && view === 'semantics' && <div className="panorama-pair">
+          <section><h3>原始状态</h3>{renderSide(result?.left)}</section>
+          <section><h3>当前状态</h3>{renderSide(result?.right)}</section>
         </div>}
         {pair && <p className="screen-reader-only" role="status">左右已匹配同一页面和状态。</p>}
         {inventory?.interactive && <details className="panorama-steps"><summary>记录安全操作</summary><fieldset className="panorama-actions" aria-label="记录安全操作" disabled={busy || !canAct}>

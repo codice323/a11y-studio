@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import type { ImageAltAnalysis, RepairAnalysis } from '../../../packages/shared/types';
 import { analyzeVisualContext } from './vision';
-import { containsRedaction } from './redact';
+import { containsRedaction, redactModelText } from './redact';
 import type { VisualTarget } from './visual-context';
 
 const imageSchema = z.object({
@@ -10,6 +10,12 @@ const imageSchema = z.object({
   contentAlt:z.string().trim().min(1).max(160).nullable(),
   reason:z.string().trim().min(1).max(240),
   detail:z.string().trim().max(600).optional(),
+  legibility:z.object({
+    kind:z.enum(['image-text','graphic-contrast','color-only']),
+    observation:z.string().trim().min(1).max(180),
+    recommendation:z.string().trim().min(1).max(200),
+    textOnly:z.string().trim().min(1).max(350).optional(),
+  }).strict().optional(),
 });
 const iconSchema = z.object({
   description:z.string().trim().min(1).max(300),
@@ -22,11 +28,21 @@ export async function suggestImageAlt(target: Omit<VisualTarget,'mode'>, context
   const result = await analyzeVisualContext({...target,mode:'image-resource'},{
     type:'image-alt',schema:imageSchema,context,
     example:{description:'一只白色杯子',purpose:'uncertain',reason:'附近文字未说明图片是否承担独立信息。',contentAlt:'白色杯子'},
-    instructions:'返回 description（只描述可见像素）、purpose（informative、decorative 或 uncertain）、reason（只用一句话说明用途依据或要确认的事，约20至60字）、contentAlt（选内容性图片时可用的非空候选，即使判断为装饰也可提供）以及可选 detail。图片无法看清时 description 和 contentAlt 可为 null。只有确认没有独立信息或功能才判断为 decorative。功能性图片优先说明已知动作或去向。',
+    instructions:'返回 description（只描述可见像素）、purpose（informative、decorative 或 uncertain）、reason（只用一句话说明用途依据或要确认的事，约20至60字）、contentAlt（选内容性图片时可用的非空候选，即使判断为装饰也可提供）以及可选 detail。图片无法看清时 description 和 contentAlt 可为 null。只有确认没有独立信息或功能才判断为 decorative。功能性图片优先说明已知动作或去向。像素证据显示有意义的文字难读、图形部分难区分，或图表疑似仅用颜色编码时，附加 legibility，含 kind（image-text、graphic-contrast 或 color-only）、observation、recommendation。定量对比度由工具测量，视觉分析不提供比值或通过结论。只有整张图是简单纯文字（非徽标、控件、图表或照片），并且能准确逐字读出全部内容时，kind 为 image-text 并额外返回 textOnly 原文及换行，不猜测或补写。',
   });
   if (result.status === 'unavailable') return {status:'needs-manual-review',purpose:'uncertain',
     description:null,contentAlt:null,reason:result.reason};
-  const {data,media} = result;
+  const {media} = result;
+  const {legibility: candidate, ...base} = result.data;
+  const data:Omit<ImageAltAnalysis,'status'> = base;
+  if (candidate && !containsRedaction(candidate)) {
+    const {textOnly,...observation} = candidate;
+    data.legibility = {...observation,...(
+      observation.kind === 'image-text' && !result.context.control && base.purpose === 'informative' &&
+      base.description && base.contentAlt && !containsRedaction(base.contentAlt) && textOnly && redactModelText(textOnly) === textOnly
+        ? {textOnly} : {}
+    )};
+  }
   if (!data.description || (data.purpose === 'informative' && !data.contentAlt)) {
     return {...data,media,status:'needs-manual-review',purpose:'uncertain',contentAlt:null,
       reason:'视觉证据或替代文本不足，请人工确认图片内容和用途。'};

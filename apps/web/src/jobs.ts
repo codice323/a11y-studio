@@ -1,5 +1,5 @@
 import { workspaceFetch as fetch } from './workspace-fetch';
-export type JobType = 'audit' | 'source-repair' | 'verification' | 'panorama' | 'explorer';
+export type JobType = 'audit' | 'diagnostics' | 'source-repair' | 'verification' | 'panorama' | 'explorer';
 
 export class JobRecoveryError extends Error {
   constructor(message: string) {

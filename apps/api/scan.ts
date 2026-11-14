@@ -137,16 +137,16 @@ export async function inspectPageElement(page: Page, selector: string, screensho
   };
 }
 
-export function runAudit(projectId:string,snapshotId:string,signal?:AbortSignal,contrastSelector?:string) {
+export function runAudit(projectId:string,snapshotId:string,signal?:AbortSignal,contrastSelector?:string,additionalSelectors:string[] = []) {
  const {entry} = snapshot(projectId, snapshotId);
- return scanDirectory(projectId, snapshotId, snapshotDir(projectId, snapshotId), entry, true, signal, contrastSelector);
+ return scanDirectory(projectId, snapshotId, snapshotDir(projectId, snapshotId), entry, true, signal, contrastSelector, false, additionalSelectors);
 }
 
 export function auditCandidate(projectId: string, snapshotId: string, dir: string, entry: string, signal?: AbortSignal, contrastSelector?: string, captureRegression = false) {
  return scanDirectory(projectId, snapshotId, dir, entry, false, signal, contrastSelector, captureRegression);
 }
 
-async function scanDirectory(projectId: string, snapshotId: string, dir: string, entry: string, persist: boolean, signal?: AbortSignal, contrastSelector?: string, captureRegression = false) {
+async function scanDirectory(projectId: string, snapshotId: string, dir: string, entry: string, persist: boolean, signal?: AbortSignal, contrastSelector?: string, captureRegression = false, additionalSelectors:string[] = []) {
  const auditId=id(),created=now();
  if(persist) db.prepare('INSERT INTO audits VALUES(?,?,?,?,?,?,?)').run(auditId,projectId,snapshotId,'running',null,null,created);
  try {
@@ -181,6 +181,11 @@ async function scanDirectory(projectId: string, snapshotId: string, dir: string,
     return {index,tag:el.tagName.toLowerCase(),type:el.getAttribute('type'),href:el.getAttribute('href'),tabIndex:el.tabIndex,disabled,visible,focusable};
   });});
   const contrastCheck=contrastSelector?await measurePageContrast(page,contrastSelector):null;
+  const additionalContrast=[];
+  for(const selector of additionalSelectors){
+   signal?.throwIfAborted();
+   additionalContrast.push(await measurePageContrast(page,selector));
+  }
   const size=await page.evaluate(()=>({width:document.documentElement.scrollWidth,height:document.documentElement.scrollHeight}));if(size.width>5000||size.height>10000)throw new Error('页面尺寸超过扫描限制。');if(persist){fs.mkdirSync(path.join(DATA,'screenshots'),{recursive:true});await page.screenshot({path:path.join(DATA,'screenshots',auditId+'.png'),fullPage:true,timeout:10000});}
   // Leave the existing screenshot and repair regression signature independent of the Tab probe.
   const behaviorStarted = performance.now();
@@ -212,7 +217,7 @@ async function scanDirectory(projectId: string, snapshotId: string, dir: string,
   if(product)for(const finding of behavior.findings.filter(item=>item.ruleId==='focus-style-unchanged')){
     const source=await location(finding.selector);if(source)sourceLocations[finding.selector]=source;
   }
-  const result={...(product?{build:{tool:'esbuild',milliseconds:product.milliseconds},sourceLocations}:{}),id:auditId,projectId,snapshotId,status:'completed',issues,incomplete:incomplete.map(x=>({ruleId:x.id,help:x.help,count:x.nodes.length})),passes,functionChecks,contrastCheck,regression,resourceFailures,screenshot:`/api/audits/${auditId}/screenshot`,size,createdAt:created,detection};
+  const result={...(product?{build:{tool:'esbuild',milliseconds:product.milliseconds},sourceLocations}:{}),id:auditId,projectId,snapshotId,status:'completed',issues,incomplete:incomplete.map(x=>({ruleId:x.id,help:x.help,count:x.nodes.length})),passes,functionChecks,contrastCheck,additionalContrast,regression,resourceFailures,screenshot:`/api/audits/${auditId}/screenshot`,size,createdAt:created,detection};
   if(persist) db.prepare('UPDATE audits SET status=?,result=? WHERE id=?').run('completed',JSON.stringify(result),auditId);return result;
   }, 6000);
  } catch(error){const message=(error as Error).message;if(persist) db.prepare('UPDATE audits SET status=?,error=? WHERE id=?').run('failed',message,auditId);throw error;}
@@ -250,8 +255,26 @@ async function capturePageRegression(page: Page, signal?: AbortSignal) {
  return captures;
 }
 
+function colorLuminance(rgb: number[]) {
+  return rgb.reduce((sum, channel, index) => {
+    const value = channel / 255;
+    const linear = value <= 0.04045 ? value / 12.92 : ((value + 0.055) / 1.055) ** 2.4;
+    return sum + linear * [0.2126, 0.7152, 0.0722][index];
+  }, 0);
+}
+
+function luminanceContrast(a: number, b: number) {
+  return (Math.max(a,b) + 0.05) / (Math.min(a,b) + 0.05);
+}
+
+export function solidTextContrast(hex: string, luminance: number) {
+  const rgb = [1, 3, 5].map(offset => parseInt(hex.slice(offset, offset + 2), 16));
+  return luminanceContrast(colorLuminance(rgb), luminance);
+}
+
 export async function measurePageContrast(page: Page, selector: string) {
-  try {return await page.locator(selector).evaluate((el:Element)=>{
+  try {
+   const { foreground, background, cssColor, measurable, required } = await page.locator(selector).evaluate((el:Element)=>{
     // Method syntax survives tsx serialization without references to its __name helper.
     const colors = {
       parse(s: string) {
@@ -259,18 +282,22 @@ export async function measurePageContrast(page: Page, selector: string) {
         return m ? [+m[1], +m[2], +m[3], m[4] === undefined ? 1 : +m[4]] : null;
       },
       blend(f: number[], b: number[]) { return [0, 1, 2].map(i => f[i] * f[3] + b[i] * (1 - f[3])); },
-      luminance(rgb: number[]) {
-        return rgb.map(c => {
-          const v = c / 255;
-          return v <= 0.04045 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4);
-        }).reduce((x, c, i) => x + c * [0.2126, 0.7152, 0.0722][i], 0);
-      },
     };
     const styles=getComputedStyle(el),fg=colors.parse(styles.color);let background=[255,255,255];let uncertain=!fg;const layers:number[][]=[];
     for(let n:Element|null=el;n;n=n.parentElement){const st=getComputedStyle(n);if(st.backgroundImage!=='none'||Number(st.opacity)<1)uncertain=true;const color=colors.parse(st.backgroundColor);if(color)layers.push(color);else uncertain=true;}
     for(let i=layers.length-1;i>=0;i--)background=colors.blend(layers[i],background);
     const foreground=fg?colors.blend(fg,background):background;
-    const a=colors.luminance(foreground),b=colors.luminance(background),ratio=(Math.max(a,b)+0.05)/(Math.min(a,b)+0.05);const size=parseFloat(styles.fontSize),weight=parseInt(styles.fontWeight,10);const required=(size>=24||(size>=18.66&&weight>=700))?3:4.5;
-    return {ratio,required,uncertain,foreground:styles.color,effectiveBackground:background.map(Math.round),valid:!uncertain&&ratio>=required&&styles.display!=='none'&&styles.visibility!=='hidden'};
-   },{timeout:1500});}catch{return {ratio:0,required:4.5,valid:false,uncertain:true};}
+    const size=parseFloat(styles.fontSize),weight=parseInt(styles.fontWeight,10);const required=(size>=24||(size>=18.66&&weight>=700))?3:4.5;
+    const measurable=!uncertain && styles.display!=='none' && styles.visibility!=='hidden';
+    return {foreground,background,cssColor:styles.color,measurable,required};
+   },{timeout:1500});
+   const backgroundLuminance = colorLuminance(background);
+   const ratio = luminanceContrast(colorLuminance(foreground), backgroundLuminance);
+   const blackRatio = luminanceContrast(0, backgroundLuminance);
+   const whiteRatio = luminanceContrast(1, backgroundLuminance);
+   const suggestedColor = measurable && Math.max(blackRatio,whiteRatio) >= required
+     ? (blackRatio >= whiteRatio ? '#000000' : '#ffffff') : undefined;
+   return {ratio,required,uncertain:!measurable,foreground:cssColor,effectiveBackground:background.map(Math.round),
+     backgroundLuminance,suggestedColor,valid:measurable&&ratio>=required};
+  }catch{return {ratio:0,required:4.5,valid:false,uncertain:true,suggestedColor:undefined};}
 }

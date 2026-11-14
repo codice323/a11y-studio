@@ -71,6 +71,12 @@ export type ImageAltAnalysis = {
   purpose: ImagePurpose | 'uncertain';
   description: string | null;
   contentAlt: string | null;
+  legibility?: {
+    kind: 'image-text' | 'graphic-contrast' | 'color-only';
+    observation: string;
+    recommendation: string;
+    textOnly?: string;
+  };
   reason: string;
   sources?: RepairSource[];
   agentTrace?: { tool: string; summary: string }[];

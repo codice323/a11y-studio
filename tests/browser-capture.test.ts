@@ -5,6 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
+import axeCore from 'axe-core';
 import { chromium } from 'playwright-core';
 
 test('已登录页面的原始截图和检测结果可导入，同时保留独立的本地副本', {timeout:90000}, async () => {
@@ -24,27 +25,26 @@ test('已登录页面的原始截图和检测结果可导入，同时保留独�
     const page=await context.newPage();
     await page.goto(`http://127.0.0.1:${port}`);
     await page.getByText('已登录的账户内容').waitFor();
-    await page.addScriptTag({path:'browser-extension-dist/axe.min.js'});
-    await page.addScriptTag({path:'browser-extension-dist/capture.js'});
+    await page.addScriptTag({content:axeCore.source});
+    await page.addScriptTag({path:'apps/api/capture-page.js'});
     const capture:any=await page.evaluate(()=> (globalThis as any).a11yStudioCapture());
     capture.screenshot='data:image/png;base64,'+(await page.screenshot()).toString('base64');
     assert.match(capture.html,/已登录的账户内容/);
     assert.doesNotMatch(capture.html,/PRIVATE-TOKEN|<script/i);
     assert.ok(capture.violations.some((item:any)=>item.id==='button-name'));
     assert.ok(capture.limitations.some((item:string)=>item.includes('内嵌框架')));
-    const { importBrowserCapture, browserCapture, browserCaptureScreenshot }=await import('../apps/api/browser-capture');
+    const { importBrowserCaptureData, browserCapture, browserCaptureScreenshot }=await import('../apps/api/browser-capture');
     const { projectState }=await import('../apps/api/version-state');
     const { runAudit }=await import('../apps/api/scan');
     const { db }=await import('../apps/api/storage');
     try {
-      const file={originalname:'capture.json',buffer:Buffer.from(JSON.stringify(capture))} as Express.Multer.File;
-      const project=await importBrowserCapture(file);
+      const project=await importBrowserCaptureData(capture);
       const audit=await runAudit(project.id,project.currentSnapshot);
       assert.ok(audit.issues.some(item=>item.ruleId==='button-name'));
       assert.equal(browserCapture(project.id).title,'账户页面');
       assert.ok(fs.existsSync(browserCaptureScreenshot(project.id)));
       assert.ok(projectState(project.id).browserCapture.violations.some((item:any)=>item.id==='button-name'));
-      await assert.rejects(importBrowserCapture({...file,buffer:Buffer.from('{}')}),/格式无效/);
+      await assert.rejects(importBrowserCaptureData({}),/格式无效/);
     } finally {db.close();}
     await context.close();
   } finally {

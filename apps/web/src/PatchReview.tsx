@@ -24,6 +24,8 @@ export function PatchReview({ proposal, verification, problem, impact, rule, con
     : verification?.sourceReview?.changes ?? verification?.reviewFiles ?? [], [proposal, verification]);
   const diffs = useMemo(() => comparisonDiffs ?? files.map(diffFile), [files, comparisonDiffs]);
   const first = diffs[0];
+  const groupSize = (proposal?.patch ?? verification?.patch)?.contrastTargets?.length;
+  const hasExcerpt = diffs.some(item => item.file.excerpt);
   const headline = diffs.flatMap(item => item.changes.map(change => change.label));
   const measure = (value?: ContrastEvidence | null) => value && !value.uncertain ? value.ratio.toFixed(2) + ':1' : '暂无可靠测量';
   const check = contrast?.after ?? verification?.contrastCheck;
@@ -39,7 +41,7 @@ export function PatchReview({ proposal, verification, problem, impact, rule, con
       <dl>
         <dt>问题</dt><dd>{problem}</dd>
         <dt>原因</dt><dd>{impact}</dd>
-        <dt>位置</dt><dd>{first ? <><code>{first.file.file}</code> · <code>{first.file.selector}</code>{files.length > 1 && ` 等 ${files.length} 个文件`}</> : <code>{verification?.patch?.targetFile ?? '历史补丁'}</code>}</dd>
+        <dt>位置</dt><dd>{first ? <><code>{first.file.file}</code> · <code>{first.file.selector}</code>{groupSize ? ` 等 ${groupSize} 处` : files.length > 1 && ` 等 ${files.length} 个文件`}</> : <code>{verification?.patch?.targetFile ?? '历史补丁'}</code>}</dd>
         <dt>方案</dt><dd>{[...new Set(headline)].join('、') || '按历史补丁记录核对变更'}</dd>
         <dt>结果</dt><dd>{verification ? verification.status === 'passed' ? '已应用 · 自动复测通过' : '验证未通过'
           : proposal?.sourceReview ? '待应用 · 隔离验证通过，应用后再次复测' : '待应用 · 确认后运行自动复测'}{rule && outcome[rule] && <> · 核对{outcome[rule]}</>}</dd>
@@ -51,12 +53,13 @@ export function PatchReview({ proposal, verification, problem, impact, rule, con
     </section>}
     {diffs.length > 0 ? <>
       <div className="shot-options patch-modes" role="group" aria-label="代码显示范围">
-        {modes.map(([id, label]) => <button key={id} type="button" aria-pressed={mode === id} onClick={() => setMode(id)}>{label}</button>)}
+        {modes.map(([id, label]) => <button key={id} type="button" aria-pressed={mode === id} onClick={() => setMode(id)}>{id === 'full' && hasExcerpt ? '查看源码片段' : label}</button>)}
       </div>
       {mode === 'full' && <div className="shot-options patch-modes" role="group" aria-label="完整文件版本">
         <button type="button" aria-pressed={fullSide === 'before'} onClick={() => setFullSide('before')}>{comparisonDiffs ? '左侧源码' : '修复前源码'}</button>
         <button type="button" aria-pressed={fullSide === 'after'} onClick={() => setFullSide('after')}>{comparisonDiffs ? '右侧源码' : '修复后源码'}</button>
       </div>}
+      {hasExcerpt && <p className="muted">此处展示改动附近的源码，完整文件可随项目 ZIP 导出。</p>}
       <div className="diff-legend"><span>− 删除</span><span>+ 新增</span></div>
       {diffs.map(({file, parts, changes, fallback}) => <section key={file.file} className="patch-file">
         <h4>{file.file}<small>{file.kind && ({ added: '新增文件 · ', removed: '删除文件 · ', modified: '' })[file.kind]}{changes.length} 处变更{fallback && ' · 行级差异'}</small></h4>

@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { redactForModel, redactModelText } from '../apps/api/ai/redact';
+import { suggestContrastColors } from '../apps/api/ai/contrast-repair';
 import { runSourceAgent } from '../apps/api/repair-agent';
 
 const call = (id: string, name: string, args: object = {}) => ({ id, type: 'function', function: { name, arguments: JSON.stringify(args) } });
@@ -84,4 +85,31 @@ test('源码 Agent 可以主动验证候选、根据失败调整，并复用已�
   assert.ok(requests[4].messages.some((message:any)=>message.role==='tool'&&message.content.includes('"passed":true')));
   assert.ok(requests[4].messages.some((message:any)=>message.role==='tool'&&message.content.includes('目标问题消失')));
   assert.equal(result.trace.filter(item=>item.tool==='validate_source_patch').length,2);
+});
+
+
+test('配色 Agent 依据全部实测背景调整候选，并返回同组每处的颜色', async t => {
+  const previousKey=process.env.AI_API_KEY;
+  process.env.AI_API_KEY='local-test';
+  t.after(()=>{if(previousKey===undefined)delete process.env.AI_API_KEY;else process.env.AI_API_KEY=previousKey;});
+  const candidate={defaultColor:'#000000',overrides:[{slot:2,color:'#ffffff'}]};
+  const responses=[
+    {tool_calls:[call('issue','inspect_issue'),call('wcag','search_wcag',{query:'文字对比度'}),call('samples','read_contrast_samples')]},
+    {tool_calls:[call('bad','validate_candidate',{plan:{...candidate,overrides:[]}})]},
+    {tool_calls:[call('good','validate_candidate',{plan:candidate})]},
+    {content:JSON.stringify({plan:candidate,reason:'按背景选择兼顾各处的配色'})},
+  ];
+  let requests=0;
+  t.mock.method(globalThis,'fetch',async (_url, options)=>{
+    const body=JSON.parse(String(options?.body));
+    if(requests===1)assert.ok(body.messages.some((message:any)=>message.role==='tool'&&message.content.includes('"locations":2')));
+    if(requests===2)assert.ok(body.messages.some((message:any)=>message.role==='tool'&&message.content.includes('编号 2，1.00:1')));
+    return Response.json({choices:[{message:responses[requests++]}]});
+  });
+  const light={foreground:'#cccccc',effectiveBackground:'#ffffff',backgroundLuminance:1,required:4.5,ratio:1.6};
+  const dark={foreground:'#444444',effectiveBackground:'#000000',backgroundLuminance:0,required:4.5,ratio:2.2};
+  const result=await suggestContrastColors([light,dark,light],'文字与背景对比度不足');
+  assert.deepEqual(result.candidate,{colors:['#000000','#ffffff','#000000'],minimumRatio:21});
+  assert.equal(result.trace.filter(item=>item.tool==='validate_contrast_palette').length,2);
+  assert.equal(result.attempts,2);
 });

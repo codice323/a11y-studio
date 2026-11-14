@@ -19,18 +19,25 @@ export function imageVisionConfigured() {
   return Boolean(config.key && config.supported);
 }
 
-export async function analyzeVisualContext<T>(target: VisualTarget, task: {
+type VisualTask<T> = {
   type: string;
   instructions: string;
   schema: ZodType<T>;
   context?: unknown;
   example: T;
-}) {
+};
+
+export async function analyzeVisualContext<T>(target: VisualTarget, task: VisualTask<T>) {
+  if (!imageVisionConfigured()) return {status:'unavailable' as const,reason:'请先配置支持图像输入的视觉模型。'};
+  const evidence = await collectVisualContext(target);
+  if (!evidence) return {status:'unavailable' as const,reason:target.mode === 'image-resource' ? missingImageEvidence : '视觉证据缺失：无法获取目标区域的浏览器像素。'};
+  return analyzeVisualEvidence(evidence,task);
+}
+
+export async function analyzeVisualEvidence<T, C>(evidence: {context:C; pixels:string; source:string}, task: VisualTask<T>) {
   const config = visionConfig();
   if (!config.key) return {status:'unavailable' as const,reason:'视觉服务未配置 API 密钥。'};
   if (!config.supported) return {status:'unavailable' as const,reason:'当前模型未配置为支持图像输入。请使用支持视觉的模型。'};
-  const evidence = await collectVisualContext(target);
-  if (!evidence) return {status:'unavailable' as const,reason:target.mode === 'image-resource' ? missingImageEvidence : '视觉证据缺失：无法获取目标区域的浏览器像素。'};
   const content = [
     {type:'text',text:JSON.stringify(redactForModel({task:task.type,target:evidence.context,related:task.context}))},
     {type:'image_url',image_url:{url:evidence.pixels}},

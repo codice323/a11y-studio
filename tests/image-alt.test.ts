@@ -73,7 +73,15 @@ test('图片建议使用浏览器实际像素，区分信息图、装饰图和�
     } finally { await browser.close(); }
 
     result = {purpose:'informative',description:'蓝柱高于红柱',contentAlt:'蓝柱高于红柱',reason:'用于比较季度报名人数。'};
-    assert.equal((await createProposal(project.id, issue.id, {source:'ai'})).status,'image-analysis');
+    fetcher.mock.mockImplementationOnce(async () => Response.json({choices:[{message:{content:JSON.stringify({
+      ...result,legibility:{kind:'graphic-contrast',observation:'图表中的细网格线不易辨认。',recommendation:'加深用于读数的网格线。',textOnly:'不应将图表重建成纯文字预览'},
+    })}}]}));
+    const visualReview = await createProposal(project.id, issue.id, {source:'ai'});
+    assert.equal(visualReview.status,'image-analysis');
+    assert.ok('legibility' in visualReview);
+    assert.equal(visualReview.legibility?.kind,'graphic-contrast');
+    assert.equal(visualReview.legibility?.textOnly,undefined);
+    assert.ok(visualReview.sources?.some(source=>source.refs.includes('1.4.11')));
     fetcher.mock.mockImplementationOnce(async () => Response.json({choices:[{message:{content:JSON.stringify({
       purpose:'informative',description:null,contentAlt:'猜测的图像内容',reason:'无法看清图片。',
     })}}]}));

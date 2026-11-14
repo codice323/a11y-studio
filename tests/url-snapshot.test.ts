@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import dns from 'node:dns/promises';
 import { EventEmitter } from 'node:events';
 import http from 'node:http';
+import https from 'node:https';
 import { syncBuiltinESMExports } from 'node:module';
 import { Readable } from 'node:stream';
 import { test, type TestContext } from 'node:test';
@@ -45,10 +46,11 @@ function upstreamResponses(t: TestContext, replies: Record<string, Reply>, dnsOv
   return { visited, resolutions };
 }
 
-test('采集首页连接重置时改用另一个已校验的 IP，提交请求只发送一次', async t => {
+test('采集首页连接重置时轮换已校验的 IP，提交请求只发送一次', async t => {
   const alternateIp = '93.184.216.35';
+  const thirdIp = '93.184.216.36';
   const resolver = t.mock.method(dns, 'lookup', async () =>
-    [publicIp, alternateIp].map(address => ({address, family:4})));
+    [publicIp, alternateIp, thirdIp].map(address => ({address, family:4})));
   syncBuiltinESMExports();
   t.after(() => { resolver.mock.restore(); syncBuiltinESMExports(); });
   const attempted: string[] = [];
@@ -61,7 +63,7 @@ test('采集首页连接重置时改用另一个已校验的 IP，提交请求�
     });
     return Object.assign(request, {end() {
       process.nextTick(() => {
-        if (attempted.at(-1) === publicIp) {
+        if (attempted.at(-1) !== thirdIp) {
           request.emit('error', Object.assign(new Error('Connection reset'), {code:'ECONNRESET'}));
         } else {
           callback(Object.assign(Readable.from([Buffer.from('<html>ok</html>')]), {statusCode:200, headers:{}}) as unknown as http.IncomingMessage);
@@ -72,9 +74,9 @@ test('采集首页连接重置时改用另一个已校验的 IP，提交请求�
   const signal = new AbortController().signal;
   const response = await requestPublicBrowserResource(upstream, 'GET', {}, undefined, {remaining:1000}, signal, true);
   assert.equal(response.status, 200);
-  assert.deepEqual(attempted, [publicIp, alternateIp]);
+  assert.deepEqual(attempted, [publicIp, alternateIp, thirdIp]);
   attempted.length = 0;
-  await assert.rejects(requestPublicBrowserResource(upstream, 'POST', {}, undefined, {remaining:1000}, signal, true), /暂时无法连接/);
+  await assert.rejects(requestPublicBrowserResource(upstream, 'POST', {}, undefined, {remaining:1000}, signal, true), /已解析目标网站，但连接失败/);
   assert.deepEqual(attempted, [publicIp]);
 });
 
@@ -174,18 +176,22 @@ test('代理合成 DNS 的公网解析结果包含私网时仍拒绝连接', asy
 });
 
 test('采集浏览器在虚拟 DNS 环境中轮换公网解析结果并拒绝私网地址', async t => {
-  const resolver = t.mock.method(dns, 'lookup', async () => [{address:'198.18.0.25',family:4}]);
+  let synthetic = true;
+  const resolver = t.mock.method(dns, 'lookup', async () => [{address:synthetic?'198.18.0.25':'93.184.216.35',family:4}]);
   syncBuiltinESMExports();
   t.after(() => { resolver.mock.restore(); syncBuiltinESMExports(); });
   let privateResult = false;
   t.mock.method(globalThis, 'fetch', async (input: string | URL | Request) => {
     const url = new URL(String(input));
+    if (url.searchParams.get('type') === 'AAAA') throw new Error('IPv6 DNS 查询失败');
     const address = url.hostname === 'doh.pub' ? '93.184.216.35' : publicIp;
     const values = url.searchParams.get('type') === 'A' ? [{type:1,data:address}, ...(privateResult ? [{type:1,data:'10.0.0.1'}] : [])] : [];
     return new Response(JSON.stringify({Status:0,Answer:values}), {status:200});
   });
   const attempted: string[] = [];
-  t.mock.method(http, 'request', (url:URL, options:http.RequestOptions, callback:(response:http.IncomingMessage)=>void) => {
+  t.mock.method(https, 'request', (url:URL, options:https.RequestOptions, callback:(response:http.IncomingMessage)=>void) => {
+    assert.equal(options.ecdhCurve,synthetic?'X25519:P-256:P-384':undefined);
+    assert.notEqual(options.rejectUnauthorized,false);
     const request = new EventEmitter();
     options.lookup?.(url.hostname, {family:4}, (error, address) => {assert.ifError(error);attempted.push(address as string);});
     return Object.assign(request,{end(){process.nextTick(()=>{
@@ -193,10 +199,14 @@ test('采集浏览器在虚拟 DNS 环境中轮换公网解析结果并拒绝私
       else callback(Object.assign(Readable.from([Buffer.from('ok')]),{statusCode:200,headers:{}}) as unknown as http.IncomingMessage);
     });}});
   });
-  await requestPublicBrowserResource(upstream,'GET',{},undefined,{remaining:1000},new AbortController().signal,true);
+  const secureUrl=upstream.replace('http:', 'https:');
+  await requestPublicBrowserResource(secureUrl,'GET',{},undefined,{remaining:1000},new AbortController().signal,true);
   assert.deepEqual(attempted,[publicIp,'93.184.216.35']);
   privateResult = true;
   attempted.length = 0;
-  await assert.rejects(requestPublicBrowserResource(upstream,'GET',{},undefined,{remaining:1000},new AbortController().signal,true),/非公网/);
+  await assert.rejects(requestPublicBrowserResource(secureUrl,'GET',{},undefined,{remaining:1000},new AbortController().signal,true),/非公网/);
   assert.deepEqual(attempted,[]);
+  synthetic = false;
+  await requestPublicBrowserResource(secureUrl,'GET',{},undefined,{remaining:1000},new AbortController().signal,true);
+  assert.deepEqual(attempted,['93.184.216.35']);
 });

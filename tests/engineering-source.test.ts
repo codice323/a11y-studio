@@ -121,7 +121,7 @@ test('静态与 React 源码工程经真实工作台审核、复测和独立 Vit
           if (attempt === 80) assert.fail('未完成首轮扫描：' + await page.locator('body').innerText());
           await delay(125);
         }
-        for (const [index, repair] of fixture.repairs.entries()) {
+        for (const repair of fixture.repairs) {
           const step = performance.now();
           await page.getByRole('tab', { name: '问题与历史' }).click();
           await page.getByRole('button', { name: /^待处理 / }).click();
@@ -174,7 +174,7 @@ test('静态与 React 源码工程经真实工作台审核、复测和独立 Vit
           await page.getByRole('button', { name: '确认应用修复' }).click();
           await page.getByLabel('我已核对修复内容和页面用途，确认适合应用').check();
           await page.getByRole('button', { name: '确认应用并复测' }).click();
-          await page.waitForFunction(version => (document.querySelector<HTMLSelectElement>('[aria-label="切换项目版本"]')?.selectedOptions[0]?.textContent ?? '').split(' · ')[0] === 'V' + version, index + 1);
+          await page.getByRole('heading', { name:'复测通过', exact:true }).waitFor();
           const verified = (await get(route)).verifications.find((entry: any) => entry.patch.ruleId === repair.rule);
           assert.equal(verified.status, 'passed', JSON.stringify(verified));
           assert.deepEqual(verified.added, []);

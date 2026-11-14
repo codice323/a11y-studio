@@ -292,7 +292,7 @@ test('校园综合服务平台按用户操作顺序验收公开导入入口及�
 
       if(maxStage>=3)for(const s of scenarios)await record(3,s,async()=>{
         const {page}=s;
-        await page.getByRole('button',{name:'页面对照',exact:true}).click();
+        await page.getByRole('button',{name:'扫描截图',exact:true}).click();
         await panoramaReady(page);
         const panel=panorama(page);
         const picker=panel.getByLabel('页面',{exact:true});
@@ -332,7 +332,7 @@ test('校园综合服务平台按用户操作顺序验收公开导入入口及�
           await panel.getByText('静态快照 · 动态交互状态未覆盖',{exact:true}).waitFor();
           assert.equal(await panel.getByRole('group',{name:'记录安全操作'}).count(),0);
         }
-        await panel.getByRole('button',{name:'页面对照',exact:true}).click();
+        await panel.getByRole('button',{name:'扫描截图',exact:true}).click();
         await panel.locator('.shots img').first().waitFor();
         return {steps:['打开页面对照','批量检测页面','验证模式支持的状态','返回首页'],pages,findings,
           interaction:s.mode.id==='source'?'个人中心 → 我的设置 → 编辑资料，双侧语义含 dialog':'静态快照'};
@@ -371,7 +371,7 @@ test('校园综合服务平台按用户操作顺序验收公开导入入口及�
         await issue(page,s.mode.id==='source'?'#registration-note':'#quick-search');
         const field=page.locator('#repair-value');
         let labelDecision:string|undefined;
-        await page.getByRole('button',{name:'AI 分析与修复',exact:true}).click();
+        await page.getByRole('button',{name:s.mode.id==='source'?'AI 推荐颜色':'AI 分析与修复',exact:true}).click();
         if(s.mode.id!=='source'){
           const decision=page.getByText(/建议人工确认|需要补充信息/).first();
           await decision.waitFor();
@@ -387,26 +387,11 @@ test('校园综合服务平台按用户操作顺序验收公开导入入口及�
         assert.equal(v2.snapshots.length,3);
         assert.ok(v2.verifications.every(item=>item.status==='passed'&&item.added.length===0));
         const current=v2.project.currentSnapshot;
-        await page.locator('.project-more summary').click();
-        await page.getByRole('button',{name:'重命名',exact:true}).click();
-        await page.getByLabel('版本名称').fill('校园验收 V2');
-        await page.getByRole('button',{name:'保存',exact:true}).click();
-        await page.getByText('版本名称已保存。').waitFor();
-        await page.getByRole('button',{name:'自由版本对比',exact:true}).click();
-
-        await page.getByRole('button',{name:'页面对照',exact:true}).click();
-        await panoramaReady(page);
-        const panel=panorama(page);
-        assert.equal(await panel.getByLabel('左侧版本').inputValue(),s.original);
-        assert.equal(await panel.getByLabel('右侧版本').inputValue(),current);
-        await panel.getByLabel('左侧版本').selectOption(s.previous!);
-        await panoramaReady(page);
-        assert.equal((await readProject(s.id)).project.currentSnapshot,current);
-        await page.getByLabel('切换项目版本').selectOption(s.original);
-        await page.getByText(/已恢复到所选有效版本/).waitFor();
-        assert.ok((await readProject(s.id)).current.issues.some(item=>item.selector==='#campus-hero'));
-        await page.getByLabel('切换项目版本').selectOption(current);
-        await page.getByText(/已恢复到所选有效版本/).waitFor();
+        const originalToggle=page.getByRole('checkbox',{name:'查看原始状态'});
+        await originalToggle.check();
+        await page.getByRole('heading',{name:'原始状态',exact:true}).waitFor();
+        await originalToggle.uncheck();
+        await page.getByRole('heading',{name:'当前状态',exact:true}).waitFor();
         assert.equal((await readProject(s.id)).project.currentSnapshot,current);
 
         let rejectedPatch:string|undefined;

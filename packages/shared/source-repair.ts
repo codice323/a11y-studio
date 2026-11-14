@@ -17,6 +17,8 @@ export function reviewRepairIssue(finding: BehaviorFinding): Issue | undefined {
 }
 
 export type SourceChange = {
+  excerpt?: boolean;
+  startLine?: number;
   file: string;
   selector: string;
   reason: string;
