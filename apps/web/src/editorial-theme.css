@@ -286,7 +286,9 @@
 .workspace-state-heading > span { display: block; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .workspace-diagnosis-heading { padding: 4px 10px; }
 .workspace-diagnosis-heading h2 { flex-shrink: 0; }
-.workspace-page-picker { width: min(48%, 320px); min-width: 0; margin-inline-start: auto; }
+.workspace-diagnosis-actions { display: flex; align-items: center; justify-content: flex-end; gap: 12px; flex: 1; min-width: 0; }
+.workspace-diagnosis-actions .repair-version-toggle { flex: none; white-space: nowrap; }
+.workspace-page-picker { width: min(100%, 320px); min-width: 0; }
 .workspace-page-picker:empty { display: none; }
 .workspace-page-picker select { width: 100%; min-width: 0; height: var(--workspace-control-height); text-overflow: ellipsis; }
 .workspace-content .preview .comparison-view-tabs { margin-block: 0 3px; }

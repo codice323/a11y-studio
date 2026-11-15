@@ -26,7 +26,7 @@ export function Evidence(props: EvidenceProps) {
   const [toolsHost, setToolsHost] = useState<HTMLDivElement | null>(null);
   const reviewing = proposal && view === 'diff';
   return <section className={'preview panel' + (reviewing ? ' preview-reviewing' : '')} aria-labelledby="evidence-title">
-    <div className="panel-head workspace-diagnosis-heading"><h2 id="evidence-title">网页诊断</h2><div ref={setPagePickerHost} className="workspace-page-picker" /></div>
+    <div className="panel-head workspace-diagnosis-heading"><h2 id="evidence-title">网页诊断</h2><div className="workspace-diagnosis-actions">{props.versionToggle}<div ref={setPagePickerHost} className="workspace-page-picker" /></div></div>
     <div className="workspace-evidence-controls">
     {proposal || (history && (!history.verification.panoramaState || history.verification.status === 'applied')) ? <RepairEvidence key={key} {...props} reviewHost={reviewHost} setToolsHost={setToolsHost} /> :
       <VersionComparison key={key} state={state} autoScanning={props.autoScanning} target={props.stateScoped || history?.verification.panoramaState ? undefined : history?.issue ?? issue}
@@ -38,7 +38,7 @@ export function Evidence(props: EvidenceProps) {
   </section>;
 }
 
-function RepairEvidence({ state, stateScoped, issue, history, proposal, view, onView, busy, applying, archivedEvidence, patchReady, reviewHost, onConfirm, onReject, problem, impact, versionToggle, setToolsHost }: EvidenceProps & {setToolsHost:(node:HTMLDivElement|null)=>void}) {
+function RepairEvidence({ state, stateScoped, issue, history, proposal, view, onView, busy, applying, archivedEvidence, patchReady, reviewHost, onConfirm, onReject, problem, impact, setToolsHost }: EvidenceProps & {setToolsHost:(node:HTMLDivElement|null)=>void}) {
   const verification = history?.verification;
   const target = history?.issue ?? issue;
   const selector = target?.selector;
@@ -115,7 +115,7 @@ function RepairEvidence({ state, stateScoped, issue, history, proposal, view, on
       {verification.contrastBefore && !verification.contrastBefore.uncertain && verification.contrastCheck?.valid &&
         !verification.contrastCheck.uncertain && `，对比度由 ${verification.contrastBefore.ratio.toFixed(2)}:1 提升到 ${verification.contrastCheck.ratio.toFixed(2)}:1`}
       {view !== 'diff' && (verification.diff || verification.sourceReview) && <> · <button type="button" className="secondary" onClick={() => onView('diff')}>查看补丁</button></>}
-    </span>{view === 'interactive' && versionToggle}</div>}
+    </span></div>}
     {proposal && (view !== 'diff' || contrastReview) && !previewData && <p className="comparison-status" role="status">{preview?.error
       ? <>候选证据不可用。<button type="button" className="secondary" onClick={() => setAttempt(attempt + 1)}>重试预览</button></>
       : '正在读取候选页面与浏览器语义…'}</p>}

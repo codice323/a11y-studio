@@ -384,7 +384,6 @@ function App({account,signOut,openUpgrade,openVerification}:{account:Account;sig
   }
 
   const liveTransition = useRef(Promise.resolve());
-  const showHistoryToggle = !proposal && history && (!history.verification.panoramaState || history.verification.status === 'applied');
   function renderVersionToggle() {
     if (!state) return null;
     return state.originalSnapshotId && state.originalSnapshotId !== state.project.currentSnapshot && <label className="repair-version-toggle">
@@ -420,13 +419,13 @@ function App({account,signOut,openUpgrade,openVerification}:{account:Account;sig
       const afterSelector = version === history?.verification.toSnapshot ? history.verification.sourceTarget : undefined;
       return <CaptureComparison single initialScroll={comparisonScroll} positionRef={livePosition} project={state.project.id} left={version} right={version} names={names}
         current={current} active issue={target} afterSelector={afterSelector} targetPair={{left:version,right:version}}
-        groupSelectors={selectedLocations} versions={showHistoryToggle ? undefined : renderVersionToggle()} limitations={state.browserCapture!.limitations}
+        groupSelectors={selectedLocations} versions={undefined} limitations={state.browserCapture!.limitations}
         onReplay={canReplay ? () => setSnapshotPreview(undefined) : undefined} onDiagnostics={setVisibleDiagnostics} />;
     }
     return <LiveComparison single initialScroll={comparisonScroll} positionRef={livePosition} project={state.project.id} left={version} right={version} names={names}
       start={canReplay ? undefined : start} stateId={panoramaIssue?.stateId ?? (canReplay || history?.verification.status==='applied' ? undefined : history?.verification.panoramaState)}
       transition={liveTransition} current={current} projectMode={state.project.mode} onInspection={setInspection}
-      versions={<>{!showHistoryToggle && renderVersionToggle()}{canReplay && <button type="button" className="secondary" onClick={() => setSnapshotPreview(state.project.id)}>查看采集副本</button>}</>}
+      versions={canReplay ? <button type="button" className="secondary" onClick={() => setSnapshotPreview(state.project.id)}>查看采集副本</button> : undefined}
       onRepair={openStateIssue} onDiagnostics={!state.current && state.verifications.some(item=>item.status==='applied' && item.toSnapshot===version) ? undefined : setVisibleDiagnostics} diagnosticsCache={livePageCache.current}
       scanRevision={pageScanRevision} target={managedUrl ? undefined : directTarget?.project===state.project.id && directTarget.version===version ? directTarget.target : pageTarget}
       entryTargetPath={'/'+state.project.entry.split('/').map(encodeURIComponent).join('/')}
@@ -1246,7 +1245,7 @@ function App({account,signOut,openUpgrade,openVerification}:{account:Account;sig
                   impact={issueNames[(history?.issue ?? issue)?.ruleId ?? '']?.[1] ?? (history?.issue ?? issue)?.description ?? '需核对目标元素。'}
                   busy={working} applying={busy === applyingLabel} archivedEvidence={archivedEvidence}
                   patchReady={patchReady}
-                  versionToggle={showHistoryToggle ? renderVersionToggle() : undefined} onConfirm={apply} onReject={reject} />
+                  versionToggle={view === 'interactive' && !proposal ? renderVersionToggle() : undefined} onConfirm={apply} onReject={reject} />
               </div>
             </div>
             <div className="bottom-note"><ShieldCheck size={16} /><span>补丁保存为独立版本，可重新检测或回退。</span><button onClick={() => openPage('report')}>查看完整报告 <ArrowRight size={14} /></button></div>
