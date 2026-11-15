@@ -108,7 +108,7 @@ test('配色 Agent 依据全部实测背景调整候选，并返回同组每处�
   });
   const light={foreground:'#cccccc',effectiveBackground:'#ffffff',backgroundLuminance:1,required:4.5,ratio:1.6};
   const dark={foreground:'#444444',effectiveBackground:'#000000',backgroundLuminance:0,required:4.5,ratio:2.2};
-  const result=await suggestContrastColors([light,dark,light],'文字与背景对比度不足');
+  const result=await suggestContrastColors([light,dark,light],'文字与背景对比度不足',{selector:'#sample',html:'<p id="sample">示例</p>'});
   assert.deepEqual(result.candidate,{colors:['#000000','#ffffff','#000000'],minimumRatio:21});
   assert.equal(result.trace.filter(item=>item.tool==='validate_contrast_palette').length,2);
   assert.equal(result.attempts,2);

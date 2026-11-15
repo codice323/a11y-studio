@@ -1,7 +1,7 @@
 import type { Page } from 'playwright-core';
 import type { PageDiagnostics } from '../../packages/shared/page-diagnostics';
 import type { LiveFrame } from '../../packages/shared/live-comparison';
-import { scanRules } from './scan-rules';
+import { visionFindings, scanRules } from './scan-rules';
 import { hash } from './storage';
 
 export const verificationPageMessage = '当前页面显示网站安全验证，尚未检测到目标网页。请在原网站完成验证，再返回工作台重新采集正文。';
@@ -24,7 +24,7 @@ export async function diagnosePage(page: Page, path: string, options: { waitForC
   if (page.url() !== url) throw new Error('网页已切换，请重试检测。');
   await requireTargetPage(page);
   const result = await scanRules(page);
-  const findings = result.violations.flatMap(rule => rule.nodes.map(node => {
+  const findings = visionFindings(result.violations).flatMap(rule => rule.nodes.map(node => {
     const selector = node.target.length === 1 && typeof node.target[0] === 'string' ? node.target[0].slice(0, 2000) : '';
     return {
       id: hash(rule.id + '|' + JSON.stringify(node.target)).slice(0, 20),
@@ -77,12 +77,32 @@ export async function diagnosePage(page: Page, path: string, options: { waitForC
   },findings.map(({id,selector,ruleId,impact})=>({id,selector,ruleId,impact})));
   const title = (await page.title()).slice(0, 160);
   if (page.isClosed() || page.url() !== url) throw new Error('页面在检测过程中发生变化。');
-  const summarize = ({ id, help, nodes }: (typeof result.violations)[number]) => ({ id, help, count:nodes.length });
+  const summarize = ({ id, help, nodes }: (typeof result.violations)[number]) => ({
+    id, help, count:nodes.length,
+    selectors:[...new Set(nodes.flatMap(node => {
+      const selector = node.target[0];
+      return node.target.length === 1 && typeof selector === 'string' && selector.length <= 2000 ? [selector] : [];
+    }))].slice(0,300),
+  });
+  const addEvidence = (rules:ReturnType<typeof summarize>[]) => page.evaluate(items => items.map(rule=>({
+    ...rule,
+    evidence:rule.selectors.flatMap(selector=>{
+      let matches;
+      try { matches=document.querySelectorAll(selector); } catch { return []; }
+      if (matches.length!==1) return [];
+      const node=matches[0];
+      const attrs=node.getAttributeNames().filter(name=>rule.id==='tabindex' ? name==='tabindex' : name.startsWith('aria-'));
+      const refs=['aria-labelledby','aria-describedby','aria-controls','aria-owns','aria-activedescendant','aria-details','aria-errormessage'];
+      const missingRefs=attrs.filter(name=>refs.includes(name)).flatMap(name=>(node.getAttribute(name) ?? '').trim().split(/\s+/))
+        .filter(value=>value && !document.getElementById(value)).slice(0,6).map(value=>value.slice(0,100));
+      return [{selector,element:node.localName,attributes:attrs.slice(0,8).map(name=>name+'="'+node.getAttribute(name)?.slice(0,100)+'"'),missingRefs}];
+    }),
+  })),rules);
   return {
     path, title,
     coverage: {
-      review:result.incomplete.map(summarize),
-      bestPractices:result.bestPractices.violations.map(summarize),
+      review:await addEvidence(visionFindings(result.incomplete).map(summarize)),
+      bestPractices:await addEvidence(result.bestPractices.violations.filter(rule=>rule.id==='tabindex' || rule.tags.includes('cat.semantics') || rule.tags.includes('cat.keyboard')).map(summarize)),
       stillLoading,
     },
     findings: findings.map(item=>({...item,locationGroup:groups[item.id]})),

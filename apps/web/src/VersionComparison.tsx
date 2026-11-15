@@ -40,10 +40,10 @@ function ComparisonSummary({ comparison, diffs }: { comparison: Comparison; diff
   </section>;
 }
 
-export function VersionComparison({ state, target, pair, view, onView, jump, onInspection, busy, pageRequest, visiblePagePath, onChoosePage, autoScanning }: {
+export function VersionComparison({ state, target, pair, view, onView, jump, onInspection, busy, pageRequest, visiblePagePath, pagePickerHost, onChoosePage, autoScanning }: {
   autoScanning?:boolean; state: State; target?: Issue; pair: VersionPair;
   view: EvidenceView; onView: (view: EvidenceView) => void;
-  jump?: PanoramaJump; onInspection:(value:PageInspection)=>void; busy:boolean; pageRequest?: {path:string}; visiblePagePath?:string; onChoosePage?:(path:string)=>void;
+  jump?: PanoramaJump; onInspection:(value:PageInspection)=>void; busy:boolean; pageRequest?: {path:string}; visiblePagePath?:string; pagePickerHost?:HTMLDivElement|null; onChoosePage?:(path:string)=>void;
 }) {
   const [scoped, setScoped] = useState(Boolean(jump));
   const { left, right } = pair;
@@ -109,7 +109,7 @@ export function VersionComparison({ state, target, pair, view, onView, jump, onI
 
 
     <Panorama state={state} autoScanning={autoScanning} pair={pair} jump={jump} onInspection={onInspection} disabled={busy}
-      onScope={setScoped} targetId={target?.id} view={view} pageRequest={pageRequest} visiblePagePath={visiblePagePath} onChoosePage={onChoosePage} viewTools={options => <>
+      onScope={setScoped} targetId={target?.id} view={view} pageRequest={pageRequest} visiblePagePath={visiblePagePath} pagePickerHost={pagePickerHost} onChoosePage={onChoosePage} viewTools={options => <>
         <div className="evidence-tabs comparison-view-tabs" role="group" aria-label="修复效果视图">
           {views.map(([id, label]) => <button key={id} type="button" aria-pressed={view === id} onClick={() => onView(id)}>{label}</button>)}
           <details className="developer-options" data-active={view === 'diff'}><summary>开发者选项</summary><div className="developer-menu"><button type="button" aria-pressed={view === 'diff'} onClick={event => {
@@ -117,7 +117,6 @@ export function VersionComparison({ state, target, pair, view, onView, jump, onI
             onView('diff');
           }}>代码变更</button>{options}</div></details>
         </div>
-        {target && <details className="evidence-target"><summary>查看定位详情</summary><span>{target.ruleId}</span><code>{selector || '页面级问题'}</code></details>}
         {request?.error && <p className="comparison-status" role="status">{request.error} <button type="button" className="secondary" onClick={() => setRetry(retry + 1)}>重试对比</button></p>}
         {view !== 'interactive' && (!scoped || view === 'diff') && !request?.error && (left === right || same) && <p className="comparison-status muted">{left === right ? '当前状态暂无修复差异。' : '原始状态与当前状态暂无可检测差异。'}</p>}
       </>} />

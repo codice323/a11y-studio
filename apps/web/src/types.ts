@@ -26,6 +26,7 @@ export type Scan = {
   issues: Issue[];
   incomplete: { ruleId: string; help: string; count: number }[];
   detection?: DetectionEvidence;
+  reviewSourceCandidates?: Record<string,{file:string;line:number;tag:string;reason:string}[]>;
   sourceLocations?: Record<string, NonNullable<Issue['source']>>;
   resourceFailures?: {type:string;path:string;reason:string;status?:number}[];
   screenshot: string;
@@ -57,6 +58,7 @@ export type Verification = {
   sourceReview?: SourceReview;
   reviewFiles?: PatchFile[];
   sourceChecks?: SourceReview['checks'] | null;
+  pendingChecks?: string[];
   imageReview?: ImageSemanticReview;
   structurePassed?: boolean;
   functionPassed?: boolean;
@@ -78,6 +80,7 @@ export type State = {
   originalSnapshotId: string | null;
   baseline: Scan | null;
   current: Scan | null;
+  inheritedIssues?: Issue[] | null;
   browserCapture?: {title:string;capturedAt:string;viewport:{width:number;height:number};screenshot:string;
     screenshotFullPage?:boolean;dynamicReplay?:boolean;screenshotSize?:{width:number;height:number};
     violations:{id:string;help:string;impact:string|null;count:number}[];incomplete:number;limitations:string[]} | null;
@@ -105,4 +108,4 @@ export type Proposal = {
   sources?: { id: string; title: string; refs: string[]; url: string; text: string }[];
 };
 
-export type HistoryItem = { issue: Issue; verification: Verification };
+export type HistoryItem = { issue: Issue; verification: Verification; semantics?: import("./EvidenceDetails").SemanticResult };

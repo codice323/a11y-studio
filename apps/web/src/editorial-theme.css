@@ -266,3 +266,47 @@
 .workspace-page-review ul { padding-inline-start: 20px; }
 .workspace-live-path { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; overflow-wrap: anywhere; }
 .workspace-live-path .secondary[aria-pressed="true"] { border-color: #a75b45; color: #853e2b; }
+
+.app.editorial .workspace-content { padding-top: 8px; }
+.app.editorial .workspace-content .compact-intro {
+  align-items: center;
+  gap: 6px 12px;
+  margin-bottom: 6px;
+  padding-bottom: 5px;
+}
+.app.editorial .workspace-content .compact-intro h1 { font-size: clamp(19px, 2vw, 25px); margin: 0; }
+.app.editorial .workspace-content .project-strip {
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  padding: 3px 10px;
+  margin-bottom: 6px;
+}
+.workspace-content .project-title { display: block; min-height: 0; }
+.workspace-content .project-title b,
+.workspace-state-heading > span { display: block; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.workspace-diagnosis-heading { padding: 4px 10px; }
+.workspace-diagnosis-heading h2 { flex-shrink: 0; }
+.workspace-page-picker { width: min(48%, 320px); min-width: 0; margin-inline-start: auto; }
+.workspace-page-picker:empty { display: none; }
+.workspace-page-picker select { width: 100%; min-width: 0; height: var(--workspace-control-height); text-overflow: ellipsis; }
+.workspace-content .preview .comparison-view-tabs { margin-block: 0 3px; }
+.workspace-content .inline-interactive { padding: 2px 8px 8px; }
+.workspace-state-heading { display: flex; align-items: baseline; gap: 10px; margin-bottom: 4px; }
+.workspace-state-heading h3 { flex-shrink: 0; margin: 0; }
+.workspace-state-heading > span { color: var(--muted); font-size: 13px; }
+@media (min-width: 901px) {
+  .workspace-content .workbench { --workbench-height: max(440px, calc(100dvh - 115px)); }
+}
+
+.workspace-content .preview .comparison-view-tabs { padding-block: 2px; }
+.workspace-content .comparison-view-tabs > button, .workspace-content .comparison-view-tabs summary { min-height: 28px; padding-block: 2px; }
+.app.editorial .workspace-content .review-rail-heading { padding-block: 6px; }
+.workspace-content .control-tabs { margin-block: 4px; }
+.workspace-content .issue-filters {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  padding: 0 12px 6px;
+}
+.app.editorial .issue-filters .filter-row { display: grid; gap: 3px; padding: 0; min-width: 0; }
+.app.editorial .issue-filters select { width: 100%; max-width: none; min-height: 36px; text-overflow: ellipsis; }

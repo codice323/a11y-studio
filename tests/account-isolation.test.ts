@@ -95,7 +95,7 @@ test('注册登录、真实校园项目修复、双账号资源隔离及旧项�
         if (inputLabel === '修复颜色') await pageA.getByText('自选颜色',{exact:true}).click();
         await pageA.getByLabel(inputLabel,{exact:true}).fill(value);
         const proposed=pageA.waitForResponse(r=>r.request().method()==='POST'&&r.url().endsWith('/proposals'));
-        await pageA.getByRole('button',{name:inputLabel === '修复颜色' ? '预览所选颜色' : '生成补丁预览'}).click();
+        await pageA.getByRole('button',{name:'生成补丁预览'}).click();
         const proposal=await proposed;
         assert.ok(proposal.ok(),await proposal.text());
         const result=await proposal.json();

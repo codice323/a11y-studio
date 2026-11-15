@@ -1,3 +1,4 @@
+import { createPortal } from 'react-dom';
 import { workspaceFetch as fetch } from './workspace-fetch';
 import { useEffect, useRef, useState, type ReactNode } from 'react';
 import type { scanLive } from '../../api/live-comparison';
@@ -20,13 +21,13 @@ type Activity = { time:string; title:string; detail:string };
 const savedSessionKey = 'a11y-studio:live-comparison-session';
 const dimensions = {route:'路由',dom:'DOM',semantics:'无障碍语义',focus:'焦点',visual:'画面'};
 
-export function LiveComparison({ project, left, right, names, start, current, onInspection, onRepair, onClose, versions, projectMode, proposalId, leftSelector, rightSelector, stateId, transition, onDiagnostics, diagnosticsCache, scanRevision=0, target, single=false, initialScroll, positionRef, onOpenUncapturedLink }: {
+export function LiveComparison({ project, left, right, names, start, current, onInspection, onRepair, onClose, versions, projectMode, proposalId, toolsHost, leftSelector, rightSelector, stateId, transition, onDiagnostics, diagnosticsCache, scanRevision=0, target, entryTargetPath, single=false, initialScroll, positionRef, onOpenUncapturedLink }: {
   single?:boolean; initialScroll?:number; positionRef?:{current:number}; project:string; left:string; right:string; names:Record<LiveSide,string>; start?:string; current:string;
   onInspection:(value:PageInspection)=>void;
   onDiagnostics?:(value:WorkspacePageDiagnostics)=>void;
   onOpenUncapturedLink?:(url:string)=>void;
-  diagnosticsCache?:Map<string,PageDiagnostics>; scanRevision?:number; target?:PageTarget;
-  transition:{current:Promise<void>}; proposalId?:string; stateId?:string; leftSelector?:string; rightSelector?:string;
+  diagnosticsCache?:Map<string,PageDiagnostics>; scanRevision?:number; target?:PageTarget; entryTargetPath?:string;
+  transition:{current:Promise<void>}; proposalId?:string; toolsHost?:HTMLDivElement|null; stateId?:string; leftSelector?:string; rightSelector?:string;
   onRepair:(value:RepairState)=>void; onClose?:()=>void; versions?:ReactNode; projectMode?:'snapshot'|'static-source'|'react-source';
 }) {
   const route = '/api/projects/'+encodeURIComponent(project)+'/live';
@@ -216,6 +217,16 @@ export function LiveComparison({ project, left, right, names, start, current, on
       for (const side of sides) if (!next[side].image) next[side].image=previous[side].image;
       latest.current=next;
       const outcome=next.outcome;
+      if (operation.action==='scroll' && operation.x !== undefined && outcome?.scrollRemainder && screens.current[side]?.matches(':hover')) {
+        let remaining=outcome.scrollRemainder;
+        for (let el=screens.current[side]?.parentElement; el && el!==document.scrollingElement && Math.abs(remaining)>1; el=el.parentElement) {
+          if (!/^(auto|scroll|overlay)$/.test(getComputedStyle(el).overflowY)) continue;
+          const before=el.scrollTop;
+          el.scrollBy({top:remaining,behavior:'instant'});
+          remaining-=el.scrollTop-before;
+        }
+        if (Math.abs(remaining)>1) window.scrollBy({top:remaining,behavior:'instant'});
+      }
       if (operation.action!=='scroll') {
         setUncapturedLink(outcome?.uncapturedUrl && outcome.reason ? {url:outcome.uncapturedUrl,reason:outcome.reason} : undefined);
       }
@@ -356,12 +367,14 @@ export function LiveComparison({ project, left, right, names, start, current, on
 
   const located = useRef('');
   useEffect(() => {
-    if (!diagnosticsEnabled || !target?.selector || !diagnosticSession || target.path !== activePath || lock.current) return;
-    const key = JSON.stringify([diagnosticSession,diagnosticSide,target.id,target.path,target.selector]);
+    if (!target?.selector || !diagnosticSession || !activePath || lock.current) return;
+    const entryAlias = activePath === '/' && target.path === entryTargetPath && target.path === '/index.html';
+    if (target.path !== activePath && !entryAlias) return;
+    const key = JSON.stringify([diagnosticSession,diagnosticSide,target.id,activePath,target.selector]);
     if (located.current === key) return;
     located.current = key;
-    act(diagnosticSide,{action:'locate',path:target.path,selector:target.selector,selectors:target.selectors});
-  },[activePath,diagnosticSession,diagnosticSide,diagnosticsEnabled,settled,target]);
+    act(diagnosticSide,{action:'locate',path:activePath,selector:target.selector,selectors:target.selectors});
+  },[activePath,diagnosticSession,diagnosticSide,entryTargetPath,settled,target]);
 
   function commitReplayText(input:HTMLTextAreaElement,side:LiveSide) {
     const value=input.value;
@@ -394,32 +407,19 @@ export function LiveComparison({ project, left, right, names, start, current, on
     setTimeout(()=>URL.revokeObjectURL(url),1000);
   }
 
-  return <section aria-label={single ? "网页交互" : "双侧网页交互对比"} data-live-revision={session?.revision}>
-    <div className="live-toolbar panorama-bar">
+  const tools = <>
+    <div className="live-toolbar panorama-bar" hidden={diagnosticsEnabled && !versions && single && !leftSelector && !rightSelector && !onClose}>
       {versions}
       {!single && <label><input type="checkbox" checked={sync} onChange={event=>{
         scrollQueue.current=[];
         syncRef.current=event.target.checked;
         setSync(event.target.checked);
       }} />同步操作</label>}
-      {diagnosticsEnabled && <button type="button" className="secondary" disabled={busy||!session}
-        onClick={()=>act(diagnosticSide,{action:'back'})}>返回上一页</button>}
       {(leftSelector || rightSelector) && <button type="button" className="secondary" disabled={busy||!session}
         onClick={()=>act(single ? 'right' : 'left',{action:'refresh'})}>重新定位</button>}
-      <button type="button" className="secondary" aria-expanded={advanced} aria-controls="live-options" onClick={()=>setAdvanced(value=>!value)}>更多操作</button>
+      {!diagnosticsEnabled && <button type="button" className="secondary" aria-expanded={advanced} aria-controls="live-options" onClick={()=>setAdvanced(value=>!value)}>更多操作</button>}
       {onClose && <button type="button" className="secondary" onClick={onClose}>返回诊断工作台</button>}
     </div>
-    <span className="screen-reader-only" role="status">{task}</span>
-    {!session && task && <p aria-hidden="true" className="live-connection">{task}</p>}
-    {error && <div className="panorama-bar live-feedback"><p role="alert">{error}</p>
-      {onOpenUncapturedLink && uncapturedLink && uncapturedLink.reason===error &&
-        <button type="button" className="secondary" disabled={busy} onClick={()=>{
-          setError('');
-          setUncapturedLink(undefined);
-          onOpenUncapturedLink(uncapturedLink.url);
-        }}>在工作台检测链接</button>}
-      {(!session || /会话已|会话过期|过期画面|画面已过期/.test(error)) && <button type="button" className="secondary" disabled={busy} onClick={()=>setRestart(value=>value+1)}>{single ? '重新打开网页' : '重新打开对比'}</button>}
-      <button type="button" className="secondary" onClick={()=>setError('')}>关闭提示</button></div>}
     <div id="live-options" hidden={!advanced} className="live-options">
       <div className="panorama-bar">
         <button type="button" className="secondary" disabled={busy||!session} onClick={()=>act(single ? 'right' : 'left',{action:'refresh'})}>重新获取画面</button>
@@ -461,6 +461,20 @@ export function LiveComparison({ project, left, right, names, start, current, on
       })() : <p>两侧路由或可核对的操作序列不同，暂不判定新增或消失的问题。</p>)}
       </div>}
     </details>}
+  </>;
+  return <section aria-label={single ? "网页交互" : "双侧网页交互对比"} data-live-revision={session?.revision}>
+    {proposalId ? toolsHost && createPortal(tools, toolsHost) : tools}
+    <span className="screen-reader-only" role="status">{task}</span>
+    {!session && task && <p aria-hidden="true" className="live-connection">{task}</p>}
+    {error && <div className="panorama-bar live-feedback"><p role="alert">{error}</p>
+      {onOpenUncapturedLink && uncapturedLink && uncapturedLink.reason===error &&
+        <button type="button" className="secondary" disabled={busy} onClick={()=>{
+          setError('');
+          setUncapturedLink(undefined);
+          onOpenUncapturedLink(uncapturedLink.url);
+        }}>在工作台检测链接</button>}
+      {(!session || /会话已|会话过期|过期画面|画面已过期/.test(error)) && <button type="button" className="secondary" disabled={busy} onClick={()=>setRestart(value=>value+1)}>{single ? '重新打开网页' : '重新打开对比'}</button>}
+      <button type="button" className="secondary" onClick={()=>setError('')}>关闭提示</button></div>}
     {session && <div className="panorama-pair live-pair" data-single={single}>
       {(single ? ['right'] as const : sides).map(side=>{
         const frame = session[side];
@@ -469,14 +483,15 @@ export function LiveComparison({ project, left, right, names, start, current, on
         const directInput = single && session.modes[side]==='replay';
         const boxes = frame.location?.highlights ?? (frame.location?.bounds ? [frame.location.bounds] : []);
         return <section key={side} aria-label={single ? '当前网页' : label[side]+'网页交互对比'}>
-          <h3>{single ? names[side] : label[side]+' · '+names[side]}</h3>
-          {diagnosticsEnabled && <p className="workspace-live-path" title={frame.path}>
+          {single && diagnosticsEnabled ? <div className="workspace-state-heading"><h3>{names[side]}</h3><span title={frame.path}>{frame.title || frame.path}</span></div>
+            : <h3>{single ? names[side] : label[side]+' · '+names[side]}</h3>}
+          {diagnosticsEnabled && !single && <p className="workspace-live-path" title={frame.path}>
             {!single && <button type="button" className="secondary" aria-pressed={diagnosticSide===side}
               disabled={Boolean(proposalId) && side==='right'} onClick={()=>setDiagnosticSide(side)}>
               {label[side]}问题
             </button>}<span>{frame.title || frame.path}</span>
           </p>}
-          {frame.location && <p className="muted" role="status">{{
+          {frame.location && <p className={proposalId ? "screen-reader-only" : "muted"} role="status">{{
             located:'已标出问题位置',missing:'此版本没有唯一的匹配元素',hidden:'已找到节点，此元素没有可高亮的画面区域',outside:'问题位置在当前画面之外',
           }[frame.location.status]}</p>}
           <div className="live-screen-wrap">

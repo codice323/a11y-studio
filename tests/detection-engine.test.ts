@@ -5,7 +5,7 @@ import path from 'node:path';
 import { createRequire } from 'node:module';
 import { test } from 'node:test';
 import type { AxeResults, Result } from 'axe-core';
-import { classifyAxeResults, WCAG_TAGS } from '../apps/api/scan-rules';
+import { classifyAxeResults, visionFindings, WCAG_TAGS } from '../apps/api/scan-rules';
 import { keyboardFindings } from '../apps/api/scan-behavior';
 
 test('运行时 axe 规则清单与分类保留人工复核节点', () => {
@@ -22,6 +22,17 @@ test('运行时 axe 规则清单与分类保留人工复核节点', () => {
     violations: [violation], incomplete: [uncertain], passes: 0,
     bestPractices: { violations: [advice], incomplete: [] },
   });
+});
+
+test('视障工作台仅纳入有定位和检测证据的相关违规', () => {
+  const violation = (id:string, criterion:string, message:string) => ({
+    id,tags:['wcag2a',criterion],nodes:[{target:['#element'],any:[{message}],all:[],none:[]}],
+  }) as Result;
+  const image=violation('image-alt','wcag111','元素缺少图像替代文本');
+  const name=violation('button-name','wcag412','按钮无可访问名称');
+  const touch=violation('target-size','wcag258','触控区域过小');
+  const unproven=violation('color-contrast','wcag143','');
+  assert.deepEqual(visionFindings([image,name,touch,unproven]),[image,name]);
 });
 
 test('键盘探查将跳过项、顺序与状态不一致标为待复核', () => {

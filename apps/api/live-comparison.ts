@@ -243,7 +243,7 @@ async function inspect(session:Session, outcome?:LiveComparison['outcome'], scro
       focus:Boolean(left && left.frame.focus !== right.frame.focus),visual:Boolean(left && left.frame.image !== right.frame.image)}};
 }
 
-type ScrollPosition = {container:string; position:number; changed:boolean};
+type ScrollPosition = {container:string; position:number; changed:boolean; remainder:number};
 type ScrollInput = {delta:number;x?:number;y?:number;peer?:ScrollPosition};
 
 async function scrollPage(page:Page, input:ScrollInput):Promise<ScrollPosition> {
@@ -284,7 +284,7 @@ async function scrollPage(page:Page, input:ScrollInput):Promise<ScrollPosition> 
     }
     const before=target.scrollTop;
     target.scrollTo({top:peer?.position ?? before+delta,behavior:'instant'});
-    return {container:target===root?'document':helpers.selector(target),position:target.scrollTop,changed:target.scrollTop!==before};
+    return {container:target===root?'document':helpers.selector(target),position:target.scrollTop,changed:target.scrollTop!==before, remainder:target===root && !peer ? delta-(target.scrollTop-before) : 0};
   },input);
 }
 
@@ -305,6 +305,7 @@ async function operateScroll(session:Session, side:LiveSide, sync:boolean, input
   };
   const actual = await scrollPage(session.pages[side]!.page,input);
   record(side,actual);
+  outcome.scrollRemainder=actual.remainder;
   outcome.executions![side]={status:'executed'};
   if (sync) {
     try {

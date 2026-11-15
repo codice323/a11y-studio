@@ -6,7 +6,7 @@ import { z } from 'zod';
 import type { Control, ExplorerGraph, PanoramaCapture, PanoramaComparison, PanoramaIssue, PanoramaSide, PanoramaStep } from '../../packages/shared/panorama';
 import { createInteractionAudit, readInteractionState } from './interaction-audit';
 import { scanBehavior } from './scan-behavior';
-import { scanRules } from './scan-rules';
+import { visionFindings, scanRules } from './scan-rules';
 import { inspectPageElement, withRepairPage, type ResourceFailure } from './scan';
 import { originAttribute, sourceSelector, type buildReactProject } from './project-build';
 import { DATA, db, hash, id, project, snapshot, snapshotDir, walk } from './storage';
@@ -404,7 +404,7 @@ async function capture(site: Site, recipe: Recipe, signal: AbortSignal, screensh
         stylesheets:stylesheets.length,loadedStylesheets:stylesheets.filter(link => link.sheet).length};
     });
     const issues: PanoramaIssue[] = [];
-    for (const violation of scanned.violations) for (const node of violation.nodes) {
+    for (const violation of visionFindings(scanned.violations)) for (const node of violation.nodes) {
       const selector = typeof node.target[0] === 'string' ? node.target[0] : '';
       const target = selector && !node.target.some(item => typeof item !== 'string') ? page.locator(selector) : null;
       let bounds = null;
@@ -475,6 +475,33 @@ function save(projectId: string, version: string, recipe: Recipe, evidence: Capt
       ON CONFLICT(project_id,snapshot_id,recipe_id) DO UPDATE SET id=excluded.id,data=excluded.data`)
       .run(evidence.capture.id, projectId, version, recipe.id, JSON.stringify(evidence));
   })();
+}
+
+// Refresh known issue-bearing states without discovering new pages or actions.
+export async function refreshRepairStates(projectId:string, previous:string, version:string, signal:AbortSignal) {
+  const selected=site(projectId,version);
+  const known=recipes(projectId).filter(recipe=>{
+    const evidence=cached(projectId,previous,recipe.id)?.capture;
+    return Boolean(evidence && (evidence.issues.length || evidence.scan?.interaction?.findings.some(item=>item.status==='confirmed')));
+  });
+  for (const recipe of known) {
+    if (signal.aborted || project(projectId).current_snapshot!==version) return;
+    if (cached(projectId,version,recipe.id)) continue;
+    const shot=id();
+    try {
+      const bounded=AbortSignal.any([signal,AbortSignal.timeout(25000)]);
+      const evidence=await capture(selected,recipe,bounded,shot);
+      bounded.throwIfAborted();
+      if (project(projectId).current_snapshot!==version) {
+        for (const kind of ['viewport','full']) fs.rmSync(screenshotPath(shot,kind),{force:true});
+        return;
+      }
+      save(projectId,version,recipe,evidence);
+      recordAttempt(projectId,version,recipe.steps.length ? recipe.id : documentPath(recipe.start),evidence.capture.path,'completed');
+    } catch {
+      for (const kind of ['viewport','full']) fs.rmSync(screenshotPath(shot,kind),{force:true});
+    }
+  }
 }
 
 export const panoramaInput = z.object({
@@ -704,19 +731,27 @@ export async function previewPanorama(projectId: string, version: string, stateI
 
 type RepairTarget = {stateId: string; issueId: string; target: string; value: string};
 
+class PanoramaRegression extends Error {}
+
 export async function verifyPanorama(projectId: string, snapshotId: string, candidateDir: string, signal?: AbortSignal, repair?: RepairTarget, candidateSnapshot?: string) {
   const graph = latestExploration(projectId,snapshotId);
   const explorerIds = new Set(graph?.nodes.filter(node=>node.captureId).map(node=>node.id));
   // A recipe selected from an earlier run still needs to be verified if it is the repair target.
   const tracked = recipes(projectId).filter(recipe=>!recipe.explorer || explorerIds.has(recipe.id) ||
     repair?.stateId === recipe.id || (!graph && cached(projectId,snapshotId,recipe.id)));
+  if (repair && !tracked.some(recipe => recipe.id === repair.stateId)) throw new Error('找不到目标问题的交互状态。');
   if (!tracked.length) return null;
+  tracked.sort((a,b) => Number(b.id === repair?.stateId) - Number(a.id === repair?.stateId));
+  const pending: string[] = [];
   const beforeSite = site(projectId, snapshotId);
   const repairedSource = repair && cached(projectId,snapshotId,repair.stateId)?.capture.issues.find(issue=>issue.id === repair.issueId)?.source;
   const bounded = AbortSignal.any([...(signal ? [signal] : []), AbortSignal.timeout(110000)]);
   const verified: {recipe:Recipe; evidence:Captured}[] = [];
   const shots: string[] = [];
   for (const recipe of tracked) {
+    const steps = recipe.steps.map(step => step.action + ('target' in step ? ' ' + safeText(step.target.name) : '')).join(' → ');
+    const location = `${recipe.path} · ${recipe.label}${steps ? '（'+steps+'）' : ''}`;
+    const needsReview = (message: string) => pending.push(`${location}：${message}`);
     try {
       const previous = cached(projectId, snapshotId, recipe.id)?.capture;
       const before = previous?.scan?.interaction ? previous : (await capture(beforeSite, recipe, bounded)).capture;
@@ -735,31 +770,35 @@ export async function verifyPanorama(projectId: string, snapshotId: string, cand
         .map(item => JSON.stringify([item.step,item.ruleId,item.selector])));
       const newBehavior = after.scan?.interaction?.findings.find(item => item.status === 'confirmed' &&
         !existingBehavior.has(JSON.stringify([item.step,item.ruleId,item.selector])));
-      if (newBehavior) throw new Error('步骤 ' + newBehavior.step + ' · ' + newBehavior.explanation);
+      if (newBehavior) throw new PanoramaRegression('步骤 ' + newBehavior.step + ' · ' + newBehavior.explanation);
       const missing = after.resourceFailures?.find(item => !before.resourceFailures?.some(previous => previous.path === item.path && previous.type === item.type));
-      if (missing) throw new Error('新增资源加载失败 · ' + missing.path);
+      if (missing && ['document','script','stylesheet'].includes(missing.type)) throw new PanoramaRegression('关键资源加载失败 · ' + missing.path);
+      if (missing) needsReview('新增资源加载失败 · ' + missing.path);
       const violations = new Set(before.issues.map(issue => issue.id));
       const added = after.issues.find(issue => !violations.has(issue.id));
-      if (added) throw new Error('新增 ' + added.ruleId + ' · ' + added.selector);
+      if (added) throw new PanoramaRegression('新增 ' + added.ruleId + ' · ' + added.selector);
       if (before.keyboard.status !== 'completed' || after.keyboard.status !== 'completed') {
-        throw new Error('键盘证据不完整，需人工验证。');
+        needsReview('键盘证据不完整，需人工验证。');
       }
       const keyboard = new Set(before.keyboard.findings.map(item => item.ruleId + '|' + item.selector));
       if (JSON.stringify(before.keyboard.tabSequence) !== JSON.stringify(after.keyboard.tabSequence) ||
         after.keyboard.findings.some(item => !keyboard.has(item.ruleId + '|' + item.selector))) {
-        throw new Error('Tab 顺序变化或新增键盘待复核项。');
+        needsReview('Tab 顺序变化或新增键盘待复核项。');
       }
       const otherPage = recipe.path.split('#')[0] !== '/' + beforeSite.entry.split('/').map(encodeURIComponent).join('/') ||
         recipe.path.includes('#');
       if ((after.width > 900 && after.width > before.width) ||
         (otherPage && (before.layout !== after.layout || before.style !== after.style || (!scopedRepair && before.ax !== after.ax)))) {
-        throw new Error('其他页面或路由的计算样式、布局或可访问语义变化，需人工验证。');
+        needsReview('其他页面或路由的计算样式、布局或可访问语义变化，需人工验证。');
       }
       verified.push({recipe,evidence:replayed});
     } catch (error) {
+      if (!signal?.aborted && recipe.id !== repair?.stateId && !(error instanceof PanoramaRegression)) {
+        needsReview(`未完成重放：${(error as Error).message}`);
+        continue;
+      }
       for (const shot of shots) for (const kind of ['viewport','full']) fs.rmSync(screenshotPath(shot,kind),{force:true});
-      const steps = recipe.steps.map(step => step.action + ('target' in step ? ' ' + safeText(step.target.name) : '')).join(' → ');
-      throw new Error(`全景回归：${recipe.path} · ${recipe.label}${steps ? '（'+steps+'）' : ''}。 ${(error as Error).message}`);
+      throw new Error(`交互复测：${location}。 ${(error as Error).message}`);
     }
   }
   if (candidateSnapshot) db.transaction(() => {
@@ -768,7 +807,7 @@ export async function verifyPanorama(projectId: string, snapshotId: string, cand
       recordAttempt(projectId,candidateSnapshot,recipe.steps.length ? recipe.id : documentPath(recipe.start),evidence.capture.path,'completed');
     }
   })();
-  return {name: '已采集状态复测', detail: `${tracked.length} 个已采集状态完成操作重放、axe 和键盘检查。`};
+  return {name: '已采集状态复测', detail: `${verified.length}/${tracked.length} 个状态完成重放和页面扫描。`, pending};
 }
 
 function latestExploration(projectId:string, version:string): ExplorerGraph | undefined {

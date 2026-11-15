@@ -96,9 +96,15 @@ test('图片建议使用浏览器实际像素，区分信息图、装饰图和�
     const suggested = await createProposal(project.id, issue.id, {source:'manual',value:result.contentAlt,imagePurpose:'informative'});
     assert.ok('patch' in suggested);
     assert.match(suggested.after,/alt="蓝柱高于红柱"/);
-    await assert.rejects(applyProposal(suggested.id), /人工确认/);
-    const verified = await applyProposal(suggested.id,undefined,true);
-    assert.equal(verified.status,'passed');
+    const verified = await applyProposal(suggested.id);
+    assert.equal(verified.status,'applied');
+    assert.equal(verified.audit,null);
+    const {projectState}=await import('../apps/api/version-state');
+    assert.equal(projectState(project.id).current,null);
+    assert.equal(projectState(project.id).summary.resolved,0);
+    const manualScan=await runAudit(project.id,verified.toSnapshot);
+    assert.ok(!manualScan.issues.some(item=>item.id===issue.id));
+    assert.equal(projectState(project.id).summary.resolved,1);
     assert.deepEqual(verified.imageReview,{purpose:'informative',confirmed:true});
     rollback(project.id, project.currentSnapshot);
 
@@ -117,7 +123,7 @@ test('图片建议使用浏览器实际像素，区分信息图、装饰图和�
     assert.ok('patch' in empty);
     assert.equal(empty.patch.value,'');
     assert.match(empty.after,/alt=""/);
-    assert.equal((await applyProposal(empty.id,undefined,true)).status,'passed');
+    assert.equal((await applyProposal(empty.id)).status,'applied');
 
     const linked = await createProject({captured:{name:'链接图片',files:new Map([
       ['index.html',Buffer.from(decorativeHtml.replace('<img id="target" src="divider.png">','<a href="#topic"><img id="target" src="divider.png"></a>'))],

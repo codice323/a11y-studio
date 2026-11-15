@@ -798,3 +798,20 @@ footer { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 8p
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
+
+/* Keep the view switcher above the independently scrolling preview. */
+.preview .panorama { display: contents; }
+.preview .comparison-view-tabs { position: sticky; top: 0; z-index: 4; margin-block: 0 5px; }
+.preview .live-toolbar:empty, .preview .live-toolbar[hidden] { display: none; }
+.preview .live-pair { margin-top: 4px; }
+.preview .workspace-live-path { margin-block: 2px 4px; }
+
+.repair-copy { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 4px 8px; margin-block: 8px; font-size: 13px; }
+.repair-copy dt { font-weight: 650; }
+.repair-copy dd { margin: 0; overflow-wrap: anywhere; }
+
+.repair-assistant-body { padding-block: 8px; }
+.repair-assistant-body :is(.detail-block, .input-label, .image-purpose, .repair-color, .repair-actions) { margin-top: 6px; }
+.repair-assistant-body #repair-preview-hint { margin-block: 4px 0; }
+
+.repair-status-row { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 16px; }

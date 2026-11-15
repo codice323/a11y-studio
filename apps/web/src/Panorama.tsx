@@ -1,3 +1,4 @@
+import { createPortal } from 'react-dom';
 import { workspaceFetch as fetch } from './workspace-fetch';
 import { useEffect, useRef, useState, type ReactNode } from 'react';
 import type { PanoramaCapture, PanoramaComparison, PanoramaIssue, PanoramaRecipe, PanoramaSide, PanoramaStep } from '../../../packages/shared/panorama';
@@ -26,9 +27,9 @@ export type PageInspection = {
 };
 export type PanoramaJump = {stateId: string; key: string};
 
-export function Panorama({state, onInspection, disabled, jump, pair: versions, view, onScope, targetId, viewTools, pageRequest, visiblePagePath, onChoosePage, autoScanning}: {
+export function Panorama({state, onInspection, disabled, jump, pair: versions, view, onScope, targetId, viewTools, pageRequest, visiblePagePath, pagePickerHost, onChoosePage, autoScanning}: {
   autoScanning?:boolean; state: State; onInspection: (value: PageInspection) => void; disabled: boolean; jump?: PanoramaJump;
-  pair: VersionPair; view: EvidenceView; onScope:(scoped:boolean)=>void; targetId?:string; viewTools?:(options:ReactNode)=>ReactNode; pageRequest?:{path:string}; visiblePagePath?:string; onChoosePage?:(path:string)=>void;
+  pair: VersionPair; view: EvidenceView; onScope:(scoped:boolean)=>void; targetId?:string; viewTools?:(options:ReactNode)=>ReactNode; pageRequest?:{path:string}; visiblePagePath?:string; pagePickerHost?:HTMLDivElement|null; onChoosePage?:(path:string)=>void;
 }) {
   const {project} = state;
   const {left, right} = versions;
@@ -41,10 +42,6 @@ export function Panorama({state, onInspection, disabled, jump, pair: versions, v
   const [listError, setListError] = useState('');
   const [captureError, setCaptureError] = useState('');
   const [attempt, setAttempt] = useState(0);
-  const [from, setFrom] = useState<'left' | 'right'>('left');
-  const [controlIndex, setControlIndex] = useState('');
-  const [action, setAction] = useState<'click' | 'validate' | 'fill'>('click');
-  const [scroll, setScroll] = useState(0);
   const [batchFailures, setBatchFailures] = useState<{page:string;reason:string}[]>([]);
   const routeQuery = route + '?' + new URLSearchParams({left, right});
   const inventory = loaded?.query === routeQuery ? loaded.inventory : undefined;
@@ -131,11 +128,7 @@ export function Panorama({state, onInspection, disabled, jump, pair: versions, v
   useEffect(() => onScope(scoped), [onScope, scoped]);
   const pathNames = new Map(inventory?.recipes.filter(recipe => recipe.title).map(recipe => [recipe.path,recipe.title]));
   const states = inventory?.recipes.filter(recipe => recipe.path === page) ?? [];
-  const side = result?.[from];
-  const controls = side?.status === 'captured' ? side.capture.controls : [];
-  const selected = controls[Number(controlIndex)];
   const busy = Boolean(progress) || disabled;
-  const canAct = Boolean(stateId && inventory?.interactive && side?.status === 'captured' && (active?.steps.length ?? 0) < 6);
 
   function selectRequest(next: Request) {
     setCompared(undefined);
@@ -146,7 +139,6 @@ export function Panorama({state, onInspection, disabled, jump, pair: versions, v
   function choosePage(path: string) {
     const file = inventory?.pages.find(item => pagePath(item) === path);
     const saved = inventory?.recipes.find(item => item.path === path);
-    setControlIndex('');
     if (file) selectRequest({start: file});
     else if (saved) selectRequest({stateId: saved.id});
   }
@@ -157,12 +149,6 @@ export function Panorama({state, onInspection, disabled, jump, pair: versions, v
     lastPageRequest.current = pageRequest;
     if (paths.includes(pageRequest.path) && pageRequest.path !== page) choosePage(pageRequest.path);
   }, [pageRequest, inventory, busy, page]);
-
-  function perform(step: PanoramaStep) {
-    if (!stateId || !canAct) return;
-    setControlIndex('');
-    selectRequest({stateId, step, from});
-  }
 
   const pair = result?.left.status === 'captured' && result.right.status === 'captured'
     ? [result.left.capture, result.right.capture] as const : null;
@@ -232,12 +218,11 @@ export function Panorama({state, onInspection, disabled, jump, pair: versions, v
       {comparison && <p>{comparison}</p>}
       {project.mode === 'snapshot' && <p>静态快照 · 动态交互状态未覆盖</p>}
     </div>)}
-    <div className="shot-options page-comparison-toolbar" role="group" aria-label="选择页面">
+    {pagePickerHost && createPortal(
         <select aria-label="页面" value={view==='interactive' && visiblePagePath && paths.includes(visiblePagePath) ? visiblePagePath : page}
           disabled={busy} onChange={event => {choosePage(event.target.value);onChoosePage?.(event.target.value);}}>
           {paths.map(path => <option key={path} value={path}>{pathNames.get(path) ? pathNames.get(path) + ' · ' : ''}{path}</option>)}
-        </select>
-    </div>
+        </select>, pagePickerHost)}
     {batchFailures.length > 0 && <details><summary>未完成 {batchFailures.length} 个页面检查</summary>
       <ul>{batchFailures.map(({page,reason},index)=><li key={index}>{page} · {reason}</li>)}</ul>
     </details>}
@@ -257,33 +242,5 @@ export function Panorama({state, onInspection, disabled, jump, pair: versions, v
           <section><h3>当前状态</h3>{renderSide(result?.right)}</section>
         </div>}
         {pair && <p className="screen-reader-only" role="status">左右已匹配同一页面和状态。</p>}
-        {inventory?.interactive && <details className="panorama-steps"><summary>记录安全操作</summary><fieldset className="panorama-actions" aria-label="记录安全操作" disabled={busy || !canAct}>
-          <legend>记录安全操作</legend>
-          {side?.status === 'captured' && Boolean(side.capture.navigation?.length) && <details>
-            <summary>站内导航</summary>
-            <div className="panorama-bar">{side.capture.navigation!.map((link,index) => <button
-              key={index} type="button" className="secondary" title={link.path}
-              onClick={() => perform({action:'click', target:{role:'link',name:link.name}, navigationPath:link.path})}>{link.name}</button>)}</div>
-          </details>}
-          <div className="panorama-bar">
-            <label>操作侧<select aria-label="操作侧" value={from} onChange={event => {setFrom(event.target.value === 'left' ? 'left' : 'right'); setControlIndex('');}}>
-              <option value="left">左侧版本</option><option value="right">右侧版本</option>
-            </select></label>
-            <label>控件<select aria-label="控件" value={controlIndex} onChange={event => setControlIndex(event.target.value)}>
-              <option value="">选择当前状态的可访问控件</option>
-              {controls.map((item, index) => <option key={index} value={index}>{item.name} ({item.role})</option>)}
-            </select></label>
-            <label>操作<select aria-label="操作" value={action} onChange={event => setAction(event.target.value as typeof action)}>
-              {(['click', 'fill', 'validate'] as const).map(key => <option key={key} value={key}>{actions[key]}</option>)}
-            </select></label>
-            <button type="button" className="button dark" disabled={!controlIndex || !selected} onClick={() => perform({action, target: selected})}>执行并重放</button>
-          </div>
-          <div className="panorama-bar">
-            {(['tab', 'shift-tab', 'escape'] as const).map(key =>
-              <button type="button" className="secondary" key={key} onClick={() => perform({action: key})}>{actions[key]}</button>)}
-            <label>滚动到像素<input type="number" min={0} max={6000} value={scroll} onChange={event => setScroll(Number(event.target.value))} /></label>
-            <button type="button" className="secondary" onClick={() => perform({action: 'scroll', y: scroll})}>对齐浏览器滚动</button>
-          </div>
-        </fieldset></details>}
   </section>;
 }

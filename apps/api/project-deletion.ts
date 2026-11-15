@@ -21,7 +21,7 @@ export function eraseProjectRecords(projectId:string, ownerId:string) {
   ];
   db.prepare('INSERT INTO project_file_cleanup (project_id,files) VALUES (?,?)').run(projectId,JSON.stringify(files));
   for (const table of ['live_state_audits','panorama_attempts','panorama_captures','panorama_recipes',
-    'jobs','verifications','proposals','audits','snapshots','legacy_project_claims']) {
+    'issue_review_events','jobs','verifications','proposals','audits','snapshots','legacy_project_claims']) {
     db.prepare('DELETE FROM '+table+' WHERE project_id=?').run(projectId);
   }
   db.prepare('DELETE FROM projects WHERE id=? AND owner_user_id=?').run(projectId,ownerId);

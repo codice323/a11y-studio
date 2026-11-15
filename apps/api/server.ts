@@ -4,7 +4,7 @@ import express from 'express';import multer from 'multer';import fs from 'node:f
 import {db,id,now,ROOT,DATA,project,proposal,audit,snapshotDir,walk,safePath} from './storage';import {createProject} from './import';import {captureUrlSnapshot} from './url-snapshot';import {runAudit,inspectAuditElement} from './scan';import {createProposal,createSourceProposal,createPanoramaProposal,previewProposal,withProposalCandidate,previewIssueImage,applyProposal,rejectProposal,rollback,getKnowledge} from './repair';
 import { projectState as state, renameSnapshot } from './version-state';
 import { compareSnapshots } from './version-compare';
-import { collectPanorama, collectSite, exploreSite, panoramaInput, panoramaInventory, panoramaScreenshot, siteReport } from './panorama';
+import { collectPanorama, collectSite, exploreSite, panoramaInput, panoramaInventory, panoramaScreenshot, siteReport, refreshRepairStates } from './panorama';
 import { imageVisionConfigured } from './ai/vision';
 import { missingImageEvidence } from './ai/visual-context';
 import { decideAiFinding, requestAiAudit } from './audit-ai';
@@ -240,6 +240,36 @@ app.get('/api/proposals/:id/interactive-candidate',guestRead,async(req,res,next)
  } catch(error) { next(error); }
 });
 app.get('/api/projects/:id',(req,res,next)=>{try{res.json(state(req.params.id));}catch(e){next(e)}});
+function reviewScope(projectId:string, version:unknown, page:unknown) {
+ if (typeof version!=='string' || typeof page!=='string' || !page.startsWith('/') || page.startsWith('//') ||
+     page.length>2048 || !db.prepare('SELECT 1 FROM snapshots WHERE id=? AND project_id=?').get(version,projectId)) return null;
+ return {version,page};
+}
+const reviewEvents = db.prepare(`WITH RECURSIVE ancestry(id,parent_id,depth) AS (
+ SELECT id,parent_id,0 FROM snapshots WHERE project_id=? AND id=?
+ UNION ALL SELECT s.id,s.parent_id,a.depth+1 FROM snapshots s JOIN ancestry a ON s.id=a.parent_id
+ WHERE s.project_id=? AND a.depth<100
+ ) SELECT e.finding_id AS id,e.decision AS status,e.created_at AS at
+ FROM issue_review_events e JOIN ancestry a ON e.snapshot_id=a.id
+ WHERE e.project_id=? AND e.page=?
+ ORDER BY a.depth DESC,e.rowid`);
+app.get('/api/projects/:id/issue-reviews',(req,res)=>{
+ const scope=reviewScope(req.params.id,req.query.version,req.query.page);
+ if (!scope) return denyResource(res);
+ res.set('Cache-Control','private, no-store').json(Object.fromEntries(
+  (reviewEvents.all(req.params.id,scope.version,req.params.id,req.params.id,scope.page) as {id:string;status:string;at:string}[])
+   .map(({id,...decision})=>[id,decision])));
+});
+app.post('/api/projects/:id/issue-reviews',(req,res)=>{
+ const scope=reviewScope(req.params.id,req.body?.version,req.body?.page);
+ if (!scope) return denyResource(res);
+ const finding=req.body?.id, decision=req.body?.status;
+ if(typeof finding!=='string'||!finding.startsWith('["')||finding.length>4096||!['confirmed','dismissed'].includes(decision))
+  return res.status(400).json({error:'无法保存此审核决定。'});
+ const at=now();
+ db.prepare('INSERT INTO issue_review_events VALUES (?,?,?,?,?,?)').run(req.params.id,scope.version,scope.page,finding,decision,at);
+ res.json({status:decision,at});
+});
 app.patch('/api/projects/:id',(req,res)=>{
  const name=typeof req.body?.name==='string'?req.body.name.trim():'';
  if (!name || [...name].length>120 || /[\u0000-\u001f\u007f]/.test(name)) return res.status(400).json({error:'项目名称须为 1–120 个字符。'});
@@ -391,7 +421,36 @@ app.get('/api/proposals/:id/preview',guestRead,async(req,res,next)=>{
  try{res.set('Cache-Control','no-store').json(await projectWork(res.locals.resourceProjectId,res,()=>previewProposal(req.params.id,controller.signal)));}
  catch(error){if(!controller.signal.aborted)next(error);}
 });
-app.post('/api/proposals/:id/apply',(req,res,next)=>{try{proposal(req.params.id);res.status(202).json(job('verification',res.locals.resourceProjectId,signal=>applyProposal(req.params.id,signal,req.body?.semanticReviewed===true,req.body?.sourceReviewed===true)));}catch(e){next(e)}});
+app.post('/api/proposals/:id/apply',(req,res,next)=>{
+ try {
+  const id=req.params.id;
+  proposal(id);
+  const projectId=res.locals.resourceProjectId;
+  res.status(202).json(job('verification',projectId,async signal=>{
+   const result=await applyProposal(id,signal);
+   if(result.status==='applied') {
+    try {
+     const ticket=job('diagnostics',projectId,async(syncSignal,progress)=>{
+      while(activeDiagnostics>=1) await delay(150,undefined,{signal:syncSignal});
+      syncSignal.throwIfAborted();
+      if(project(projectId).current_snapshot!==result.toSnapshot) return {snapshotId:result.toSnapshot};
+      activeDiagnostics++;
+      try {
+       progress('',{snapshotId:result.toSnapshot});
+       await runAudit(projectId,result.toSnapshot,syncSignal);
+       await refreshRepairStates(projectId,result.fromSnapshot,result.toSnapshot,syncSignal);
+       return {snapshotId:result.toSnapshot};
+      } finally { activeDiagnostics--; }
+     });
+     db.prepare('UPDATE jobs SET result=? WHERE id=?').run(JSON.stringify({snapshotId:result.toSnapshot}),ticket.id);
+    } catch(error) {
+     console.error('无法安排补丁后的证据更新', (error as Error).message);
+    }
+   }
+   return result;
+  }));
+ } catch(error){next(error);}
+});
 app.post('/api/proposals/:id/reject',(req,res,next)=>{try{res.json(rejectProposal(req.params.id));}catch(e){next(e)}});
 app.patch('/api/projects/:id/snapshots/:snapshotId',(req,res,next)=>{
  try{res.json(renameSnapshot(req.params.id,req.params.snapshotId,req.body?.name));}catch(e){next(e);}
@@ -406,10 +465,32 @@ app.get('/api/projects/:id/diagnostics',(req,res,next)=>{
  try {
   const snapshotId=project(req.params.id).current_snapshot;
   const report=siteReport(req.params.id,snapshotId);
+  const states=new Map(report.states.map(item=>[item.stateId,item]));
+  const visited=new Set([snapshotId]);
+  const addressed=new Map<string,Set<string>>();
+  let child=snapshotId;
+  for(;;) {
+   const repair=db.prepare("SELECT data FROM verifications WHERE project_id=? AND status='applied' AND json_extract(data,'$.toSnapshot')=? ORDER BY rowid DESC LIMIT 1")
+    .get(req.params.id,child) as {data:string}|undefined;
+   if(!repair)break;
+   const applied=JSON.parse(repair.data) as {fromSnapshot:string;panoramaState?:string;patch?:{issueId:string}};
+   const previous=applied.fromSnapshot;
+   if(applied.panoramaState && applied.patch) {
+    const ids=addressed.get(applied.panoramaState) ?? new Set<string>();
+    ids.add(applied.patch.issueId);
+    addressed.set(applied.panoramaState,ids);
+   }
+   if(visited.has(previous))break;
+   visited.add(previous);
+   for(const item of siteReport(req.params.id,previous).states) {
+    if(!states.has(item.stateId))states.set(item.stateId,{...item,issues:item.issues.filter(issue=>!addressed.get(item.stateId)?.has(issue.id))});
+   }
+   child=previous;
+  }
   const auditRow=db.prepare("SELECT id,status FROM audits WHERE project_id=? AND snapshot_id=? ORDER BY rowid DESC LIMIT 1").get(req.params.id,snapshotId);
   res.set('Cache-Control','no-store').json({snapshotId,audit:auditRow,job:diagnosticStatus(req.params.id,snapshotId),
    limited:Boolean(report.exploration && (report.exploration.stop==='budget'||report.exploration.stop==='timeout'||report.exploration.edges.some(edge=>edge.status==='failed'))),
-   states:report.states.filter(item=>!item.attempt || item.attempt.status==='completed').map(item=>({stateId:item.stateId,path:item.path,issues:item.issues,
+   states:[...states.values()].filter(item=>!item.attempt || item.attempt.status==='completed').map(item=>({stateId:item.stateId,path:item.path,issues:item.issues,
     findings:item.scan?.interaction?.findings.filter(finding=>finding.status==='confirmed') ?? []}))});
  } catch(error) {next(error);}
 });
@@ -438,4 +519,11 @@ app.get('/api/projects/:id/export',guestRead,(req,res,next)=>{try{const report=s
 app.use('/api',(_req,res)=>denyResource(res));
 app.use(express.static(path.join(ROOT,'dist'),{index:'index.html'}));
 app.use((error:any,_req:express.Request,res:express.Response,_next:express.NextFunction)=>{if (!(error instanceof WorkspaceConflict)) console.error(error.message);if(!res.headersSent)res.status(error instanceof WorkspaceConflict ? error.status : 400).json({error:error.code==='LIMIT_FILE_SIZE'?'上传文件超过 8 MB 限制。':error.message||'处理失败。'});});
-app.listen(port,'127.0.0.1',()=>console.log(`A11y Studio: http://127.0.0.1:${port}`));
+app.listen(port,'127.0.0.1',error=>{
+ if(error){
+  console.error(`A11y Studio 启动失败：${error.message}`);
+  process.exitCode=1;
+  return;
+ }
+ console.log(`A11y Studio: http://127.0.0.1:${port}`);
+});

@@ -39,8 +39,8 @@ export function compareSnapshots(projectId: string, leftId: string, rightId: str
   const right = byId.get(rightId);
   if (!left || !right) throw new Error('请选择当前项目中的两个有效版本。');
 
-  const verifiedByTarget = new Map(projectVerifications(projectId)
-    .filter(item => item.status === 'passed' && item.fromSnapshot === byId.get(item.toSnapshot)?.parent_id)
+  const appliedByTarget = new Map(projectVerifications(projectId)
+    .filter(item => item.status !== 'failed' && item.fromSnapshot === byId.get(item.toSnapshot)?.parent_id)
     .map(item => [item.toSnapshot, item]));
   function side(id: string) {
     const scan = latestSnapshotAudit(projectId, id);
@@ -52,7 +52,7 @@ export function compareSnapshots(projectId: string, leftId: string, rightId: str
     if (!issue && selector) {
       for (let item = byId.get(id); item?.parent_id && !visited.has(item.id); item = byId.get(item.parent_id)) {
         visited.add(item.id);
-        const repair = verifiedByTarget.get(item.id);
+        const repair = appliedByTarget.get(item.id);
         if (repair?.sourceTarget && (repair.patch?.issueId === issueId || repair.patch?.selector === selector)) {
           target = repair.sourceTarget;
           break;

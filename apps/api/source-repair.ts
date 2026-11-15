@@ -12,7 +12,7 @@ import { z } from 'zod';
 import type { Page } from 'playwright-core';
 import type { Issue } from '../../packages/shared/types';
 import { sourceRepairKinds, type SourceChange } from '../../packages/shared/source-repair';
-import { auditCandidate, runAudit, withRepairPage, measurePageContrast } from './scan';
+import { runAudit, withRepairPage, measurePageContrast } from './scan';
 import { safePath, treeHash, walk } from './storage';
 import { runRepairAgent, runSourceAgent, type AgentTrace, type AgentUsage } from './repair-agent';
 import { suggestIconLabel } from './ai/visual-repair';
@@ -89,7 +89,6 @@ export function compileSourcePlan(ctx: Pick<SourceContext, 'dir' | 'entry' | 'is
   if (kind !== plan.kind) throw new Error('计划类型与所选问题不匹配。');
   if(react){
     if((plan.kind==='button'||plan.kind==='link')&&plan.mode!=='aria')throw new Error('React V1 仅支持添加可访问名称并保留现有组件内容。');
-    if(plan.kind==='aria')throw new Error('React ARIA 引用关系需人工处理。');
     return {plan,...compileReactRepair(ctx.dir,ctx.issue.source,plan,reason)};
   }
   if(plan.kind==='alt')throw new Error('快照图片使用现有替代文本修复路径。');
@@ -342,22 +341,24 @@ async function browserTarget(page: Page, selector: string, focus = false) {
 
 function equal(a: unknown, b: unknown) { return JSON.stringify(a) === JSON.stringify(b); }
 
-export async function checkSourceCandidate(ctx: SourceContext, candidate: Candidate, dir: string, scanned: Audit, signal?: AbortSignal) {
+export async function checkSourceCandidate(ctx: SourceContext, candidate: Candidate, dir: string, scanned: Audit, signal?: AbortSignal): Promise<{name:string;detail:string;pending?:string[]}[]> {
   const { baseline, issue } = ctx;
   const { plan } = candidate;
   const original = baseline.detection?.behavior;
   const updated = scanned.detection?.behavior;
-  if (!original || !updated || original.status !== 'completed' || updated.status !== 'completed') throw new Error('键盘扫描未完整完成，需要人工复核。');
+  const pending: string[] = [];
+  const keyboardComplete = original?.status === 'completed' && updated?.status === 'completed';
+  if (!keyboardComplete) pending.push('目标页面的附加键盘扫描未完整完成。');
   // Adding an ID to a field changes its reported selector; only normalize that one identity.
   const originalSelector = candidate.newId ? (await withRepairPage(ctx.dir, ctx.entry, signal, page => browserTarget(page, issue.selector))).behaviorSelector : issue.selector;
   const normalize = (selector: string) => candidate.newId && selector === candidate.target ? originalSelector : selector;
-  if (!equal(baseline.functionChecks, scanned.functionChecks) ||
-      !equal(original.tabSequence, updated.tabSequence.map(normalize))) throw new Error('控件行为或 Tab 顺序发生变化。');
+  if (!equal(baseline.functionChecks, scanned.functionChecks)) throw new Error('控件交互属性发生变化。');
+  if (keyboardComplete && !equal(original.tabSequence, updated.tabSequence.map(normalize))) pending.push('Tab 顺序变化待复核。');
   const priorIds = new Set(baseline.issues.map(item => item.id));
   if (scanned.issues.some(item => !priorIds.has(item.id))) throw new Error('复测发现新增无障碍违规：' + scanned.issues.filter(item => !priorIds.has(item.id)).map(item=>item.ruleId).join('、') + '。');
   if (scanned.issues.some(item => item.id === issue.id || (item.ruleId === issue.ruleId && (item.selector === candidate.target || Boolean(issue.source && item.source?.key===issue.source.key))))) throw new Error('目标违规仍存在。');
-  const priorBehavior = new Set(original.findings.map(item => item.ruleId + '|' + item.selector));
-  if (updated.findings.some(item => !priorBehavior.has(item.ruleId + '|' + normalize(item.selector)))) throw new Error('复测发现新增键盘行为疑点。');
+  const priorBehavior = new Set((original?.findings ?? []).map(item => item.ruleId + '|' + item.selector));
+  if (updated?.findings.some(item => !priorBehavior.has(item.ruleId + '|' + normalize(item.selector)))) pending.push('复测发现新增键盘行为疑点。');
   if (plan.kind === 'contrast' && !scanned.contrastCheck?.valid) throw new Error('颜色未通过独立对比度核验。');
   if (scanned.size.width > Math.max(900, baseline.size.width)) throw new Error('改动产生了新的横向溢出。');
   const dom = await withRepairPage(dir, ctx.entry, signal, page => browserTarget(page, candidate.target, plan.kind === 'focus'));
@@ -408,8 +409,8 @@ export async function checkSourceCandidate(ctx: SourceContext, candidate: Candid
   return [
     ...(scanned.build?[{name:'隔离工程构建',detail:`${scanned.build.tool} 编译通过 · ${scanned.build.milliseconds} ms`}]:[]),
     ...otherPages,
-    { name: '无障碍复测', detail: '目标通过，未新增自动检测违规或键盘行为疑点' },
-    { name: '键盘与基础回归', detail: `Tab 顺序及 ${scanned.functionChecks.length} 个控件的静态交互属性一致` },
+    { name: '无障碍复测', detail: '目标通过，未新增自动检测违规' },
+    { name: '键盘与基础回归', detail: `${scanned.functionChecks.length} 个控件的静态交互属性一致`, pending },
     { name: '浏览器语义', detail: `${dom.role || '未命名角色'}${dom.name ? ' · ' + dom.name : ''}` },
     { name: '视觉与布局', detail: `目标 ${dom.width} × ${dom.height}px、可见，未新增横向溢出${scanned.contrastCheck?.valid ? '，对比度 ' + scanned.contrastCheck.ratio.toFixed(2) + ':1' : ''}` },
   ];
@@ -459,6 +460,25 @@ export async function proposeSourceRepair(ctx: SourceContext, userIntent: unknow
   let visualEvidence: Awaited<ReturnType<typeof suggestIconLabel>> | undefined;
   const validate = async (raw: unknown) => {
     const candidate = compileSourcePlan(ctx, raw, 'Agent 计划');
+    if (react && candidate.plan.kind === 'aria') {
+      const {attribute,refs}=candidate.plan;
+      await withRepairPage(ctx.dir,ctx.entry,signal,async page=>{
+        const target=page.locator(candidate.target);
+        if (await target.count() !== 1) throw new Error('多个元素共享该 JSX 声明，请人工拆分组件后再修复。');
+        const safe=await target.evaluate((element,{attribute,refs})=>{
+          const existing=(element.getAttribute(attribute) ?? '').trim().split(/\s+/).filter(Boolean);
+          const matches=(id:string)=>document.querySelectorAll('#'+CSS.escape(id));
+          const scope=element.closest('form,fieldset,section,article,main') ?? element.parentElement;
+          return existing.some(id=>matches(id).length===0) &&
+            existing.filter(id=>matches(id).length===1).every(id=>refs.includes(id)) &&
+            new Set(refs).size===refs.length && refs.every(id=>{
+              const nodes=matches(id);
+              return nodes.length===1 && nodes[0]!==element && scope?.contains(nodes[0]) && Boolean(nodes[0].textContent?.trim());
+            });
+        },{attribute,refs});
+        if (!safe) throw new Error('只能替换悬空引用，保留有效引用，并指向附近唯一且有文字的元素。');
+      });
+    }
     if (needsVisual && !intent && !visualEvidence?.suggestedValue) throw new Error('视觉证据不足以确定按钮用途，请用户确认后再修复。');
     if (intent && (candidate.plan.kind === 'label' || candidate.plan.kind === 'button') && candidate.plan.value !== intent) throw new Error('请使用用户确认的原文。');
     if (treeHash(ctx.dir) !== baseHash) throw new Error('源快照已变化。');
@@ -467,9 +487,10 @@ export async function proposeSourceRepair(ctx: SourceContext, userIntent: unknow
     try {
       fs.cpSync(ctx.dir, dir, { recursive: true });
       writeSourceCandidate(dir, candidate);
-      const scanned = await auditCandidate(ctx.projectId, ctx.snapshotId, dir, ctx.entry, signal,
-        candidate.plan.kind === 'contrast' ? candidate.target : undefined);
-      const checks = await checkSourceCandidate(ctx, candidate, dir, scanned, signal);
+      const checks = await withRepairPage(dir, ctx.entry, signal, async (page, product) => {
+        await browserTarget(page,candidate.target);
+        return [{name:'候选页面',detail:product ? '源码构建通过，浏览器已加载目标页面' : '浏览器已加载目标页面'}];
+      });
       return { candidate, checks };
     } finally { fs.rmSync(temporary, { recursive: true, force: true }); }
   };

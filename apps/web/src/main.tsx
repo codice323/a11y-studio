@@ -77,8 +77,8 @@ type WorkspaceView = typeof workspaceViews[number]['id'];
 const sidebarPreference = 'a11y-studio.sidebar-collapsed';
 
 type ControlTab = typeof controlTabs[number]['id'];
-type RepairDraft = { value: string; singleLocation?: boolean; edited?: boolean; manualColorPreview?: boolean; proposal: Proposal | null; analysis?: ImageAltAnalysis | RepairAnalysis; purpose?: ImagePurpose };
-const applyingLabel = '正在应用补丁并重新验证…';
+type RepairDraft = { value: string; singleLocation?: boolean; edited?: boolean; prepared?: Proposal; proposal: Proposal | null; analysis?: ImageAltAnalysis | RepairAnalysis; purpose?: ImagePurpose };
+const applyingLabel = '正在保存补丁…';
 const imagePurposeLabel = { informative:'内容性图片', decorative:'装饰性图片', uncertain:'用途待确认' };
 
 async function request<T>(url: string, options?: RequestInit): Promise<T> {
@@ -92,6 +92,12 @@ async function request<T>(url: string, options?: RequestInit): Promise<T> {
 
 function post<T>(url: string, data: unknown = {}) {
   return request<T>(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data) });
+}
+
+type ReviewDecision = {status:'confirmed'|'dismissed';at:string;item?:Issue};
+type ReviewDecisions = Record<string,ReviewDecision>;
+function readReviewDecisions(key:string):ReviewDecisions {
+  try {return JSON.parse(localStorage.getItem(key) ?? '{}') ?? {};} catch {return {};}
 }
 
 function App({account,signOut,openUpgrade,openVerification}:{account:Account;signOut:()=>Promise<void>;openUpgrade:()=>void;openVerification:()=>void}) {
@@ -120,9 +126,11 @@ function App({account,signOut,openUpgrade,openVerification}:{account:Account;sig
   const managedPageCache = useRef(new Map<string,PageDiagnostics>());
   const scopeOf = (value?:WorkspacePageDiagnostics) => JSON.stringify(value ? [value.kind,value.projectId,value.version,value.path] : []);
   const currentPageIssue = visibleDiagnostics?.status==='ready' && pageIssue?.scope === scopeOf(visibleDiagnostics) ? pageIssue : undefined;
+  const [directTarget,setDirectTarget] = useState<{project:string;version:string;target:PageTarget}>();
+  const [reviewTarget,setReviewTarget] = useState<{scope:string;target:PageTarget}>();
   const pageTarget:PageTarget|undefined = currentPageIssue && visibleDiagnostics ? {
     id:currentPageIssue.item.id+':'+currentPageIssue.attempt,path:visibleDiagnostics.path,selector:currentPageIssue.item.selector,selectors:currentPageIssue.selectors,
-  } : undefined;
+  } : visibleDiagnostics?.status === 'ready' && reviewTarget?.scope === scopeOf(visibleDiagnostics) ? reviewTarget.target : undefined;
   const [scanConnectionError,setScanConnectionError] = useState(false);
   const [panoramaJump, setPanoramaJump] = useState<PanoramaJump>();
   const [panoramaIssue, setPanoramaIssue] = useState<{item: PanoramaIssue; stateId: string; version: string; path: string}>();
@@ -146,7 +154,6 @@ function App({account,signOut,openUpgrade,openVerification}:{account:Account;sig
   const [comparisonScroll, setComparisonScroll] = useState<number>();
   const livePosition = useRef(0);
   const [selectedLocations, setSelectedLocations] = useState<string[]>([]);
-  const [locateRevision, setLocateRevision] = useState(0);
   const [pageRequest, setPageRequest] = useState<{path:string}>();
   const [inlineStart, setInlineStart] = useState<{scope:string;path:string}>();
   const diagnosticProject=state?.project.id;
@@ -195,8 +202,6 @@ function App({account,signOut,openUpgrade,openVerification}:{account:Account;sig
     try { localStorage.setItem(sidebarPreference,String(next)); } catch { /* This browser can still collapse the sidebar. */ }
   }
   const [ai, setAi] = useState({ configured: false, visionConfigured: false, explorerPlanning: false });
-  const [confirmApply, setConfirmApply] = useState(false);
-  const [colorReviewHost, setColorReviewHost] = useState<HTMLDivElement | null>(null);
   const [knowledge, setKnowledge] = useState<Knowledge | null>(null);
   const running = useRef(false);
   const mounted = useRef(true);
@@ -234,14 +239,38 @@ function App({account,signOut,openUpgrade,openVerification}:{account:Account;sig
       setControlTab('issues');
     }
   }, [currentPageIssue, inspection, panoramaIssue, state?.project.id]);
+  // Older running APIs may not yet expose the inherited issue inventory.
+  const workingIssues: Issue[] = (()=>{
+    if (!state) return [];
+    if (state.current) return state.current.issues;
+    if (state.inheritedIssues) return state.inheritedIssues;
+    const versions=new Map(state.snapshots.map(version=>[version.id,version]));
+    const repairs=new Map(state.verifications.filter(item=>item.status!=='failed').map(item=>[item.toSnapshot,item]));
+    const addressed=new Set<string>();
+    const visited=new Set<string>();
+    for (let id=state.project.currentSnapshot; id && !visited.has(id);) {
+      if (id===state.originalSnapshotId) return (state.baseline?.issues ?? []).filter(item=>!addressed.has(item.id));
+      visited.add(id);
+      const parent=versions.get(id)?.parent_id;
+      const repair=repairs.get(id);
+      if (!parent || !repair || repair.fromSnapshot!==parent) break;
+      if (!repair.panoramaState && repair.patch) {
+        addressed.add(repair.patch.issueId);
+        for (const target of repair.patch.contrastTargets ?? []) addressed.add(target.issueId);
+      }
+      for (const item of repair.resolved) addressed.add(item.id);
+      id=parent;
+    }
+    return [];
+  })();
   const panoramaContext = !showingOriginal && panoramaIssue?.stateId && panoramaIssue.version === state?.project.currentSnapshot &&
     panoramaIssue.item.ruleId === 'button-name' && panoramaIssue.item.source ? panoramaIssue : undefined;
   const issue: Issue | undefined = showingOriginal ? undefined : panoramaContext ? {
     ...panoramaContext.item, impact: panoramaContext.item.impact ?? 'unknown', html: panoramaContext.item.html ?? '', helpUrl: 'https://www.w3.org/WAI/WCAG22/Understanding/name-role-value.html',
   } : reviewIssue ? { ...reviewIssue, source: state?.current?.sourceLocations?.[reviewIssue.selector] }
-    : state?.current?.issues.find(item => item.id === selectedId ||
-      (currentPageIssue?.item.selector && visibleDiagnostics?.version === state?.project.currentSnapshot &&
-        (visibleDiagnostics.entry || visibleDiagnostics.path.split('#')[0] === '/'+state.project.entry.split('/').map(encodeURIComponent).join('/')) &&
+    : workingIssues.find(item => item.id === selectedId ||
+      (currentPageIssue?.item.selector && visibleDiagnostics && visibleDiagnostics.version === state?.project.currentSnapshot &&
+        (visibleDiagnostics.entry || visibleDiagnostics.path.split('#')[0] === '/'+state?.project.entry.split('/').map(encodeURIComponent).join('/')) &&
         item.ruleId === currentPageIssue.item.ruleId && item.selector === currentPageIssue.item.selector));
   useEffect(() => {
     if (!issue || !selection || !('issueId' in selection) || !selection.captureProject ||
@@ -253,7 +282,6 @@ function App({account,signOut,openUpgrade,openVerification}:{account:Account;sig
   const draftKey = issue && state ? `${state.project.currentSnapshot}:${panoramaContext?.stateId ?? ''}:${issue.id}` : '';
   const draft = drafts[draftKey];
   const proposal = draft?.proposal ?? null;
-  const manualColorPreview = Boolean(proposal && draft?.manualColorPreview);
   const input = draft?.purpose === 'decorative' ? '' : draft?.value ?? '';
   const patchReady = Boolean(proposal && input === proposal.patch.value && draft?.purpose === proposal.imagePurpose);
   const selectedRule = (history?.issue ?? issue)?.ruleId;
@@ -356,22 +384,22 @@ function App({account,signOut,openUpgrade,openVerification}:{account:Account;sig
   }
 
   const liveTransition = useRef(Promise.resolve());
-  function locateInWorkspace() {
-    setView('interactive');
-    setLocateRevision(value=>value+1);
-    if (currentPageIssue) setPageIssue({...currentPageIssue,attempt:currentPageIssue.attempt+1});
-    else if (visibleDiagnostics?.status === 'ready') {
-      const item = history?.issue ?? issue;
-      if (item?.selector) setPageIssue({item,scope:pageScope,attempt:1,selectors:[item.selector]});
-    }
-    requestAnimationFrame(() => evidenceFocus.current?.focus());
+  const showHistoryToggle = !proposal && history && (!history.verification.panoramaState || history.verification.status === 'applied');
+  function renderVersionToggle() {
+    if (!state) return null;
+    return state.originalSnapshotId && state.originalSnapshotId !== state.project.currentSnapshot && <label className="repair-version-toggle">
+      <input type="checkbox" checked={showingOriginal} disabled={working} onChange={event => {
+        const path = visibleDiagnostics?.path.split('#')[0];
+        if (path && state.project.mode !== 'react-source' && /\.html?$/i.test(path)) setInlineStart({scope:projectScope,path});
+        setComparisonScroll(livePosition.current);
+        setShowOriginal(event.target.checked);
+      }} />查看原始状态
+    </label>;
   }
-
-  function renderInteractivePage() {
+  function renderInteractivePage(toolsHost: HTMLDivElement | null) {
     if (!state) return null;
     const current = state.project.currentSnapshot;
     const original = state.originalSnapshotId;
-    const canCompare = Boolean(original && original !== current);
     const version = showingOriginal && original ? original : current;
     const target = history?.issue ?? currentPageIssue?.item ?? issue ?? (panoramaIssue && { ...panoramaIssue.item, impact:panoramaIssue.item.impact ?? 'unknown', html:panoramaIssue.item.html ?? '', helpUrl:'' });
     const path = inlineStart?.scope === projectScope ? inlineStart.path : panoramaIssue?.path ?? pageRequest?.path;
@@ -381,27 +409,27 @@ function App({account,signOut,openUpgrade,openVerification}:{account:Account;sig
     const names = {left:name,right:name};
     const canReplay = Boolean(state.browserCapture?.dynamicReplay);
     const useCopy = Boolean(state.browserCapture && (!canReplay || snapshotPreview === state.project.id));
-    const controls = canCompare && <label className="repair-version-toggle">
-      <input type="checkbox" checked={showingOriginal} disabled={working} onChange={event => {
-        const path = visibleDiagnostics?.path.split('#')[0];
-        if (path && state.project.mode !== 'react-source' && /\.html?$/i.test(path)) setInlineStart({scope:projectScope,path});
-        setComparisonScroll(livePosition.current);
-        setShowOriginal(event.target.checked);
-      }} />查看原始状态
-    </label>;
+    if (proposal && !showingOriginal) {
+      const pendingNames = {left:'修复前',right:'待审核预览'};
+      return <LiveComparison project={state.project.id} left={current} right={current} current={current} names={pendingNames}
+        proposalId={proposal.id} toolsHost={toolsHost} leftSelector={target?.selector} start={start}
+        stateId={panoramaIssue?.stateId} transition={liveTransition} projectMode={state.project.mode}
+        onInspection={setInspection} onRepair={openStateIssue} />;
+    }
     if (useCopy) {
       const afterSelector = version === history?.verification.toSnapshot ? history.verification.sourceTarget : undefined;
       return <CaptureComparison single initialScroll={comparisonScroll} positionRef={livePosition} project={state.project.id} left={version} right={version} names={names}
         current={current} active issue={target} afterSelector={afterSelector} targetPair={{left:version,right:version}}
-        groupSelectors={selectedLocations} locateRevision={locateRevision} versions={controls} limitations={state.browserCapture!.limitations}
+        groupSelectors={selectedLocations} versions={showHistoryToggle ? undefined : renderVersionToggle()} limitations={state.browserCapture!.limitations}
         onReplay={canReplay ? () => setSnapshotPreview(undefined) : undefined} onDiagnostics={setVisibleDiagnostics} />;
     }
     return <LiveComparison single initialScroll={comparisonScroll} positionRef={livePosition} project={state.project.id} left={version} right={version} names={names}
-      start={canReplay ? undefined : start} stateId={canReplay ? undefined : (panoramaIssue?.stateId ?? history?.verification.panoramaState)}
+      start={canReplay ? undefined : start} stateId={panoramaIssue?.stateId ?? (canReplay || history?.verification.status==='applied' ? undefined : history?.verification.panoramaState)}
       transition={liveTransition} current={current} projectMode={state.project.mode} onInspection={setInspection}
-      versions={<>{controls}{canReplay && <button type="button" className="secondary" onClick={() => setSnapshotPreview(state.project.id)}>查看采集副本</button>}</>}
-      onRepair={openStateIssue} onDiagnostics={setVisibleDiagnostics} diagnosticsCache={livePageCache.current}
-      scanRevision={pageScanRevision} target={managedUrl ? undefined : pageTarget}
+      versions={<>{!showHistoryToggle && renderVersionToggle()}{canReplay && <button type="button" className="secondary" onClick={() => setSnapshotPreview(state.project.id)}>查看采集副本</button>}</>}
+      onRepair={openStateIssue} onDiagnostics={!state.current && state.verifications.some(item=>item.status==='applied' && item.toSnapshot===version) ? undefined : setVisibleDiagnostics} diagnosticsCache={livePageCache.current}
+      scanRevision={pageScanRevision} target={managedUrl ? undefined : directTarget?.project===state.project.id && directTarget.version===version ? directTarget.target : pageTarget}
+      entryTargetPath={'/'+state.project.entry.split('/').map(encodeURIComponent).join('/')}
       onOpenUncapturedLink={openLinkPreview} />;
   }
 
@@ -418,7 +446,6 @@ function App({account,signOut,openUpgrade,openVerification}:{account:Account;sig
     setSelection(null);
     setControlTab('issues');
     setDrafts({});
-    setConfirmApply(false);
     setFilter('all');
     setRuleFilter('all');
     setVisibleDiagnostics(undefined);
@@ -443,7 +470,7 @@ function App({account,signOut,openUpgrade,openVerification}:{account:Account;sig
       if (mounted.current && projectFromLocation()===pid && [403,404].includes(error.cause)) rememberProject(null);
       throw error;
     });
-    if (!next.current) {
+    if (!next.current && (target || !next.snapshots.find(snapshot=>snapshot.id===next.project.currentSnapshot)?.parent_id)) {
       const job = (await request<Diagnostics>(base + '/diagnostics')).job;
       if (target) setBusy('正在检测修复副本并匹配所选问题…');
       if (target && job && ['queued','running'].includes(job.status)) {
@@ -583,6 +610,9 @@ function App({account,signOut,openUpgrade,openVerification}:{account:Account;sig
     setInspection(undefined);
     setPanoramaIssue({item,stateId,version,path});
     setPanoramaJump({stateId,key:stateId});
+    if (state && item.selector) setDirectTarget({project:state.project.id,version,target:{
+      id:crypto.randomUUID(),path,selector:item.selector,
+    }});
     setView('interactive');
     openPage('workspace');
     openAssistant();
@@ -669,8 +699,9 @@ function App({account,signOut,openUpgrade,openVerification}:{account:Account;sig
     });
   }
 
-  function showRepairPreview() {
-    setView('interactive');
+  function showRepairPreview(rule: string) {
+    setView(rule === 'color-contrast' || rule.startsWith('focus-') ? 'interactive' :
+      ['image-alt','button-name','link-name','label','select-name'].includes(rule) ? 'semantics' : 'diff');
     requestAnimationFrame(() => evidenceFocus.current?.focus());
   }
 
@@ -693,9 +724,15 @@ function App({account,signOut,openUpgrade,openVerification}:{account:Account;sig
     if (moveFocus) requestAnimationFrame(() => evidenceFocus.current?.focus());
   }
 
-  function propose(source: 'agent' | 'manual', value = input, manualColor = false) {
+  function propose(source: 'agent' | 'manual', value = input) {
     if (!issue) return;
-    if (source === 'manual' && !manualColor && proposal?.sourceReview && patchReady) { showRepairPreview(); return; }
+    if (source === 'manual' && draft?.prepared && value === draft.prepared.patch.value && draft.purpose === draft.prepared.imagePurpose) {
+      updateDraft({proposal:draft.prepared,prepared:undefined});
+      setShowOriginal(false);
+      showRepairPreview(issue.ruleId);
+      return;
+    }
+    if (source === 'agent') updateDraft({prepared:undefined,proposal:null,analysis:undefined});
     const mode = state?.project.mode;
     const manualRules = ['label','select-name','link-name'];
     if (mode === 'react-source' || mode === 'static-source') manualRules.push('button-name','color-contrast');
@@ -718,43 +755,56 @@ function App({account,signOut,openUpgrade,openVerification}:{account:Account;sig
         : sourceRepair ? await runJob<Proposal | RepairAnalysis>('source-repair', endpoint, { ...data, sourceRepair: true, snapshotId: state?.project.currentSnapshot, intent: source === 'manual' || (draft?.edited && issue.ruleId !== 'color-contrast') ? value : undefined })
         : await post<Proposal | ImageAltAnalysis | RepairAnalysis>(endpoint, data);
       if (!('patch' in next)) {
+        if ('contentAlt' in next && (next.purpose === 'decorative' ||
+          (next.purpose === 'informative' && next.contentAlt?.trim()))) {
+          if (!draft?.edited && !draft?.purpose) {
+            updateDraft({analysis:next,purpose:next.purpose,value:next.purpose === 'decorative' ? '' : next.contentAlt ?? ''});
+            return;
+          }
+        }
         const suggested = 'contentAlt' in next ? next.contentAlt : next.suggestedValue;
-        updateDraft({ analysis: next, ...(sourceRepair ? { proposal: null } : {}), ...(!draft?.edited && !proposal && suggested != null ? { value: suggested } : {}) });
+        updateDraft({ analysis: next, ...(sourceRepair ? { proposal: null, prepared:undefined } : {}), ...(!draft?.edited && !proposal && suggested != null ? { value: suggested } : {}) });
+        return;
+      }
+      if (source === 'agent') {
+        updateDraft({prepared:next,proposal:null,value:next.patch.value,analysis:next.analysis,edited:false});
         return;
       }
       updateDraft({
         proposal: next,
-        manualColorPreview: manualColor,
+        prepared: undefined,
         ...(next.imagePurpose !== 'decorative' ? { value: next.patch.value } : {}),
-        ...(source === 'agent' || sourceRepair || snapshotColor ? { analysis: next.analysis, edited: false } : {}),
+        edited: false,
       });
-      if (manualColor) setView('interactive');
-      else showRepairPreview();
+      setShowOriginal(false);
+      showRepairPreview(issue.ruleId);
       setNotice(next.sourceReview ? '已在隔离副本完成预检，请核对修复内容和页面效果。' : '修复预览已生成，请核对页面效果并确认。');
-    }, sourceRepair ? { label: source === 'agent' ? '重试 AI 分析' : '重试生成预览', run: () => propose(source, value, manualColor) } : undefined);
+    }, sourceRepair ? { label: source === 'agent' ? '重试 AI 分析' : '重试生成预览', run: () => propose(source, value) } : undefined);
   }
 
-  function apply(semanticReviewed: boolean) {
+  function apply(semantics?: import("./EvidenceDetails").SemanticResult) {
     if (showingOriginal || !proposal || !state || !patchReady || working) return;
-    setConfirmApply(false);
     run(applyingLabel, async () => {
-      const result = await runJob<Verification>('verification', '/api/proposals/' + proposal.id + '/apply', {semanticReviewed, ...(proposal.sourceReview ? {sourceReviewed: semanticReviewed} : {})});
+      const result = await runJob<Verification>('verification', '/api/proposals/' + proposal.id + '/apply');
       await refresh(state.project.id);
       updateDraft({proposal: null});
-      if (result.status === 'passed') {
+      if (result.status === 'applied') {
         setShowOriginal(false);
-        setSnapshotPreview(undefined);
-      }
-      const target = result.resolved.find(item => item.id === result.patch?.issueId) ?? result.reviewedTarget ?? result.resolved[0];
-      if (result.status === 'passed' && panoramaContext && target) {
-        chooseHistory({verification:result,issue:target}, 'interactive', true);
-        setNotice('已在同一交互状态中验证按钮名称，当前版本已更新。');
-      } else if (result.status === 'passed' && target) {
-        chooseHistory({ verification: result, issue: target }, 'interactive', true);
+        setSnapshotPreview(state.browserCapture ? state.project.id : undefined);
+        setVisibleDiagnostics(undefined);
+        setFilter('all');
+        setRuleFilter('all');
+        setList('open');
+        setPanoramaIssue(undefined);
+        setPanoramaJump(undefined);
+        if (result.reviewedTarget) {
+          if (panoramaIssue?.path) setInlineStart({scope:projectScope,path:panoramaIssue.path});
+          setSelection({history:{verification:result,issue:result.reviewedTarget,semantics},archived:false});
+        }
         setNotice(result.reason);
       } else {
         setView('interactive');
-        setError(result.reason);
+        setError('修复失败：'+result.reason);
         setRecovery({label:'返回修复操作',run:() => {
           setError(''); setRecovery(undefined); openAssistant(false);
           requestAnimationFrame(() => (document.getElementById('repair-value') ?? assistantPanel.current)?.focus());
@@ -766,7 +816,7 @@ function App({account,signOut,openUpgrade,openVerification}:{account:Account;sig
 
   function reject() {
     if (!proposal) return;
-    const returnFocus = manualColorPreview ? 'manual-color-preview' : 'repair-value';
+    const returnFocus = 'repair-value';
     run('正在关闭补丁建议…', async () => {
       await post('/api/proposals/' + proposal.id + '/reject');
       updateDraft({proposal: null});
@@ -785,7 +835,7 @@ function App({account,signOut,openUpgrade,openVerification}:{account:Account;sig
   const currentInspection = inspection?.projectId === state?.project.id && inspection?.version === state?.project.currentSnapshot ? inspection : undefined;
   const entryPath=state ? '/'+state.project.entry.split('/').map(encodeURIComponent).join('/') : '';
   const grouped=new Map<string,{item:Issue;path:string;stateId?:string;location?:PanoramaIssue;occurrences:number}>();
-  for (const item of state?.current?.issues ?? []) {
+  for (const item of workingIssues) {
     grouped.set(JSON.stringify([entryPath,item.ruleId,item.selector]),{item,path:entryPath,occurrences:1});
   }
   for (const result of currentDiagnostics?.states ?? []) {
@@ -810,15 +860,52 @@ function App({account,signOut,openUpgrade,openVerification}:{account:Account;sig
         path:currentInspection.path,stateId:currentInspection.stateId,location,occurrences:1});
     }
   }
+  const [reviewChanges,setReviewChanges] = useState<Record<string,ReviewDecisions>>({});
+  const reviewKey = (scope:string) => 'a11y:review:'+JSON.stringify([account.id,scope]);
+  const reviewStorageKey=reviewKey(pageScope);
+  const reviewDecisions={...readReviewDecisions(reviewStorageKey),...reviewChanges[reviewStorageKey]};
+  if (visibleDiagnostics?.kind==='live' && state && visibleDiagnostics.projectId===state.project.id) {
+    const versions=new Map(state.snapshots.map(snapshot=>[snapshot.id,snapshot]));
+    for(let parent=versions.get(visibleDiagnostics.version ?? '')?.parent_id;parent;parent=versions.get(parent)?.parent_id) {
+      const key=reviewKey(scopeOf({...visibleDiagnostics,version:parent}));
+      for(const [id,decision] of Object.entries(reviewChanges[key] ?? readReviewDecisions(key))) {
+        if(!reviewDecisions[id])reviewDecisions[id]=decision;
+      }
+    }
+  }
+  const reviewProject=visibleDiagnostics?.kind==='live' ? visibleDiagnostics.projectId : undefined;
+  const reviewVersion=visibleDiagnostics?.version;
+  const reviewPath=visibleDiagnostics?.path;
+  useEffect(()=>{
+    if(!reviewProject || !reviewVersion || !reviewPath)return;
+    const controller=new AbortController();
+    const query=new URLSearchParams({version:reviewVersion,page:reviewPath});
+    void request<ReviewDecisions>('/api/projects/'+reviewProject+'/issue-reviews?'+query,{signal:controller.signal})
+      .then(saved=>{
+        if (!controller.signal.aborted) setReviewChanges(previous=>({
+          ...previous,[reviewStorageKey]:{...saved,...previous[reviewStorageKey]},
+        }));
+      }).catch(()=>{});
+    return ()=>controller.abort();
+  },[reviewProject,reviewVersion,reviewPath,reviewStorageKey]);
+  function saveReview(id:string,decision:ReviewDecision) {
+    const next={...reviewDecisions,[id]:decision};
+    setReviewChanges(previous=>({...previous,[reviewStorageKey]:next}));
+    try {localStorage.setItem(reviewStorageKey,JSON.stringify(next));} catch { /* Keep the in-session decision. */ }
+    if(reviewProject && reviewVersion && reviewPath) {
+      void post('/api/projects/'+reviewProject+'/issue-reviews',{version:reviewVersion,page:reviewPath,id,status:decision.status})
+        .catch(()=>setError('审核决定暂存于当前浏览器，未能同步到项目。'));
+    }
+  }
   const activePage = view==='interactive' && (visibleDiagnostics?.kind==='remote' ||
     visibleDiagnostics?.projectId===state?.project.id && visibleDiagnostics?.version && state?.snapshots.some(item=>item.id===visibleDiagnostics.version)) ? visibleDiagnostics : undefined;
   const inspectedPath = currentInspection?.path ?? entryPath;
   const activePath = activePage?.path ?? (view==='interactive' && !panoramaJump && !pageRequest ? entryPath : inspectedPath);
   const pageKey = activePage?.kind==='live' ? activePage.entry ? entryPath : activePath.split('#')[0] : activePath;
-  const matching = [...grouped.entries()].filter(([,entry])=>entry.path===pageKey);
+  const matching = [...grouped.entries()];
   type ListedIssue = (typeof matching)[number][1] & {pageOnly?:boolean;locationGroup?:string};
-  const byTarget = new Map(matching.map(entry=>[JSON.stringify([entry[1].item.ruleId,entry[1].item.selector]),entry]));
-  const listed:[string,ListedIssue][] = activePage
+  const byTarget = new Map(matching.filter(([,entry])=>entry.path===pageKey).map(entry=>[JSON.stringify([entry[1].item.ruleId,entry[1].item.selector]),entry]));
+  const liveListed:[string,ListedIssue][] = activePage?.status === 'ready'
     ? (activePage.findings ?? []).map(location=>{
       const match = !showingOriginal && activePage.version===diagnosticVersion
         ? (location.selector ? byTarget.get(JSON.stringify([location.ruleId,location.selector])) : undefined)
@@ -826,7 +913,41 @@ function App({account,signOut,openUpgrade,openVerification}:{account:Account;sig
       if (match) return [match[0],{...match[1],locationGroup:location.locationGroup}];
       return [location.id,{item:{...location,impact:location.impact ?? 'unknown',html:location.html ?? '',helpUrl:''},
         path:activePath,occurrences:1,pageOnly:true,locationGroup:location.locationGroup}];
-    }) : showingOriginal ? [] : matching;
+    }) : [];
+  const liveKeys=new Set(liveListed.map(([id])=>id));
+  const listed:[string,ListedIssue][] = activePage?.kind==='remote' || showingOriginal ? liveListed :
+    [...liveListed,...matching.filter(([id])=>!liveKeys.has(id))];
+  const reviewPage = visibleDiagnostics?.status==='ready' && (
+    visibleDiagnostics.kind==='remote' ? Boolean(managedUrl) :
+      visibleDiagnostics.projectId===state?.project.id && visibleDiagnostics.version===diagnosticVersion
+  ) ? visibleDiagnostics : undefined;
+  const confirmedReviewIds = new Map<string,string[]>();
+  const pendingKeys = new Set(listed.map(([,entry])=>JSON.stringify([entry.item.ruleId,entry.item.selector])));
+  if (reviewPage && !showingOriginal) for (const rule of reviewPage.coverage?.review ?? []) for (const evidence of rule.evidence ?? []) {
+    const id=JSON.stringify([rule.id,evidence.selector,evidence.attributes,evidence.missingRefs]);
+    const decision=reviewDecisions[id];
+    if(decision?.status!=='confirmed')continue;
+    const supported = reviewPage.entry ? state?.current?.detection?.behavior.findings.map(reviewRepairIssue)
+      .find(item=>item?.selector===evidence.selector && (evidence.missingRefs.length ? item.ruleId==='aria-broken-idref' : item.ruleId==='focus-style-unchanged')) : undefined;
+    const item=supported ?? decision.item ?? {
+      id:'review:'+id, ruleId:rule.id, selector:evidence.selector, help:rule.help,
+      description:evidence.missingRefs.length ? '找不到引用目标 '+evidence.missingRefs.join('、')+'。' : rule.help,
+      impact:'unknown', html:'', helpUrl:'', bounds:null,
+    };
+    const issueKey=JSON.stringify([rule.id,item.selector]);
+    const repairKey=JSON.stringify([item.ruleId,item.selector]);
+    const existing = listed.find(([,entry])=>entry.item.selector===item.selector &&
+      (entry.item.ruleId===rule.id || entry.item.ruleId===item.ruleId));
+    if (existing || !entryRecords.some(record=>record.issue.id===item.id)) {
+      const key=existing?.[1].item.id ?? item.id;
+      confirmedReviewIds.set(key,[...(confirmedReviewIds.get(key) ?? []),id]);
+    }
+    if(pendingKeys.has(issueKey)||pendingKeys.has(repairKey)||entryRecords.some(record=>record.issue.id===item.id))continue;
+    pendingKeys.add(issueKey);
+    pendingKeys.add(repairKey);
+    const canRepair=Boolean(supported && (state?.project.mode!=='react-source' || state.current?.sourceLocations?.[item.selector]));
+    listed.push([item.id,{item,path:reviewPage.path,occurrences:1,pageOnly:!canRepair}]);
+  }
   const issueTypes=new Map<string,{title:string;count:number}>();
   for(const [,entry] of listed) {
     const current=issueTypes.get(entry.item.ruleId);
@@ -858,17 +979,46 @@ function App({account,signOut,openUpgrade,openVerification}:{account:Account;sig
   const confirmedSummary = issueGroupCount < listed.length
     ? `${issueGroupCount} 组问题 · ${listed.length} 处`
     : `${listed.length} 个已确认问题`;
+  function locateReview(selector: string) {
+    if (!activePage || activePage.status !== 'ready') return;
+    setPageIssue(undefined);
+    setSelection(null);
+    setPanoramaIssue(undefined);
+    setShowOriginal(false);
+    setView('interactive');
+    setReviewTarget(previous=>({scope:scopeOf(activePage),target:{id:selector+':'+(Number(previous?.target.id.split(':').at(-1) ?? 0)+1),path:activePage.path,selector}}));
+  }
   function selectPageFinding(entry:ListedIssue, group:typeof filtered) {
+    setReviewTarget(undefined);
+    setDirectTarget(undefined);
     const selectors = [...new Set(group.map(([,member])=>member.item.selector).filter(selector=>selector && selector.length<=2000))].slice(0,300);
     setSelectedLocations(selectors);
     setPageIssue({item:entry.item,scope:pageScope,attempt:(currentPageIssue?.attempt ?? 0)+1,selectors});
     if (managedUrl) return;
     if (entry.pageOnly) {setSelection(null);setPanoramaIssue(undefined);openAssistant(false);}
     else if (entry.location && entry.stateId && diagnosticVersion) {
-      if (activePage?.kind==='live') {setSelection(null);setPanoramaIssue({item:entry.location,stateId:entry.stateId,version:diagnosticVersion,path:entry.path});openAssistant(false);}
-      else openStateIssue({issue:entry.location,stateId:entry.stateId,version:diagnosticVersion,path:entry.path});
-    } else chooseIssue(entry.item);
+      setInlineStart(undefined);
+      openStateIssue({issue:entry.location,stateId:entry.stateId,version:diagnosticVersion,path:entry.path});
+    } else {
+      if (state && entry.item.selector) {
+        setInlineStart({scope:projectScope,path:entry.path});
+        setDirectTarget({project:state.project.id,version:state.project.currentSnapshot,target:{
+          id:crypto.randomUUID(),path:entry.path,selector:entry.item.selector,selectors,
+        }});
+      }
+      chooseIssue(entry.item);
+    }
   }
+  const selectedReviewIds = currentPageIssue ? confirmedReviewIds.get(currentPageIssue.item.id) : undefined;
+  const dismissSelectedReview = selectedReviewIds?.length === 1 ? <button type="button" className="secondary"
+    disabled={working || Boolean(proposal)} onClick={()=>{
+      saveReview(selectedReviewIds[0],{status:'dismissed',at:new Date().toISOString()});
+      setPageIssue(undefined);
+      setSelection(null);
+      setPanoramaIssue(undefined);
+      setSelectedLocations([]);
+      setControlTab('issues');
+    }}>改为不是问题</button> : null;
   const selectedGroup = displayedIssues.find(group => group.length > 1 && group.some(([,entry])=>
     currentPageIssue?.item.selector ? currentPageIssue.item.ruleId === entry.item.ruleId && currentPageIssue.item.selector === entry.item.selector :
       entry.item.id === (panoramaIssue?.item.id ?? issue?.id)));
@@ -934,7 +1084,7 @@ function App({account,signOut,openUpgrade,openVerification}:{account:Account;sig
             void signOut().catch(problem=>setError((problem as Error).message)).finally(()=>setSigningOut(false));
           }}>{signingOut?'正在退出…':'退出登录'}</button>
         </div></details></div></header>
-      <div className={state ? 'content' : 'content home-content'}>
+      <div className={state ? 'content' + (page === 'workspace' && !managedUrl ? ' workspace-content' : '') : 'content home-content'}>
         {account.isGuest && account.expiresAt && <p className="account-guest-notice">游客项目临时保存，可用至 {new Date(account.expiresAt).toLocaleString('zh-CN')}。 <button
           type="button" className="secondary" disabled={working} onClick={openUpgrade}>保存我的项目 / 注册账号</button></p>}
 
@@ -964,6 +1114,7 @@ function App({account,signOut,openUpgrade,openVerification}:{account:Account;sig
               {currentPageIssue && activePage && <PageIssueDetails item={currentPageIssue.item} busy={working} grouped={Boolean(selectedGroup)}
                 onLocate={()=>setPageIssue({...currentPageIssue,attempt:currentPageIssue.attempt+1})}
                 onRepair={()=>repairCapturedIssue(currentPageIssue,activePage.path)} />}
+              {dismissSelectedReview}
               <div className="issue-list" role="region" aria-label="待处理问题">
                 {displayedIssues.map(group=>{
                   const [key,entry]=group[0];
@@ -971,7 +1122,7 @@ function App({account,signOut,openUpgrade,openVerification}:{account:Account;sig
                     active={group.some(([,member])=>currentPageIssue?.item.id===member.item.id)}
                     onClick={()=>selectPageFinding(entry,group)} />;
                 })}
-                <PageDiagnosticReview result={activePage} />
+                <PageDiagnosticReview key={pageScope} result={activePage} onLocate={locateReview} decisions={reviewDecisions} onDecision={saveReview} behavior={activePage?.entry && activePage.version === state?.project.currentSnapshot ? state?.current?.detection?.behavior : undefined} scan={activePage?.entry && activePage.version === state?.project.currentSnapshot ? state?.current : undefined} />
               </div>
             </div>
             <div className="evidence-column evidence-column-flow">
@@ -988,7 +1139,7 @@ function App({account,signOut,openUpgrade,openVerification}:{account:Account;sig
           <section className="workspace-view" hidden={page === 'report' || Boolean(managedUrl)} data-entry-audited={Boolean(state.current)} aria-label="诊断工作区">
             <div className="project-strip">
 
-              <div className="project-title"><b>{state.project.name}</b></div>
+              <div className="project-title"><b title={state.project.name}>{state.project.name}</b></div>
               <button className="secondary" onClick={scanCurrentPage} disabled={working || activePage?.status==='pending' || (scanning && !activePage)}>重新检测</button>
             </div>
 
@@ -998,7 +1149,6 @@ function App({account,signOut,openUpgrade,openVerification}:{account:Account;sig
               {scanConnectionError ? '无法读取检测进度。' : diagnosticJob?.status==='cancelled' ? '检测已取消，已发现的问题仍可查看。' : diagnosticJob?.error || '检测未完成。'}
               <button className="secondary" disabled={working} onClick={scanAgain}>重试检测</button>
             </div>}
-            {currentDiagnostics?.limited && !scanning && <details><summary>检测范围受限</summary><p>部分页面或状态未完成检查。详细范围可在结果报告中查看。</p></details>}
 
             {Boolean(state.current?.resourceFailures?.length) && <details className="panel import-resource-warning" open>
 
@@ -1010,11 +1160,13 @@ function App({account,signOut,openUpgrade,openVerification}:{account:Account;sig
             </details>}
             <div className="workbench">
               <div className="workbench-controls panel">
-                <header className="review-rail-heading"><div><span>当前页面</span><h2>问题与修复</h2></div>
+                <header className="review-rail-heading"><h2>问题与修复</h2>
                   <span className="review-rail-count">{activePage?.status === 'failed' ? '未完成检测' : activePage?.status === 'pending' ? '检测中' : activePage ? confirmedSummary : `${listed.length} 个问题`}</span>
                 </header>
-                {activePage ? <PageDiagnosticStatus result={activePage} onRetry={scanCurrentPage} /> :
-                  activePath && <p className="workspace-page-status" title={activePath}>{activePath}</p>}
+                {activePage?.status === 'failed' && <div className="diagnostic-status" role="alert">
+                  {activePage.error || '当前网页尚未打开。'}
+                  {activePage.path && <button type="button" className="secondary" onClick={scanCurrentPage}>重试检测</button>}
+                </div>}
                 <div className="evidence-tabs control-tabs" role="tablist" aria-label="诊断工作台操作">
                   {controlTabs.map(({ id, label }) => (
                     <button key={id} type="button" role="tab" id={`control-tab-${id}`}
@@ -1030,16 +1182,16 @@ function App({account,signOut,openUpgrade,openVerification}:{account:Account;sig
                     <button aria-pressed={list === 'open'} disabled={working} onClick={() => selectList('open')}>待处理 {(!activePage || activePage.status==='ready') && <span>{issueGroupCount}</span>}</button>
                     <button aria-pressed={list === 'history'} disabled={working} onClick={() => selectList('history')}>已解决 <span>{records.length}</span></button>
                   </div>
-                  {list === 'open' && listed.length > 0 && <div className="filter-row"><label htmlFor="severity-filter">严重程度</label>
+                  {list === 'open' && listed.length > 0 && <div className="issue-filters"><div className="filter-row"><label htmlFor="severity-filter">严重程度</label>
                     <select id="severity-filter" value={filter} onChange={event => setFilter(event.target.value)}>
                       <option value="all">全部</option>
                       {Object.entries(impactName).map(([id, label]) => <option key={id} value={id}>{label}</option>)}
                     </select>
-                  </div>}
-                  {list==='open' && issueTypes.size>1 && <div className="filter-row"><label htmlFor="rule-filter">问题类型</label>
-                    <select id="rule-filter" value={ruleFilter} onChange={event=>setRuleFilter(event.target.value)}>
+                  </div>
+                  <div className="filter-row"><label htmlFor="rule-filter">问题类型</label>
+                    <select id="rule-filter" disabled={issueTypes.size <= 1} value={ruleFilter} onChange={event=>setRuleFilter(event.target.value)}>
                       <option value="all">全部类型</option>{[...issueTypes].map(([id,item])=><option key={id} value={id}>{item.title}（{item.count}）</option>)}
-                    </select></div>}
+                    </select></div></div>}
                   <div className="issue-list" role="region" aria-label={list === 'open' ? '待处理问题' : '已解决问题'}>
                     {list === 'open' ? displayedIssues.length ? displayedIssues.map(group => {
                       const [key,entry]=group[0];
@@ -1047,7 +1199,7 @@ function App({account,signOut,openUpgrade,openVerification}:{account:Account;sig
                         locations={group.length} disabled={working}
                         active={group.some(([,member])=>currentPageIssue?.item.selector ? currentPageIssue.item.ruleId===member.item.ruleId && currentPageIssue.item.selector===member.item.selector : member.item.id===(panoramaIssue?.item.id ?? issue?.id))}
                         onClick={()=>selectPageFinding(entry,group)} />;
-                    }) : <Blank icon={activePage?.status==='failed' ? <Info /> : activePage?.status==='pending' ? <LoaderCircle className="spin" /> : <CheckCircle2 />} title={activePage?.status==='pending' ? '正在检测当前页面' : activePage?.status==='failed' ? '当前页面检测失败' : scanning && !activePage ? '正在检查当前页面' : listed.length ? '没有匹配的问题' : '当前无待处理问题'}>
+                    }) : <Blank icon={activePage?.status==='failed' ? <Info /> : activePage?.status==='pending' ? <LoaderCircle className="spin" /> : <CheckCircle2 />} title={activePage?.status==='pending' ? '正在检测当前页面' : activePage?.status==='failed' ? '当前页面检测失败' : scanning && !activePage ? '正在检查当前页面' : listed.length ? '没有匹配的问题' : !state.current && !activePage ? '当前版本尚未重新检测' : '当前无待处理问题'}>
                       {scanning ? '发现的问题会陆续显示。' : listed.length ? '请选择其他筛选条件。' : null}
                     </Blank> : records.length ? records.map(item =>
                       <IssueButton key={item.verification.id + item.issue.id} issue={item.issue}
@@ -1055,7 +1207,8 @@ function App({account,signOut,openUpgrade,openVerification}:{account:Account;sig
                         disabled={working} resolved
                         onClick={() => chooseHistory(item)} />,
                     ) : <Blank icon={<History />} title="当前版本暂无已解决问题">此处显示当前版本包含且通过复测的修复。</Blank>}
-                    {list === 'open' && <PageDiagnosticReview result={activePage} />}
+                    {list === 'open' && !state.current && workingIssues.length > 0 && <p className="muted note">其余问题沿用上次检测结果。</p>}
+                    {list === 'open' && <PageDiagnosticReview key={pageScope} result={activePage} onLocate={locateReview} decisions={reviewDecisions} onDecision={saveReview} behavior={activePage?.entry && activePage.version === state?.project.currentSnapshot ? state?.current?.detection?.behavior : undefined} scan={activePage?.entry && activePage.version === state?.project.currentSnapshot ? state?.current : undefined} />}
                   </div>
                   {pageKey===entryPath && activePage?.kind!=='remote' && (!activePage?.version || activePage.version===diagnosticVersion) &&
                     <DetectionReview key={state.current?.id} detection={state.current?.detection} aiConfigured={ai.configured} busy={working} onReview={reviewWithAi} onDecision={decideAiFinding} onRepair={chooseIssue} />}
@@ -1063,25 +1216,23 @@ function App({account,signOut,openUpgrade,openVerification}:{account:Account;sig
                 <div className="control-panel" role="tabpanel" id="control-panel-assistant"
                   aria-labelledby="control-tab-assistant" tabIndex={0} ref={assistantPanel} hidden={controlTab !== 'assistant'}>
                   {locationPicker}
+                  {dismissSelectedReview}
                   {currentPageIssue && (activePage?.kind==='remote' || !issue && !panoramaIssue) ? <PageIssueDetails item={currentPageIssue.item}
                     onLocate={()=>setPageIssue({...currentPageIssue,attempt:currentPageIssue.attempt+1})} /> : panoramaIssue && !panoramaContext ? <section className="assistant-body" aria-label="状态问题详情">
                     <h3>{panoramaIssue.item.help}</h3><p>{panoramaIssue.item.description}</p>
                     <p><code>{panoramaIssue.item.selector}</code> · 此状态的问题可定位和复核，当前未提供自动源码修复。</p>
-                    <button type="button" className="secondary" disabled={working} onClick={locateInWorkspace}>在网页中验证</button>
                   </section> : <Assistant issue={issue} stateScoped={Boolean(panoramaContext)} history={history} knowledge={knowledge} ai={ai.configured}
                     contrastGroupSize={contrastGroupIds.length ? contrastGroupIds.length+1 : 0}
                     unmatchedContrastLocations={canGroupContrast ? Math.max(0,contrastLocations.size-contrastGroupIds.length-1) : 0}
                     singleLocation={Boolean(draft?.singleLocation)}
-                    onSingleLocation={singleLocation=>updateDraft({singleLocation,proposal:null})} engineering={state.project.mode === 'react-source' || state.project.mode === 'static-source'} visionReady={ai.visionConfigured} busy={working} proposal={proposal} analysis={draft?.analysis} purpose={draft?.purpose} onPurpose={chooseImagePurpose}
-                    onLocate={(issue || history) && !working ? locateInWorkspace : undefined}
+                    onSingleLocation={singleLocation=>updateDraft({singleLocation,proposal:null,prepared:undefined})} visionReady={ai.visionConfigured} busy={working} proposal={proposal} analysis={draft?.analysis} purpose={draft?.purpose} onPurpose={chooseImagePurpose}
                     previewUrl={issue?.ruleId === 'image-alt' ? route + '/issues/' + encodeURIComponent(issue.id) +
                       '/image-preview?snapshot=' + encodeURIComponent(state.project.currentSnapshot) : undefined}
-                    input={input} onInput={value => updateDraft({ value, edited: true })} onPropose={propose} onShowPatch={showPatch} onShowPreview={showRepairPreview}
-                    colorReviewRef={manualColorPreview ? setColorReviewHost : undefined} />}
+                    input={input} onInput={value => updateDraft({ value, edited: true })} onPropose={propose} onShowPatch={showPatch} prepared={draft?.prepared} />}
                 </div>
               </div>
               <div className="evidence-column" role="group" tabIndex={-1} ref={evidenceFocus} aria-label="网页交互与修复">
-                <Evidence state={state} interactive={page === 'workspace' ? renderInteractivePage() : null} autoScanning={scanning} pair={pair} pageRequest={pageRequest}
+                <Evidence state={state} interactive={page === 'workspace' ? renderInteractivePage : undefined} autoScanning={scanning} pair={pair} pageRequest={pageRequest}
                   visiblePagePath={activePage?.kind==='live' ? activePage.path.split(/[?#]/)[0] : undefined}
                   onChoosePage={state.browserCapture ? undefined : path=>{
                     if (!/\.html?$/i.test(path) || view!=='interactive') return;
@@ -1094,16 +1245,15 @@ function App({account,signOut,openUpgrade,openVerification}:{account:Account;sig
                   }} jump={panoramaJump} onInspection={setInspection} stateScoped={Boolean(panoramaIssue)} issue={issue} history={history} proposal={proposal} view={view} onView={changeEvidenceView} problem={(history?.issue ?? issue) ? issueTitle((history?.issue ?? issue)!) : '当前问题'}
                   impact={issueNames[(history?.issue ?? issue)?.ruleId ?? '']?.[1] ?? (history?.issue ?? issue)?.description ?? '需核对目标元素。'}
                   busy={working} applying={busy === applyingLabel} archivedEvidence={archivedEvidence}
-                  patchReady={patchReady} reviewHost={manualColorPreview ? colorReviewHost : null}
-                  onConfirm={() => setConfirmApply(true)} onReject={reject} />
+                  patchReady={patchReady}
+                  versionToggle={showHistoryToggle ? renderVersionToggle() : undefined} onConfirm={apply} onReject={reject} />
               </div>
             </div>
-            <div className="bottom-note"><ShieldCheck size={16} /><span>修复应用于本地副本。自动复测结果和人工检查项见报告。</span><button onClick={() => openPage('report')}>查看完整报告 <ArrowRight size={14} /></button></div>
+            <div className="bottom-note"><ShieldCheck size={16} /><span>补丁保存为独立版本，可重新检测或回退。</span><button onClick={() => openPage('report')}>查看完整报告 <ArrowRight size={14} /></button></div>
           </section></>}
         <footer><span>A11y Studio · 网页无障碍工作区</span><span>基于 Chromium 和 axe-core</span></footer>
       </div>
     </main>
-    {confirmApply && proposal && patchReady && <ConfirmDialog imagePurpose={proposal?.imagePurpose} sourceReview={Boolean(proposal.sourceReview)} onClose={() => setConfirmApply(false)} onConfirm={apply} />}
   </div>;
 }
 
@@ -1125,17 +1275,53 @@ function PageDiagnosticStatus({result,onRetry}:{result?:WorkspacePageDiagnostics
   </div>;
 }
 
-function PageDiagnosticReview({result}:{result?:WorkspacePageDiagnostics}) {
+function PageDiagnosticReview({result,onLocate,decisions,onDecision,behavior,scan}:{
+  result?:WorkspacePageDiagnostics; onLocate:(selector:string)=>void; decisions:ReviewDecisions; onDecision:(id:string,decision:ReviewDecision)=>void;
+  behavior?: NonNullable<NonNullable<State['current']>['detection']>['behavior']; scan?:State['current'];
+}) {
   if (result?.status !== 'ready' || !result.coverage) return null;
   const {review,bestPractices} = result.coverage;
   return <div className="workspace-page-review">
-    {[
-      {label:'待人工复核',rules:review},
-      {label:'最佳实践建议',rules:bestPractices},
-    ].map(({label,rules}) => rules.length > 0 && <details key={label}>
-      <summary>{label} · {rules.reduce((count,rule)=>count+rule.count,0)} 处</summary>
-      <ul>{rules.map(rule=><li key={rule.id}>{issueNames[rule.id]?.[0] ?? rule.help} · {rule.count} 处</li>)}</ul>
-    </details>)}
+    {[{label:'待人工复核',rules:review,manual:true},{label:'可选优化建议',rules:bestPractices,manual:false}].map(({label,rules,manual})=>{
+      const entries=rules.flatMap(rule=>(rule.evidence ?? []).map(entry=>({rule,entry,
+        id:JSON.stringify([rule.id,entry.selector,entry.attributes,entry.missingRefs])})));
+      const pending=entries.filter(({id})=>!decisions[id]);
+      if (!entries.length) return null;
+      const render=({rule,entry,id}:typeof entries[number])=>{
+        const tabindex=rule.id==='tabindex';
+        const tab=tabindex ? behavior?.findings.find(item=>item.ruleId==='focus-order-positive-tabindex' && item.selector===entry.selector) : undefined;
+        const repair=manual ? behavior?.findings.filter(item=>entry.missingRefs.length ? item.ruleId==='aria-broken-idref' : rule.id.includes('focus') && item.ruleId==='focus-style-unchanged').map(reviewRepairIssue)
+          .find(item=>item?.selector===entry.selector) : undefined;
+        const decision=decisions[id]?.status;
+        const source=scan?.sourceLocations?.[entry.selector];
+        const sourceCandidates=scan?.reviewSourceCandidates?.[entry.selector];
+        return <li key={id} className="workspace-review-evidence">
+          <b>{tabindex ? 'Tab 顺序建议' : issueNames[rule.id]?.[0] ?? rule.help}</b>
+          <p><b>问题</b> · <code>{entry.element} · {entry.selector}</code>{entry.attributes.length ? ' · '+entry.attributes.join(' · ') : ''}</p>
+          <p><b>原因</b> · {entry.missingRefs.length ? '找不到引用目标 '+entry.missingRefs.join('、')+'。'
+            : tab ? `实际 Tab 第 ${tab.evidence.tabPosition} 步提前到达此控件，跳过了文档中更靠前的 ${tab.evidence.overtakenSelector}。`
+            : tabindex ? '正数 tabindex 会优先获得焦点，当前证据未确认顺序异常。' : '自动检测尚未确认此元素对实际使用的影响。'}</p>
+          <p><b>建议</b> · {entry.missingRefs.length ? '把引用改为实际标签或说明的 ID；无关联内容时移除该引用。'
+            : tabindex ? '用 Tab 核对焦点顺序；若不符合阅读顺序，调整 DOM 并移除正数 tabindex。'
+            : '定位元素，核对属性是否与控件的实际用途一致。'}</p>
+          {source && <p>源码 · {source.file}:{source.line}</p>}
+          {!!sourceCandidates?.length && <details><summary>候选源码位置</summary>{sourceCandidates.map(candidate=>
+            <p key={candidate.file+':'+candidate.line}><code>{candidate.file}:{candidate.line}</code> · {candidate.reason}</p>)}</details>}
+          <button type="button" className="secondary" onClick={()=>onLocate(entry.selector)}>定位元素</button>
+          {manual && !decision && <><button type="button" className="secondary" onClick={()=>{onDecision(id,{status:'confirmed',at:new Date().toISOString(),item:repair});}}>确认存在问题</button>
+            <button type="button" className="secondary" onClick={()=>onDecision(id,{status:'dismissed',at:new Date().toISOString()})}>不是问题</button></>}
+          {decision==='confirmed' && <><small>已确认</small>
+            <button type="button" className="secondary" onClick={()=>onDecision(id,{status:'dismissed',at:new Date().toISOString()})}>改为不是问题</button></>}
+          {decision==='dismissed' && <small>已标记为不是问题</small>}
+          {decision && <small> · {dateText(decisions[id].at)}</small>}
+        </li>;
+      };
+      return <details key={label}><summary>{label} · {pending.length} 处</summary>
+        <ul>{pending.map(render)}</ul>
+        {manual && entries.length > pending.length && <details><summary>审核记录 · {entries.length-pending.length} 处</summary>
+          <ul>{entries.filter(({id})=>decisions[id]).map(render)}</ul></details>}
+      </details>;
+    })}
   </div>;
 }
 
@@ -1372,14 +1558,14 @@ function downloadHighContrastImage(content: string) {
   download.click();
 }
 
-function Assistant({ issue, contrastGroupSize, unmatchedContrastLocations, singleLocation, onSingleLocation, stateScoped, history, knowledge, ai, engineering, visionReady, busy, proposal, analysis, purpose, onPurpose, previewUrl, input, onInput, onPropose, onShowPatch, onShowPreview, onLocate, colorReviewRef }: {
+function Assistant({ issue, contrastGroupSize, unmatchedContrastLocations, singleLocation, onSingleLocation, stateScoped, history, knowledge, ai, visionReady, busy, proposal, analysis, purpose, onPurpose, previewUrl, input, onInput, onPropose, onShowPatch, prepared }: {
   contrastGroupSize: number; unmatchedContrastLocations: number; singleLocation: boolean; onSingleLocation: (single: boolean) => void;
-  issue?: Issue; stateScoped: boolean; history?: HistoryItem; knowledge: Knowledge | null; ai: boolean; engineering: boolean; visionReady: boolean; busy: boolean;
+  issue?: Issue; stateScoped: boolean; history?: HistoryItem; knowledge: Knowledge | null; ai: boolean; visionReady: boolean; busy: boolean;
   proposal: Proposal | null; analysis?: ImageAltAnalysis | RepairAnalysis; purpose?: ImagePurpose;
   onPurpose: (purpose: ImagePurpose) => void; previewUrl?: string; input: string; onInput: (value: string) => void;
-  onPropose: (source: 'agent' | 'manual', value?: string, manualColor?: boolean) => void;
-  colorReviewRef?: (node: HTMLDivElement | null) => void;
-  onShowPatch: () => void; onShowPreview: () => void; onLocate?: (button: HTMLButtonElement) => void;
+  onPropose: (source: 'agent' | 'manual', value?: string) => void;
+  prepared?: Proposal;
+  onShowPatch: () => void;
 }) {
   const target = history?.issue ?? issue;
   const verification = history?.verification;
@@ -1392,7 +1578,6 @@ function Assistant({ issue, contrastGroupSize, unmatchedContrastLocations, singl
     : purpose === 'informative' && !input.trim()
       ? '请填写非空替代文本，再生成补丁预览。'
       : '');
-  const localAnalysis = engineering && ['label','select-name','link-name','focus-style-unchanged'].includes(target?.ruleId ?? '');
   const agentOnly = target?.ruleId === 'focus-style-unchanged' || target?.ruleId === 'aria-valid-attr-value' || target?.ruleId === 'aria-broken-idref';
   const trace = proposal?.agentTrace ?? (analysis && 'agentTrace' in analysis ? analysis.agentTrace : undefined);
   const refs = verification?.wcag ?? proposal?.wcag ?? knowledge?.refs ?? target?.wcag ?? [];
@@ -1404,25 +1589,27 @@ function Assistant({ issue, contrastGroupSize, unmatchedContrastLocations, singl
   const nameDecision = labelDecision ?? linkDecision;
   const suggested = imageAnalysis?.contentAlt ?? (analysis && 'suggestedValue' in analysis ? analysis.suggestedValue : null);
   const problem = target && (issueNames[target.ruleId]?.[1] ?? target.description);
+  const copy = analysis && 'copy' in analysis ? analysis.copy : undefined;
+  const brief = (value?: string) => value?.split(/(?<=[。！？；])|\n/).map(part=>part.trim())
+    .find(part=>part.length > 0 && part.length <= 64);
+  const suggestion = imageAnalysis?.purpose === 'decorative' ? '装饰图片使用空 alt。'
+    : isColor && suggested ? '将文字颜色调整为 ' + suggested + '，并复测对比度。'
+    : copy?.suggestion || (suggested && brief('建议值为「' + suggested + '」。')) ||
+      (nameDecision === 'needs-input' ? (linkDecision ? '请填写链接实际用途。' : '请填写字段用途。')
+        : brief(analysis?.reason) || (analysis ? '请展开详细依据，核对建议后再继续。' : '可先分析问题，再审核修复建议。'));
   return <>
     {!history && <div className="assistant-toolbar">
       <span className="ai-pill"><Sparkles size={13} />{isImageAlt ? (visionReady ? '视觉 AI 已配置' : '视觉 AI 未配置') : (ai ? 'AI 已配置' : 'AI 未配置')}</span>
       {issue && repairableIssueNames.has(issue.ruleId) && !agentOnly && !busy && <a href="#repair-value">前往修复操作</a>}
     </div>}
-    {target ? <div className="assistant-body">
+    {target ? <div className="assistant-body repair-assistant-body">
       <div className="issue-heading"><span className={'issue-dot' + (history ? ' fixed' : '')} aria-hidden="true">{history ? <Check size={16} /> : '!'}</span><div><h3>{issueTitle(target)}</h3><span>{target.ruleId} · {impactName[target.impact] ?? target.impact}</span></div></div>
-      {target.source && <p className="muted note">组件源码 <code>{target.source.file}:{target.source.line}</code></p>}
-      {!analysis && <p className="muted note">{problem}</p>}
-      {analysis && <div className="proposal" role="status">
-        <p><b>问题</b> · {problem}</p>
-        <p><b>建议</b> · {imageAnalysis?.purpose === 'decorative'
-          ? '若确认纯装饰，可用空 alt。' + (suggested ? ' 内容性候选：' + suggested : '')
-          : suggested ? (isColor ? '查看下方颜色预览。' : (linkDecision ? '链接名称：' : labelDecision ? '添加可见标签：' : isImageAlt ? '替代文本候选：' : '建议值：') + suggested) : nameDecision === 'needs-input' ? (linkDecision ? '在下方填写链接实际用途，再生成补丁。' : '请填写字段用途。') : '请人工确定合适的修复值。'}</p>
-        <p><b>{nameDecision === 'confirm' ? '建议人工确认' : nameDecision === 'needs-input' ? '需要补充信息' : analysis.status === 'needs-manual-review' || !suggested ? '待人工确认' : '理由'}</b> · {analysis.reason}</p>
-        {agentRun && <p><b>分析方式</b> · {agentRun.usage.requests > 0
-          ? `模型请求 ${agentRun.usage.requests} 次，候选验证 ${agentRun.attempts} 次${agentRun.usage.complete ? `，输入 ${agentRun.usage.inputTokens} / 输出 ${agentRun.usage.outputTokens} tokens` : '，用量信息不完整'}`
-          : agentRun.usage.complete ? '依据规则与浏览器证据生成，本次未调用语言模型' : '模型分析未完成，请人工确认或重试'}。</p>}
-      </div>}
+      {target.source && <p className="muted note">组件源码 <code>{target.source.file} · 第 {target.source.line} 行</code></p>}
+      <dl className="repair-copy" aria-live="polite">
+        <dt>问题</dt><dd>{copy?.problem || issueTitle(target)}</dd>
+        <dt>原因</dt><dd>{copy?.cause || brief(problem) || (refs.length ? '未满足 WCAG ' + refs.join('、') + ' 的要求。' : '此项需要核对网页的实际使用体验。')}</dd>
+        <dt>建议</dt><dd>{suggestion}</dd>
+      </dl>
       {imageAnalysis?.legibility && <section className="image-legibility-review" aria-label="图片可读性建议">
         <h4>图片可读性 · 待人工复核</h4>
         <p>{imageAnalysis.legibility.observation}</p>
@@ -1436,11 +1623,12 @@ function Assistant({ issue, contrastGroupSize, unmatchedContrastLocations, singl
           }}>下载高对比 PNG</button>
         </figure>}
       </section>}
-      {onLocate && <div className="repair-actions">
-        <button type="button" className="secondary" onClick={event => onLocate(event.currentTarget)}>在网页中验证</button>
-      </div>}
       <details className="detail-block">
         <summary>查看详细依据</summary>
+        {ai && !history && <p>AI 分析会向模型服务发送相关页面文本，图片或图标分析还可能发送局部图片。请确认内容适合发送。</p>}
+        {analysis?.reason && <p>{analysis.reason}</p>}
+        {target.selector && <p>元素定位 <code>{target.selector}</code></p>}
+        {agentRun && <p>模型请求 {agentRun.usage.requests} 次 · 候选验证 {agentRun.attempts} 次 · 输入 {agentRun.usage.inputTokens} / 输出 {agentRun.usage.outputTokens} tokens</p>}
         {imageAnalysis && <p><b>{imageAnalysis.media ? 'AI 图片用途判断' : '图片用途'}：</b>{imagePurposeLabel[imageAnalysis.purpose]}</p>}
         {analysis?.description && <p><b>AI 视觉观察：</b>{analysis.description}</p>}
         {analysis?.detail && <p>{analysis.detail}</p>}
@@ -1455,9 +1643,15 @@ function Assistant({ issue, contrastGroupSize, unmatchedContrastLocations, singl
         {proposal?.risk && <p>{proposal.risk}</p>}
         {proposal && <button type="button" className="secondary" onClick={onShowPatch}>查看完整代码差异</button>}
       </details>
-      {verification ? <div className="verification-card">
+      {verification?.status === 'applied' ? <div className="verification-card"><h4>补丁已应用</h4><p>可使用「重新检测」更新问题状态。</p></div> : verification ? <div className="verification-card">
         <h4><CheckCircle2 size={16} />复测通过</h4>
+        <p>{verification.targetFixed ? '已修复，目标问题在复测中消失。' : '已完成复测，请核对结果。'}</p>
+        <details className="detail-block"><summary>查看复测详情</summary>
         <p>{verification.reason}</p>
+        {!!verification.pendingChecks?.length && <details>
+          <summary>待进一步验证</summary>
+          <ul>{verification.pendingChecks.map((check,index)=><li key={index}>{check}</li>)}</ul>
+        </details>}
         {isImageAlt && <p><b>图片语义审核：</b>{verification.imageReview
           ? '用户已确认 · ' + imagePurposeLabel[verification.imageReview.purpose]
           : '未记录人工确认'}。自动复测只验证规则和页面结构。</p>}
@@ -1474,13 +1668,13 @@ function Assistant({ issue, contrastGroupSize, unmatchedContrastLocations, singl
         {verification.proposalReason && <p><b>历史修复方案</b> {verification.proposalReason}</p>}
         {verification.agentTrace && <div><h4>AI 工具调用记录</h4><ol>{verification.agentTrace.map((step, index) => <li key={index}>{step.summary} <code>{step.tool}</code></li>)}</ol></div>}
         {verification.sources && <div><h4>检索依据</h4><ul>{verification.sources.map(source => <li key={source.id}><a href={source.url} target="_blank" rel="noreferrer">{source.title} · {source.refs.join('、')}</a></li>)}</ul></div>}
-        <small>{dateText(verification.createdAt)}</small>
+        <small>{dateText(verification.createdAt)}</small></details>
         {(verification.diff || verification.sourceReview) && <button type="button" className="secondary history-patch" onClick={onShowPatch}>查看历史补丁</button>}
       </div> : repairableIssueNames.has(target.ruleId) ? <>
         {isImageAlt && <>
           {previewUrl && <ImagePreview key={previewUrl} url={previewUrl} />}
           <fieldset disabled={busy} className="image-purpose" aria-describedby={previewHint ? 'repair-preview-hint' : undefined}>
-            <legend>请选择实际图片用途</legend>
+            <legend>图片用途（可修改）</legend>
             <label><input type="radio" name="image-purpose" checked={purpose === 'informative'}
               onChange={() => onPurpose('informative')} /> 内容性图片</label>
             <label><input type="radio" name="image-purpose" checked={purpose === 'decorative'}
@@ -1496,41 +1690,23 @@ function Assistant({ issue, contrastGroupSize, unmatchedContrastLocations, singl
           {unmatchedContrastLocations > 0 && <p className="muted note">
             同组另有 {unmatchedContrastLocations} 处未在修复副本的检测结果中匹配到，需重新检测。
           </p>}
-          {ai && <p className="muted">AI 根据文字和背景颜色推荐配色。</p>}
-          <div className="repair-actions">
-            {ai && <button id="repair-value" type="button" className="button dark" disabled={busy} onClick={() => onPropose('agent')}><Sparkles size={15} />AI 推荐颜色</button>}
-            {!engineering && !stateScoped && <button id={ai ? undefined : 'repair-value'} type="button" className={ai ? 'secondary' : 'button dark'} disabled={busy} onClick={() => onPropose('manual', '')}>按对比度推荐</button>}
-          </div>
-          <details className="detail-block">
-            <summary id={!ai && (engineering || stateScoped) ? 'repair-value' : undefined}>自选颜色</summary>
-            <p className="muted note">选色后先预览，达标即可在这里应用修复。</p>
-            <div className="repair-actions">
-              <label className="repair-color-picker"><span>修复颜色</span><input type="color" value={chosenColor || '#000000'} disabled={busy} onChange={event => onInput(event.target.value)} /></label>
-              <button id="manual-color-preview" type="button" className="secondary" disabled={busy}
-                onClick={() => onPropose('manual', chosenColor || '#000000', true)}>预览所选颜色</button>
-            </div>
-          </details>
-          {colorReviewRef && <div ref={colorReviewRef} className="manual-color-review" />}
+          <label className="repair-color-picker"><span>修复颜色</span><input id="repair-value" type="color" value={chosenColor || '#000000'} disabled={busy} onChange={event => onInput(event.target.value)} /></label>
         </section> : <>
         {!agentOnly && <><label className="input-label" htmlFor="repair-value">建议的文本内容</label>
         <input id="repair-value" value={input} maxLength={['label','select-name','link-name'].includes(target.ruleId) ? 120 : 160} disabled={busy} readOnly={isImageAlt && purpose === 'decorative'} onChange={event => onInput(event.target.value)}
           placeholder={isImageAlt ? (purpose === 'decorative' ? '使用空 alt' : '填写图片在页面中传达的信息') : '填写符合实际用途的名称'} /></>}
-        <p className="muted note">{isImageAlt
-          ? (ai ? 'AI 结合图片和邻近文字分析用途、替代文本及可读性。确认纯装饰时可留空。' : '当前模型未配置为支持图像输入，可手动填写。')
-          : target.ruleId === 'link-name' ? '例如：查看课程目录。填写链接真实用途后即可生成补丁。'
-          : sourceRepairKinds[target.ruleId] === 'label' ? '可编辑标签文案，再生成原生标签补丁。'
-          : (ai ? (Object.hasOwn(sourceRepairKinds, target.ruleId) ? 'Agent 会检查局部源码并验证隔离副本。若需指定文案，填写后重新分析。' : 'AI 按需使用局部代码和视觉证据。') : '可手动填写内容并生成补丁。配置模型服务后可使用 AI 建议。')}</p>
-        {ai && <p className="muted note">AI 分析会向模型服务发送相关页面文本，图片或图标分析还会发送局部图片。系统会尝试遮蔽常见文本敏感信息，图片内容请在使用前自行确认。</p>}
-        <p id="repair-preview-hint" className="note" role="status">{previewHint || (isImageAlt && purpose === 'decorative' ? '预览将添加空 alt（alt=""），请确认该图片只用于装饰。' : null)}</p>
+        {isImageAlt && <p id="repair-preview-hint" className="muted note" role="status">
+          可修改替代文本。{previewHint && <span> {previewHint}</span>}
+        </p>}
+        </>}
         <div className="repair-actions">
-          <button className="button dark" disabled={busy || Boolean(previewHint) || (stateScoped && !input.trim()) || (['label','select-name','link-name'].includes(target.ruleId) && !input.trim()) || (agentOnly && !proposal?.sourceReview)} aria-describedby={isImageAlt ? 'repair-preview-hint' : undefined} onClick={() => onPropose('manual')}><Code2 size={15} />生成补丁预览</button>
-          <button className="secondary" disabled={busy || (!ai && !localAnalysis)} onClick={() => onPropose('agent')}><Sparkles size={15} />AI 分析与修复</button>
-        </div></>}
+          <button className="secondary" disabled={busy} onClick={() => onPropose('agent')}><Sparkles size={15} />AI 分析与修复</button>
+          <button className="button dark" disabled={busy || Boolean(previewHint) || (stateScoped && !input.trim()) || (['label','select-name','link-name'].includes(target.ruleId) && !input.trim()) || (agentOnly && !prepared && !proposal?.sourceReview)} aria-describedby={isImageAlt ? 'repair-preview-hint' : undefined} onClick={() => onPropose('manual', isColor ? chosenColor || '#000000' : input)}><Code2 size={15} />生成补丁预览</button>
+        </div>
         {proposal && <div className="proposal">
-          <div className="proposal-head"><b>{proposal.source !== 'manual' ? 'AI 修复建议' : isColor ? '颜色预览' : '人工修复建议'}</b><span>{proposal.imagePurpose ? '待人工确认' : '待审核'}</span></div>
+          <div className="proposal-head"><b>{proposal.source !== 'manual' ? 'AI 修复建议' : isColor ? '颜色预览' : '人工修复建议'}</b><span>补丁预览</span></div>
           {isColor && groupColors.size > 1 && <p>按各处背景推荐了 {groupColors.size} 种文字颜色。</p>}
           {isColor && groupColors.size <= 1 && /^#[0-9a-f]{6}$/i.test(proposal.patch.value) && <p className="repair-color-sample"><span aria-hidden="true" style={{backgroundColor:proposal.patch.value}} />{proposal.patch.value === '#000000' ? '黑色文字' : proposal.patch.value === '#ffffff' ? '白色文字' : '候选文字颜色'}</p>}
-          <button type="button" className="secondary" onClick={onShowPreview}>查看修复预览</button>
         </div>}
       </> : <p className="manual-only">{target.ruleId === 'target-size'
         ? '当前需要人工处理。检查可点击区域是否达到 24 × 24 CSS 像素，或是否满足目标间距等例外。调整内边距或相邻控件布局后，重新扫描桌面和窄屏。'
@@ -1647,11 +1823,11 @@ function Report({ state, onOpen, onWorkspace, onExploreIssue, busy }: {
     <div className="report-grid">
       <section className="panel report-section"><div className="panel-head"><div><span className="kicker">VALIDATION</span><h2>修复与验证记录</h2></div></div>
         {state.verifications.length ? state.verifications.map(item => <div className="log-row" key={item.id}>
-          <span className={'log-icon ' + (item.status === 'passed' ? 'ok' : 'failed')} aria-hidden="true">{item.status === 'passed' ? <Check size={15} /> : <X size={15} />}</span>
-          <div><b>{item.status === 'passed' ? '验证通过' : '验证失败 · 当前状态未更改'}</b>
+          <span className={'log-icon ' + (item.status !== 'failed' ? 'ok' : 'failed')} aria-hidden="true">{item.status !== 'failed' ? <Check size={15} /> : <X size={15} />}</span>
+          <div><b>{item.status === 'applied' ? '补丁已保存' : item.status === 'passed' ? '验证通过' : '验证失败 · 当前状态未更改'}</b>
             <p>{item.reason}</p>
             {item.imageReview && <p>图片语义审核：用户已确认 · {imagePurposeLabel[item.imageReview.purpose]}</p>}<small>{dateText(item.createdAt)} · 解决 {item.resolved.length} / 残留 {item.remaining.length} / 新增 {item.added.length}</small>
-            {item.status === 'passed' && [...item.resolved, ...(item.reviewedTarget ? [item.reviewedTarget] : [])].map(resolved => <button className="record-link" key={resolved.id} disabled={busy} onClick={() => onOpen({ issue: resolved, verification: item })}>{issueTitle(resolved)} · 查看证据 <ArrowRight size={14} /></button>)}
+            {item.status !== 'failed' && [...item.resolved, ...(item.reviewedTarget ? [item.reviewedTarget] : [])].map(resolved => <button className="record-link" key={resolved.id} disabled={busy} onClick={() => onOpen({ issue: resolved, verification: item })}>{issueTitle(resolved)} · 查看证据 <ArrowRight size={14} /></button>)}
             {item.diff && <details><summary>补丁与源码校验</summary>
               <p>{item.proposalReason}</p>
               {item.wcagUrl && <a href={item.wcagUrl} target="_blank" rel="noreferrer">{item.wcag?.join('、') || '规范依据'}</a>}
@@ -1672,37 +1848,6 @@ function Report({ state, onOpen, onWorkspace, onExploreIssue, busy }: {
     </div>
     <div className="report-actions"><button className="secondary" onClick={onWorkspace}>返回工作台</button></div>
   </div>;
-}
-
-function ConfirmDialog({ imagePurpose, sourceReview, onClose, onConfirm }: {
-  imagePurpose?: ImagePurpose; sourceReview: boolean; onClose: () => void; onConfirm: (semanticReviewed: boolean) => void;
-}) {
-  const [semanticReviewed, setSemanticReviewed] = useState(false);
-  const dialog = useRef<HTMLDialogElement>(null);
-  const cancel = useRef<HTMLButtonElement>(null);
-  useEffect(() => {
-    const element = dialog.current;
-    const previous = document.activeElement;
-    element?.showModal();
-    cancel.current?.focus();
-    return () => {
-      element?.close();
-      if (previous instanceof HTMLElement && previous.isConnected) previous.focus();
-    };
-  }, []);
-  return <dialog ref={dialog} className="modal" aria-labelledby="confirm-title" aria-describedby="confirm-description" onCancel={event => { event.preventDefault(); onClose(); }}>
-    <button className="close" aria-label="关闭" onClick={onClose}><X size={18} /></button>
-    <span className="section-icon"><ShieldCheck size={20} /></span>
-    <h2 id="confirm-title">确认应用修复？</h2>
-    <p id="confirm-description">系统会修改当前版本的副本，并重新扫描、检查页面结构与控件聚焦。复测失败时继续使用上一个有效版本。</p>
-    {(imagePurpose || sourceReview) && <p><label><input type="checkbox" checked={semanticReviewed}
-      onChange={event => setSemanticReviewed(event.target.checked)} /> {sourceReview ? '我已核对修复内容和页面用途，确认适合应用' : '我已确认图片用途和替代文本符合页面语境'}
-      {imagePurpose && <>（{imagePurposeLabel[imagePurpose]}，已核对替代文本）</>}</label></p>}
-    <div className="confirm-actions">
-      <button ref={cancel} className="secondary" onClick={onClose}>取消</button>
-      <button className="button dark" disabled={Boolean((imagePurpose || sourceReview) && !semanticReviewed)} onClick={() => onConfirm(semanticReviewed)}>确认应用并复测 <ArrowRight size={15} /></button>
-    </div>
-  </dialog>;
 }
 
 createRoot(document.getElementById('root')!).render(<AccountGate>{(account,signOut,openUpgrade,openVerification)=><App key={account.id+':'+Boolean(account.isGuest)} account={account} signOut={signOut} openUpgrade={openUpgrade} openVerification={openVerification} />}</AccountGate>);

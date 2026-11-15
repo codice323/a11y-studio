@@ -20,6 +20,8 @@ type DiagnosticRuleSummary = {
   id: string;
   help: string;
   count: number;
+  selectors?: string[];
+  evidence?: {selector:string; element:string; attributes:string[]; missingRefs:string[]; detail?:string}[];
 };
 
 export type PageTarget = {

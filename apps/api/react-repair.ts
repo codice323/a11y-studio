@@ -7,7 +7,8 @@ import type { SourceChange } from '../../packages/shared/source-repair';
 type ReactPlan =
   | {kind:'label'|'button'|'link'|'alt';value:string}
   | {kind:'contrast';value:string;file:string}
-  | {kind:'focus';file:string};
+  | {kind:'focus';file:string}
+  | {kind:'aria';attribute:'aria-labelledby'|'aria-describedby';refs:string[]};
 
 export function compileReactRepair(dir:string, location:SourceLocation|undefined, plan:ReactPlan, reason:string) {
   if(!location)throw new Error('无法把浏览器元素唯一映射到 JSX/TSX，请人工定位源码。');
@@ -53,7 +54,12 @@ export function compileReactRepair(dir:string, location:SourceLocation|undefined
   };
   let after:string;
   let newId:string|undefined;
-  if(plan.kind==='label'){
+  if(plan.kind==='aria'){
+    if(attribute(plan.attribute)?.value?.type!=='Literal') throw new Error('ARIA 引用来自动态或共享属性，请人工核对源码。');
+    const old=attribute(plan.attribute)!;
+    if (!plan.refs.every(ref=>/^[\w:.-]+$/.test(ref))) throw new Error('引用 ID 格式需要人工检查。');
+    after=before.slice(0,old.start)+plan.attribute+'='+JSON.stringify(plan.refs.join(' '))+before.slice(old.end);
+  }else if(plan.kind==='label'){
     if(!['input','select','textarea'].includes(site.tag)||attribute('aria-labelledby')||attribute('aria-label')||
       (attribute('id')&&!id))throw new Error('仅支持可确认用途、无动态关联的原生表单控件。');
     if(id&&/\s/.test(id))throw new Error('控件 ID 无法建立可靠的标签关联。');

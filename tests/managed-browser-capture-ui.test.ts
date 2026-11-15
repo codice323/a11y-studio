@@ -377,19 +377,20 @@ test('URL 和 ZIP 可在诊断工作台内交互、修复和验证', {timeout:12
     await page.waitForFunction(()=>document.querySelectorAll('.live-screen .highlight').length===2);
     await page.getByLabel('问题位置').selectOption({index:1});
     assert.equal(await page.getByRole('checkbox',{name:'修复同组 2 处'}).isChecked(),true);
-    await page.getByText('自选颜色',{exact:true}).click();
     const repairColor = page.getByLabel('修复颜色');
     assert.equal(await repairColor.getAttribute('type'),'color');
     await repairColor.fill('#1c2731');
-    const customColorPreview=assistant.getByRole('button',{name:'预览所选颜色'});
-    const applyCustomColor=assistant.getByRole('button',{name:'确认应用修复',exact:true});
+    const customColorPreview=assistant.getByRole('button',{name:'生成补丁预览'});
+    const applyCustomColor=page.getByRole('button',{name:'确认应用修复',exact:true});
     await customColorPreview.click();
     await page.getByText(/对比度 4\.34:1 → 3\.49:1，要求 4\.5:1/).waitFor();
     await page.getByText('同组 2 处，预览验证 1 处达标。',{exact:true}).waitFor();
-    await assistant.getByText(/1\/2 处对比度达标/).waitFor();
+    await page.getByText(/1\/2 处对比度达标/).waitFor();
     assert.equal(await applyCustomColor.isDisabled(),true);
-    const recommend=page.getByRole('button',{name:'AI 推荐颜色'});
+    const recommend=page.getByRole('button',{name:'AI 分析与修复'});
     await recommend.click();
+    await page.waitForFunction(()=>document.querySelector<HTMLInputElement>('#repair-value')?.value==='#080808');
+    await customColorPreview.click();
     await page.getByText(/对比度 4\.34:1 → 4\.6\d:1，要求 4\.5:1/).waitFor();
     assert.equal(await repairColor.inputValue(),'#080808');
     await page.getByText('同组 2 处，预览验证 2 处达标。',{exact:true}).waitFor();
@@ -400,12 +401,10 @@ test('URL 和 ZIP 可在诊断工作台内交互、修复和验证', {timeout:12
       sample.background.join(',')==='78,110,242' && sample.required===4.5));
     modelColor='#ffffff';
     await recommend.click();
-    await page.getByText(/对比度 4\.34:1 → 4\.84:1，要求 4\.5:1/).waitFor();
-    await assistant.getByRole('status').filter({hasText:'AI 配色未通过全部位置的检查'}).waitFor();
-    assert.equal(await repairColor.inputValue(),'#000000');
+    await assistant.getByText(/模型未给出可通过全部位置检查的配色/).first().waitFor();
     await repairColor.fill('#080808');
     await customColorPreview.click();
-    await assistant.getByText('2 处对比度均达标，可以应用修复。',{exact:true}).waitFor();
+    await page.getByText('2 处对比度均达标，可以应用修复。',{exact:true}).waitFor();
     await repairColor.fill('#1c2731');
     assert.equal(await applyCustomColor.isDisabled(),true);
     await repairColor.fill('#080808');
@@ -423,7 +422,6 @@ test('URL 和 ZIP 可在诊断工作台内交互、修复和验证', {timeout:12
     await page.getByRole('tab',{name:'问题与历史'}).click();
     await page.getByRole('button',{name:/^待处理/}).click();
     await currentIssues().getByRole('button',{name:/文字对比度不足/}).click();
-    await page.getByText('自选颜色',{exact:true}).click();
     await repairColor.fill('#080808');
     await customColorPreview.click();
     await applyCustomColor.click().catch(async error=>{

@@ -21,7 +21,7 @@ export type LiveComparison = {
   id:string; revision:number;
   capture:{ count:number; elapsedMs:number }; left:LiveFrame; right:LiveFrame;
   modes:Record<LiveSide,'source'|'snapshot'|'replay'>;
-  outcome?: { action:string; side:LiveSide; target?:string; role?:string; delta?:number; percent?:number; scroll?:Partial<Record<LiveSide,{container:string; position:number}>>; matched:boolean | null; reason?:string;
+  outcome?: { action:string; side:LiveSide; target?:string; role?:string; delta?:number; scrollRemainder?:number; percent?:number; scroll?:Partial<Record<LiveSide,{container:string; position:number}>>; matched:boolean | null; reason?:string;
     uncapturedUrl?:string; executions?: Partial<Record<LiveSide,{status:'executed'|'failed'|'unmatched'; path?:string; focus?:string}>> };
   differences:{ route:boolean; dom:boolean; semantics:boolean; focus:boolean; visual:boolean };
   observations:Record<LiveSide,LiveFinding[]>;

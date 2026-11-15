@@ -2,7 +2,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import fs from 'node:fs';import path from 'node:path';import {chromium,type Browser,type Page} from 'playwright-core';import * as cheerio from 'cheerio';
 import {db,id,now,hash,DATA,safePath,snapshotDir,snapshot,audit} from './storage';
 import { buildReactProject, isReactProject, originAttribute, sourceSelector, type SourceLocation } from './project-build';
-import { scanRules } from './scan-rules';
+import { visionFindings, scanRules } from './scan-rules';
 import { scanBehavior, unavailableBehavior } from './scan-behavior';
 import type { BehaviorAudit, DetectionEvidence } from '../../packages/shared/types';
 
@@ -174,7 +174,7 @@ async function scanDirectory(projectId: string, snapshotId: string, dir: string,
    }),
   ]).finally(() => clearTimeout(timeout));
   const rulesMs = performance.now() - rulesStarted;
-  const issues=[];for(const violation of results.violations)for(const node of violation.nodes){const selector=typeof node.target[0]==='string'?node.target[0]:'';let bounds=null;try {const box=selector?await page.locator(selector).first().boundingBox({timeout:1500}):null;if(box)bounds=box;}catch{} issues.push({id:hash(violation.id+'|'+selector).slice(0,20),ruleId:violation.id,selector,impact:violation.impact||'unknown',help:violation.help,description:violation.description,helpUrl:violation.helpUrl,html:node.html,wcag:violation.tags.filter((t:string)=>/^wcag\d/.test(t)),bounds,source:await location(selector)});}
+  const issues=[];for(const violation of visionFindings(results.violations))for(const node of violation.nodes){const selector=typeof node.target[0]==='string'?node.target[0]:'';let bounds=null;try {const box=selector?await page.locator(selector).first().boundingBox({timeout:1500}):null;if(box)bounds=box;}catch{} issues.push({id:hash(violation.id+'|'+selector).slice(0,20),ruleId:violation.id,selector,impact:violation.impact||'unknown',help:violation.help,description:violation.description,helpUrl:violation.helpUrl,html:node.html,wcag:violation.tags.filter((t:string)=>/^wcag\d/.test(t)),bounds,source:await location(selector)});}
   const functionChecks=await page.evaluate(()=>{const controls=Array.from(document.querySelectorAll<HTMLElement>('a[href],button,input,select,textarea,[tabindex]'));if(controls.length>2000)throw new Error('交互控件超过检测上限。');return controls.map((el,index)=>{
     const style=getComputedStyle(el),visible=style.display!=='none'&&style.visibility!=='hidden'&&el.getClientRects().length>0,disabled=el.hasAttribute('disabled');let focusable=false;
     if(visible&&!disabled&&el.tabIndex>=0){el.focus({preventScroll:true});focusable=document.activeElement===el;el.blur();}
@@ -214,10 +214,28 @@ async function scanDirectory(projectId: string, snapshotId: string, dir: string,
   const timing = { rulesMs, behaviorMs: performance.now() - behaviorStarted };
   const detection: DetectionEvidence = { schemaVersion: 2, engine, timing, violations, incomplete, bestPractices, behavior };
   const sourceLocations:Record<string,SourceLocation>={};
-  if(product)for(const finding of behavior.findings.filter(item=>item.ruleId==='focus-style-unchanged')){
-    const source=await location(finding.selector);if(source)sourceLocations[finding.selector]=source;
+  const reviewSourceCandidates:Record<string,{file:string;line:number;tag:string;reason:string}[]>={};
+  if(product)for(const finding of behavior.findings.filter(item=>['focus-style-unchanged','aria-broken-idref'].includes(item.ruleId))){
+    const source=await location(finding.selector);
+    if(source) {sourceLocations[finding.selector]=source;continue;}
+    if (!finding.selector) continue;
+    const target=page.locator(finding.selector);
+    if(await target.count().catch(()=>0)!==1)continue;
+    const markers=await target.evaluate((node,attribute)=>{
+      const result:{key:string;direct:boolean}[]=[];
+      for(let element:Element|null=node;element && result.length<4;element=element.parentElement){
+        const key=element.getAttribute(attribute);
+        if(key)result.push({key,direct:element===node});
+      }
+      return result;
+    },originAttribute).catch(()=>[]);
+    reviewSourceCandidates[finding.selector]=markers.flatMap(({key,direct})=>{
+      const match=product.sources.get(key);
+      return match ? [{file:match.file,line:match.line,tag:match.tag,
+        reason:direct ? '该 JSX 声明对应多个运行时元素。' : '这是外层 JSX 节点，需人工核对目标由哪个组件生成。'}] : [];
+    });
   }
-  const result={...(product?{build:{tool:'esbuild',milliseconds:product.milliseconds},sourceLocations}:{}),id:auditId,projectId,snapshotId,status:'completed',issues,incomplete:incomplete.map(x=>({ruleId:x.id,help:x.help,count:x.nodes.length})),passes,functionChecks,contrastCheck,additionalContrast,regression,resourceFailures,screenshot:`/api/audits/${auditId}/screenshot`,size,createdAt:created,detection};
+  const result={...(product?{build:{tool:'esbuild',milliseconds:product.milliseconds},sourceLocations,reviewSourceCandidates}:{}),id:auditId,projectId,snapshotId,status:'completed',issues,incomplete:incomplete.map(x=>({ruleId:x.id,help:x.help,count:x.nodes.length})),passes,functionChecks,contrastCheck,additionalContrast,regression,resourceFailures,screenshot:`/api/audits/${auditId}/screenshot`,size,createdAt:created,detection};
   if(persist) db.prepare('UPDATE audits SET status=?,result=? WHERE id=?').run('completed',JSON.stringify(result),auditId);return result;
   }, 6000);
  } catch(error){const message=(error as Error).message;if(persist) db.prepare('UPDATE audits SET status=?,error=? WHERE id=?').run('failed',message,auditId);throw error;}

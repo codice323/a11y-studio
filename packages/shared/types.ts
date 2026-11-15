@@ -53,7 +53,9 @@ export type DetectionEvidence = {
 export type ImagePurpose = 'informative' | 'decorative';
 export type RepairSource = { id: string; title: string; refs: string[]; url: string; text: string };
 export type VisualMedia = { source: string; format: string; bytes: number };
+export type RepairCopy = { problem?: string; cause?: string; suggestion?: string; summary?: string };
 export type RepairAnalysis = {
+  copy?: RepairCopy;
   status: 'repair-review';
   suggestedValue: string | null;
   labelDecision?: 'confirm' | 'needs-input';

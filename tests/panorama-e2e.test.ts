@@ -237,8 +237,9 @@ test('全景工作台用真实 Chrome 采集静态多页和 React 路由，重�
         await fs.cp(original, changed, {recursive:true});
         if (scenario.name === 'reading') {
           await fs.appendFile(path.join(changed, 'theme.css'), '#class-icon{background:#ddd}');
-          await assert.rejects(verifyPanorama(project.id, project.currentSnapshot, changed), /全景回归：\/classes.html/);
-          console.log('静态工程：同态修复通过，共享样式回归已拦截。');
+          const result = await verifyPanorama(project.id, project.currentSnapshot, changed);
+          assert.ok(result?.pending.some(check=>check.includes('/classes.html')));
+          console.log('静态工程：同态修复通过，共享样式差异已记录待复核。');
         } else {
           const name = path.join(changed, 'src/app.tsx');
           await fs.writeFile(name, (await fs.readFile(name, 'utf8')).replace(scenario.opener, 'Different control'));

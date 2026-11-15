@@ -11,7 +11,7 @@ const { auditCandidate, withRepairPage } = await import('../apps/api/scan');
 const { checkOtherPages } = await import('../apps/api/page-regression');
 const { inspectCssEvidence } = await import('../apps/api/css-evidence');
 
-test('冻结开发集中的共享 CSS 跨页回归会被拦截，文档内修复通过', {timeout:40000}, async t=>{
+test('共享 CSS 跨页视觉差异待复核，新增明确违规会被拦截', {timeout:40000}, async t=>{
   t.after(()=>fs.rmSync(root,{recursive:true,force:true}));
   const cases = await import('./fixtures/cross-site/generalization.mjs');
   const fixture = cases.generalizationSites.find((site:{id:string})=>site.id==='d6-archives');
@@ -27,7 +27,9 @@ test('冻结开发集中的共享 CSS 跨页回归会被拦截，文档内修复
   assert.ok(issue);
   fs.cpSync(dir,candidate,{recursive:true});
   fs.appendFileSync(path.join(candidate,fixture.css),'\n#status { color: #595959 !important; }\n');
-  await assert.rejects(checkOtherPages(scope,candidate),/跨页回归：annex\.html.*视觉变化/);
+  assert.ok((await checkOtherPages(scope,candidate)).pending.some(check=>check.includes('annex.html')));
+  fs.appendFileSync(path.join(candidate,'annex.html'),'<button></button>');
+  await assert.rejects(checkOtherPages(scope,candidate),/跨页回归：annex\.html.*button-name/);
   fs.rmSync(candidate,{recursive:true,force:true});
   fs.cpSync(dir,candidate,{recursive:true});
   const ctx={...scope,issue,baseline};

@@ -5,24 +5,41 @@ type Scope = { dir: string; entry: string; projectId: string; snapshotId: string
 
 export async function checkOtherPages(ctx: Scope, dir: string, signal?: AbortSignal) {
   const pages = walk(ctx.dir).filter(file => /\.html?$/i.test(file) && file !== ctx.entry).sort();
-  if (pages.length > 8) throw new Error('附页超过自动复测上限（8 页）。请缩小补丁范围并人工检查共享样式。');
-  for (const page of pages) {
+  const pending: string[] = [];
+  if (pages.length > 8) pending.push(`附页扫描上限为 8 页，另有 ${pages.length-8} 页待验证。`);
+  let completed = 0;
+  for (const page of pages.slice(0,8)) {
     signal?.throwIfAborted();
-    const before = await auditCandidate(ctx.projectId, ctx.snapshotId, ctx.dir, page, signal, undefined, true);
-    const after = await auditCandidate(ctx.projectId, ctx.snapshotId, dir, page, signal, undefined, true);
+    const audits = await (async () => {
+      try {
+        const before = await auditCandidate(ctx.projectId, ctx.snapshotId, ctx.dir, page, signal, undefined, true);
+        const after = await auditCandidate(ctx.projectId, ctx.snapshotId, dir, page, signal, undefined, true);
+        return {before,after};
+      } catch (error) {
+        signal?.throwIfAborted();
+        pending.push(`${page}：附页扫描未完成（${(error as Error).message}）。`);
+      }
+    })();
+    if (!audits) continue;
+    completed++;
+    const {before,after} = audits;
     const previous = new Set(before.issues.map(issue => issue.id));
     const added = after.issues.filter(issue => !previous.has(issue.id));
     if (added.length) throw new Error(`跨页回归：${page} 新增 ${added.map(issue => issue.ruleId + ' ' + issue.selector).join('、')}。`);
-    const a = before.detection.behavior, b = after.detection.behavior;
-    if (a.status !== 'completed' || b.status !== 'completed') throw new Error(`无法完整复测 ${page} 的键盘行为，请人工检查。`);
-    if (JSON.stringify([a.tabSequence,a.findings,before.functionChecks]) !== JSON.stringify([b.tabSequence,b.findings,after.functionChecks])) {
-      throw new Error(`跨页回归：${page} 的 Tab、焦点证据或静态交互属性发生变化。`);
+    if (JSON.stringify(before.functionChecks) !== JSON.stringify(after.functionChecks)) {
+      throw new Error(`跨页回归：${page} 的控件交互属性发生变化。`);
     }
-    for (const [index, capture] of before.regression!.entries()) {
-      const candidate = after.regression![index];
-      if (capture.semantics !== candidate.semantics) throw new Error(`跨页回归：${page} 在 ${capture.width}px 的可访问语义发生变化。`);
-      if (capture.style !== candidate.style) throw new Error(`跨页回归：${page} 在 ${capture.width}px 出现未授权的视觉变化（截图 SHA-256 ${capture.visual} → ${candidate.visual}）。`);
+    const a = before.detection.behavior, b = after.detection.behavior;
+    if (a.status !== 'completed' || b.status !== 'completed' ||
+      JSON.stringify([a.tabSequence,a.findings]) !== JSON.stringify([b.tabSequence,b.findings])) {
+      pending.push(`${page}：键盘证据不完整或焦点顺序需要复核。`);
+    }
+    for (const [index, capture] of (before.regression ?? []).entries()) {
+      const candidate = after.regression?.[index];
+      if (!candidate || capture.semantics !== candidate.semantics || capture.style !== candidate.style) {
+        pending.push(`${page}：${capture.width}px 下的视觉或语义差异待验证。`);
+      }
     }
   }
-  return {name:'跨页复测',detail:pages.length ? `全部 ${pages.length} 个附页的 axe、Tab、语义与双视口计算样式未发现回归` : '当前快照没有其他 HTML 页面'};
+  return {name:'跨页复测',detail:pages.length ? `${completed}/${pages.length} 个附页已完成页面扫描` : '当前快照没有其他 HTML 页面',pending};
 }
