@@ -214,9 +214,11 @@ export function Panorama({state, onInspection, disabled, jump, pair: versions, v
         setBatchFailures([]);
         selectRequest({site:true});
       }}>检测已发现页面</button>
-      {coverage && <p>{coverage}</p>}
-      {comparison && <p>{comparison}</p>}
-      {project.mode === 'snapshot' && <p>静态快照 · 动态交互状态未覆盖</p>}
+      {(coverage || comparison || project.mode === 'snapshot') && <div className="panorama-control-notes">
+        {coverage && <p>{coverage}</p>}
+        {comparison && <p>{comparison}</p>}
+        {project.mode === 'snapshot' && <p>静态快照 · 动态交互状态未覆盖</p>}
+      </div>}
     </div>)}
     {pagePickerHost && createPortal(
         <select aria-label="页面" value={view==='interactive' && visiblePagePath && paths.includes(visiblePagePath) ? visiblePagePath : page}

@@ -106,7 +106,7 @@
 }
 .app.editorial .control-tabs { margin: 0 12px 10px; padding: 4px; background: #f2ece1; }
 .app.editorial .control-tabs button,
-.app.editorial .evidence-tabs button { min-height: 44px; font-size: 14px; }
+.app.editorial .evidence-tabs > button { min-height: 44px; font-size: 14px; }
 .app.editorial .control-tabs button[aria-selected="true"],
 .app.editorial .evidence-tabs button:is([aria-pressed="true"], [aria-selected="true"]) {
   color: #853e2b;
@@ -147,6 +147,29 @@
 .app.editorial .preview { border-radius: 11px; }
 .app.editorial .evidence-tabs { background: #f2ece1; }
 .app.editorial .evidence-tabs .developer-options summary { min-height: 44px; color: #4e5351; font-size: 14px; }
+.app.editorial .developer-options summary:hover,
+.app.editorial .developer-options[open] summary {
+  background: var(--paper-raised);
+  border-color: var(--paper-line);
+}
+.app.editorial .developer-menu {
+  background: var(--paper-raised);
+  border-color: var(--paper-line);
+}
+.app.editorial .developer-menu > button {
+  width: 100%;
+  min-height: var(--workspace-control-height);
+  justify-content: flex-start;
+  padding-inline: 10px;
+}
+.app.editorial .developer-menu > button:hover { background: #f2ece1; }
+.app.editorial .developer-menu .comparison-developer-controls > button {
+  min-height: var(--workspace-control-height);
+  border-color: var(--paper-line);
+  background: var(--paper-raised);
+  padding-inline: 10px;
+}
+.app.editorial .developer-menu .comparison-developer-controls > button:hover:not(:disabled) { background: #f2ece1; }
 .app.editorial .evidence-head-actions .secondary { min-height: 42px; }
 .app.editorial .comparison-status,
 .app.editorial .evidence-state-note { color: #555a58; font-size: 13px; }
@@ -184,11 +207,11 @@
 .app.editorial .version-comparison-toolbar { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto; }
 .app.editorial .page-comparison-toolbar { grid-template-columns: minmax(0, 1.15fr) minmax(0, 1fr) max-content; }
 .app.editorial :is(.version-comparison-toolbar, .page-comparison-toolbar) label { min-width: 0; gap: 5px; font-size: 13px; }
-.app.editorial :is(.version-comparison-toolbar, .page-comparison-toolbar) select {
+.app.editorial :is(.version-comparison-toolbar, .page-comparison-toolbar, .workspace-page-picker, .issue-filters, .comparison-developer-controls) select {
   appearance: none;
   width: 100%;
   min-width: 0;
-  height: 44px;
+  height: var(--workspace-control-height);
   padding: 0 34px 0 11px;
   overflow: hidden;
   border: 1px solid #d3cabb;
@@ -201,6 +224,14 @@
   background-size: 12px;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+.app.editorial :is(.version-comparison-toolbar, .page-comparison-toolbar) select { height: 44px; }
+@media (forced-colors: active) {
+  .app.editorial :is(.version-comparison-toolbar, .page-comparison-toolbar, .workspace-page-picker, .issue-filters, .comparison-developer-controls) select {
+    appearance: auto;
+    background-image: none;
+    padding-inline-end: 8px;
+  }
 }
 .app.editorial :is(.version-comparison-toolbar, .page-comparison-toolbar) > button { min-width: max-content; }
 .app.editorial .panorama { min-width: 0; width: 100%; }
@@ -284,13 +315,12 @@
 .workspace-content .project-title { display: block; min-height: 0; }
 .workspace-content .project-title b,
 .workspace-state-heading > span { display: block; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.workspace-diagnosis-heading { padding: 4px 10px; }
+.workspace-diagnosis-heading { flex-wrap: wrap; }
 .workspace-diagnosis-heading h2 { flex-shrink: 0; }
-.workspace-diagnosis-actions { display: flex; align-items: center; justify-content: flex-end; gap: 12px; flex: 1; min-width: 0; }
+.workspace-diagnosis-actions { display: flex; align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: 8px 12px; flex: 1 1 auto; min-width: 0; }
 .workspace-diagnosis-actions .repair-version-toggle { flex: none; white-space: nowrap; }
 .workspace-page-picker { width: min(100%, 320px); min-width: 0; }
 .workspace-page-picker:empty { display: none; }
-.workspace-page-picker select { width: 100%; min-width: 0; height: var(--workspace-control-height); text-overflow: ellipsis; }
 .workspace-content .preview .comparison-view-tabs { margin-block: 0 3px; }
 .workspace-content .inline-interactive { padding: 2px 8px 8px; }
 .workspace-state-heading { display: flex; align-items: baseline; gap: 10px; margin-bottom: 4px; }
@@ -301,14 +331,19 @@
 }
 
 .workspace-content .preview .comparison-view-tabs { padding-block: 2px; }
-.workspace-content .comparison-view-tabs > button, .workspace-content .comparison-view-tabs summary { min-height: 28px; padding-block: 2px; }
+.app.editorial .workspace-content .comparison-view-tabs > button,
+.app.editorial .workspace-content .comparison-view-tabs .developer-options summary { min-height: var(--workspace-control-height); }
 .app.editorial .workspace-content .review-rail-heading { padding-block: 6px; }
 .workspace-content .control-tabs { margin-block: 4px; }
 .workspace-content .issue-filters {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 8px;
-  padding: 0 12px 6px;
+  gap: 10px;
+  padding: 0 12px 8px;
 }
-.app.editorial .issue-filters .filter-row { display: grid; gap: 3px; padding: 0; min-width: 0; }
-.app.editorial .issue-filters select { width: 100%; max-width: none; min-height: 36px; text-overflow: ellipsis; }
+.app.editorial .issue-filters .filter-row { display: grid; grid-template-columns: minmax(0, 1fr); gap: 4px; padding: 0; min-width: 0; }
+.app.editorial .issue-filters select { max-width: 100%; }
+@media (max-width: 460px) {
+  .workspace-diagnosis-actions { flex-basis: 100%; justify-content: flex-start; }
+  .workspace-page-picker { width: 100%; }
+}
