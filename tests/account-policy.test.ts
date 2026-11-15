@@ -82,19 +82,19 @@ test('Chrome 验证登录、注册边界、游客隔离、额度、过期和清�
         assert.equal((await reply.json()).error,error);
       }
       await fillSignup('Boundary@example.test','x'.repeat(8));
+      await form.getByRole('status').filter({hasText:'注册成功，请使用邮箱和密码登录。'}).waitFor();
       await title.waitFor();
       await form.getByRole('button',{name:'前往注册'}).click();
       await fillSignup('boundary@example.test','x'.repeat(8));
-      await form.getByText(/注册请求已处理/).waitFor();
+      await form.getByRole('alert').filter({hasText:'该邮箱已注册，请直接登录'}).waitFor();
       await snap(form,'02-duplicate-email.png');
       const duplicate=await signup(' BOUNDARY@example.test ','x'.repeat(8));
-      assert.equal(duplicate.status(),200);
-      assert.deepEqual(await duplicate.json(),{ok:true,verificationRequired:false});
-      await form.getByRole('button',{name:'前往注册'}).click();
+      assert.equal(duplicate.status(),409);
+      assert.deepEqual(await duplicate.json(),{error:'该邮箱已注册，请直接登录'});
       await fillSignup('second@example.test','x'.repeat(20));
       await title.waitFor();
       const simultaneous=await Promise.all([signup(' Race@example.test ','abcdefgh'),signup('race@example.test','abcdefgh')]);
-      assert.deepEqual(simultaneous.map(r=>r.status()),[200,200]);
+      assert.deepEqual(simultaneous.map(r=>r.status()).sort(),[200,409]);
       assert.equal(db.prepare("SELECT count(*) FROM user WHERE email='race@example.test'").pluck().get(),1);
       assert.equal((await signup('limited@example.test','abcdefgh')).status(),429);
       assert.throws(()=>db.prepare("UPDATE user SET email=' Boundary@Example.test ' WHERE email='second@example.test'").run(),/UNIQUE/);
@@ -103,6 +103,8 @@ test('Chrome 验证登录、注册边界、游客隔离、额度、过期和清�
       const oldPassword='old-password-longer-than-twenty';
       db.prepare('INSERT INTO user (id,name,email,emailVerified,createdAt,updatedAt) VALUES (?,?,?,?,?,?)')
         .run('legacy-user','旧账号','legacy@example.test',0,now,now);
+      db.exec('ALTER TABLE user ADD COLUMN emailVerificationRequired INTEGER DEFAULT 0');
+      db.prepare('UPDATE user SET emailVerificationRequired=1 WHERE id=?').run('legacy-user');
       db.prepare('INSERT INTO account (id,accountId,providerId,userId,password,createdAt,updatedAt) VALUES (?,?,?,?,?,?,?)')
         .run('legacy-credential','legacy-user','credential','legacy-user',await hashPassword(oldPassword),now,now);
       async function login(email:string,password:string) {
@@ -116,6 +118,10 @@ test('Chrome 验证登录、注册边界、游客隔离、额度、过期和清�
         await page.getByRole('button',{name:'退出登录'}).click();
         await page.getByRole('heading',{name:'登录',exact:true}).waitFor();
       }
+      await form.getByLabel('邮箱',{exact:true}).fill('boundary@example.test');
+      await form.getByLabel('密码',{exact:true}).fill('wrong-password');
+      await form.getByRole('button',{name:'登录',exact:true}).click();
+      await form.getByRole('alert').filter({hasText:'邮箱或密码不正确。'}).waitFor();
       await login('boundary@example.test','x'.repeat(8));
       await logout(form);
       await login('legacy@example.test',oldPassword);
@@ -180,10 +186,31 @@ test('Chrome 验证登录、注册边界、游客隔离、额度、过期和清�
         const reply=await submit('projects/'+project.id+'/issues/unknown/proposals',{source:'agent'},guestA);
         assert.equal(reply.status(),i===5?429:400);
       }
+      const guestProject=await create(guestB);
+      assert.equal(guestProject.status(),201,await guestProject.text());
+      const guestProjectId=(await guestProject.json()).id as string;
+      const upgradeCredentials={email:'promoted@example.test',password:'test-password'};
+      await b.getByRole('button',{name:'保存我的项目 / 注册账号'}).click();
+      const dialog=b.getByRole('dialog',{name:'保存我的项目'});
+      await dialog.getByLabel('邮箱',{exact:true}).fill(upgradeCredentials.email);
+      await dialog.getByLabel('密码',{exact:true}).fill(upgradeCredentials.password);
+      await dialog.getByLabel('确认密码',{exact:true}).fill(upgradeCredentials.password);
+      const [upgrade]=await Promise.all([
+        b.waitForResponse(response=>response.url().endsWith('/api/auth/upgrade-guest')),
+        dialog.getByRole('button',{name:'注册并保存项目'}).click(),
+      ]);
+      await dialog.waitFor({state:'hidden'});
+      assert.equal(upgrade.status(),200,await upgrade.text());
+      const promoted=(await upgrade.json()).user;
+      assert.equal(promoted.id,identityB.id);
+      assert.equal(promoted.isGuest,undefined);
+      assert.equal((await get(guestB,protectedRoute(guestProjectId))).status(),200);
       const previousCookie=(await guestB.cookies()).find(cookie=>cookie.name.includes('session_token'));
       assert.ok(previousCookie?.httpOnly);
       await logout(b);
       assert.equal((await guestB.request.get(base+'/api/projects',{headers:{cookie:previousCookie.name+'='+previousCookie.value}})).status(),401);
+      assert.equal((await submit('auth/sign-in/email',upgradeCredentials,guestB)).status(),200);
+      assert.equal((await get(guestB,protectedRoute(guestProjectId))).status(),200);
       db.prepare('UPDATE user SET createdAt=? WHERE id=?').run(new Date(Date.now()-26*3600_000).toISOString(),identityA.id);
       assert.equal((await get(guestA,'/projects')).status(),401);
       await stop();

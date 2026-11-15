@@ -100,7 +100,7 @@ function readReviewDecisions(key:string):ReviewDecisions {
   try {return JSON.parse(localStorage.getItem(key) ?? '{}') ?? {};} catch {return {};}
 }
 
-function App({account,signOut,openUpgrade,openVerification}:{account:Account;signOut:()=>Promise<void>;openUpgrade:()=>void;openVerification:()=>void}) {
+function App({account,signOut,openUpgrade}:{account:Account;signOut:()=>Promise<void>;openUpgrade:()=>void}) {
   const [signingOut,setSigningOut] = useState(false);
   const [state, setState] = useState<State | null>(null);
   const [projects, setProjects] = useState<Project[]>([]);
@@ -1077,7 +1077,7 @@ function App({account,signOut,openUpgrade,openVerification}:{account:Account;sig
     </aside>
     <main className={state ? undefined : 'home-page'}>
       <header className="topbar"><div>工作空间 <span>/</span> <b>{state || captureUrl ? activeLabel : '我的项目'}</b></div><div className="topright">{account.isGuest && <span className="account-guest-label">游客模式</span>}<details className="account-menu"><summary>个人菜单</summary>
-        <div className="panel"><strong>个人资料</strong><p>{account.name}</p>{!account.isGuest && <p>{account.email}</p>}{account.emailVerified===false && <button className="secondary" type="button" onClick={openVerification}>验证邮箱</button>}
+        <div className="panel"><strong>个人资料</strong><p>{account.name}</p>{!account.isGuest && <p>{account.email}</p>}
           <button type="button" className="secondary" disabled={signingOut} onClick={()=>{
             setSigningOut(true);
             void signOut().catch(problem=>setError((problem as Error).message)).finally(()=>setSigningOut(false));
@@ -1849,4 +1849,4 @@ function Report({ state, onOpen, onWorkspace, onExploreIssue, busy }: {
   </div>;
 }
 
-createRoot(document.getElementById('root')!).render(<AccountGate>{(account,signOut,openUpgrade,openVerification)=><App key={account.id+':'+Boolean(account.isGuest)} account={account} signOut={signOut} openUpgrade={openUpgrade} openVerification={openVerification} />}</AccountGate>);
+createRoot(document.getElementById('root')!).render(<AccountGate>{(account,signOut,openUpgrade)=><App key={account.id+':'+Boolean(account.isGuest)} account={account} signOut={signOut} openUpgrade={openUpgrade} />}</AccountGate>);

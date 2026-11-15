@@ -2,9 +2,8 @@ import { useEffect, useId, useRef, useState, type FormEvent, type ReactNode } fr
 import { guestLifetimeHours, newPasswordError, passwordLimits } from '../../../packages/shared/account';
 
 import { rememberProject } from './project-location';
-import { AccountMail, readMailLink, type MailView } from './AccountMail';
 
-export type Account = {id:string;name:string;email:string;isGuest?:boolean;expiresAt?:string;emailVerified?:boolean;needsEmailVerification?:boolean};
+export type Account = {id:string;name:string;email:string;isGuest?:boolean;expiresAt?:string};
 const sessionChanged = 'a11y-studio.account-changed';
 
 async function accountRequest(path:string,body?:object) {
@@ -23,8 +22,7 @@ function notifyTabs() {
   try {localStorage.setItem(sessionChanged,String(Date.now()));} catch { /* Cookie sessions still apply. */ }
 }
 
-export function AccountGate({children}:{children:(account:Account,signOut:()=>Promise<void>,openUpgrade:()=>void,openVerification:()=>void)=>ReactNode}) {
-  const [mailView,setMailView]=useState(readMailLink);
+export function AccountGate({children}:{children:(account:Account,signOut:()=>Promise<void>,openUpgrade:()=>void)=>ReactNode}) {
   const [account,setAccount] = useState<Account|null|undefined>(undefined);
   const [loadingError,setLoadingError] = useState('');
   const check = useRef(0);
@@ -32,18 +30,6 @@ export function AccountGate({children}:{children:(account:Account,signOut:()=>Pr
   const [upgrading,setUpgrading]=useState(false);
   const upgradeDialog=useRef<HTMLDialogElement>(null);
   useEffect(()=>{
-    function consumeMailLink() {
-      const link=readMailLink();
-      if (!link) return;
-      const url=new URL(window.location.href);
-      url.hash='';
-      window.history.replaceState(null,'',url);
-      upgradeDialog.current?.close();
-      setUpgrading(false);
-      setMailView(link);
-    }
-    consumeMailLink();
-    window.addEventListener('hashchange',consumeMailLink);
     let active = true;
     const refresh = async (clear=false) => {
       const currentCheck = ++check.current;
@@ -69,7 +55,6 @@ export function AccountGate({children}:{children:(account:Account,signOut:()=>Pr
     window.addEventListener('focus',onFocus);
     return ()=>{
       active=false;
-      window.removeEventListener('hashchange',consumeMailLink);
       window.removeEventListener('storage',onStorage);
       window.removeEventListener('a11y-auth-required',onUnauthorized);
       window.removeEventListener('focus',onFocus);
@@ -87,7 +72,6 @@ export function AccountGate({children}:{children:(account:Account,signOut:()=>Pr
     wasSignedIn.current=true;
     setLoadingError('');
     cancelUpgrade();
-    setMailView(undefined);
     setAccount(user);
     notifyTabs();
   }
@@ -97,30 +81,15 @@ export function AccountGate({children}:{children:(account:Account,signOut:()=>Pr
     check.current++;
     wasSignedIn.current=false;
     rememberProject(null);
-    setMailView(undefined);
     setAccount(null);
     setLoadingError('');
     notifyTabs();
   }
 
   if (account === undefined) return <main className="account-shell"><p role="status">正在读取登录状态…</p></main>;
-  const activeMail=mailView ?? (account?.needsEmailVerification?{mode:'resend' as const,email:account.email}:undefined);
-  if (activeMail) return <AccountMail key={activeMail.mode} view={activeMail} send={accountRequest}
-    onBack={()=>{
-      if (!mailView && account?.needsEmailVerification) {void signOut();return;}
-      setMailView(undefined);
-      if (activeMail.mode==='reset') window.dispatchEvent(new Event('a11y-auth-required'));
-    }}
-    onVerified={()=>{
-      if (account) void accountRequest('get-session').then(session=>{
-        if (session?.user && activeMail.mode==='upgrade') acceptAccount(session.user);
-        else setAccount(session?.user??null);
-      }).catch(()=>{});
-    }}
-    pending={!mailView && Boolean(account?.needsEmailVerification)} onSignOut={account ? signOut : undefined} />;
-  if (!account) return <SignIn statusError={loadingError} onSignIn={acceptAccount} onMail={setMailView} />;
+  if (!account) return <SignIn statusError={loadingError} onSignIn={acceptAccount} />;
   return <>
-    {children(account,signOut,()=>setUpgrading(true),()=>setMailView({mode:'resend',email:account.email}))}
+    {children(account,signOut,()=>setUpgrading(true))}
     {upgrading && account.isGuest && <dialog className="account-upgrade-dialog" ref={upgradeDialog}
       aria-label="保存我的项目" onCancel={event=>{
         event.preventDefault();
@@ -131,7 +100,7 @@ export function AccountGate({children}:{children:(account:Account,signOut:()=>Pr
   </>;
 }
 
-function SignIn({statusError,onSignIn,onCancel,onMail}:{statusError:string;onSignIn:(user:Account)=>void;onCancel?:()=>void;onMail?:(view:MailView)=>void}) {
+function SignIn({statusError,onSignIn,onCancel}:{statusError:string;onSignIn:(user:Account)=>void;onCancel?:()=>void}) {
   const upgrade=Boolean(onCancel);
   const [register,setRegister] = useState(upgrade);
   const fieldId=useId();
@@ -142,7 +111,6 @@ function SignIn({statusError,onSignIn,onCancel,onMail}:{statusError:string;onSig
   const [confirmation,setConfirmation] = useState('');
   const [error,setError] = useState<{message:string;field?:'email'|'password'|'confirmation'}>();
   const [notice,setNotice] = useState('');
-  const [verificationSent,setVerificationSent]=useState(false);
   const [busy,setBusy] = useState<'form'|'guest'|null>(null);
   const passwordProblem = register && password ? newPasswordError(password) : undefined;
 
@@ -163,19 +131,12 @@ function SignIn({statusError,onSignIn,onCancel,onMail}:{statusError:string;onSig
       const address = email.trim().toLowerCase();
       if (upgrade) {
         const session=await accountRequest('upgrade-guest',{email:address,password});
-        if (session.pendingUpgrade) {
-          setPassword('');setConfirmation('');
-          setNotice('若邮箱可用于注册，请在当前浏览器打开邮件链接，确认保存项目。');
-          return;
-        }
         if (!session?.user || session.user.isGuest) throw new Error('无法读取正式登录会话，请重试。');
         onSignIn(session.user);
       } else if (register) {
-        const result=await accountRequest('sign-up/email',{email:address,password,name:address.split('@')[0]});
+        await accountRequest('sign-up/email',{email:address,password,name:address.split('@')[0]});
         switchMode(false);
-        setVerificationSent(Boolean(result.verificationRequired));
-        setNotice(result.verificationRequired?'注册请求已处理。若邮箱可用于注册，请查收验证邮件。':'注册请求已处理，请使用邮箱和密码登录。');
-        if(result.verificationRequired)onMail?.({mode:'resend',email:address});
+        setNotice('注册成功，请使用邮箱和密码登录。');
       } else {
         await accountRequest('sign-in/email',{email:address,password,rememberMe:true});
         const session = await accountRequest('get-session');
@@ -238,10 +199,6 @@ function SignIn({statusError,onSignIn,onCancel,onMail}:{statusError:string;onSig
           {busy==='guest'?'正在进入…':'游客登录'}
         </button>}
       </div>
-      {!register && <div className="account-entry-actions">
-        <button className="secondary" type="button" disabled={Boolean(busy)} onClick={()=>onMail?.({mode:'forgot',email})}>忘记密码</button>
-        {verificationSent && <button className="secondary" type="button" disabled={Boolean(busy)} onClick={()=>onMail?.({mode:'resend',email})}>验证邮箱</button>}
-      </div>}
       {!register && <small className="muted">游客数据临时保存 {guestLifetimeHours} 小时。</small>}
     </section>;
   return upgrade?card:<main className="account-shell">{card}</main>;

@@ -20,14 +20,11 @@ const deleteGuest = db.transaction((userId:string) => {
   if (!db.prepare('SELECT 1 FROM user WHERE id=? AND isAnonymous=1').get(userId)) return;
   const projects=db.prepare('SELECT id FROM projects WHERE owner_user_id=?').all(userId) as {id:string}[];
   for (const {id} of projects) eraseProjectRecords(id,userId);
-  db.prepare('DELETE FROM guest_upgrade_tokens WHERE user_id=?').run(userId);
   for (const table of ['session','account','guest_usage']) db.prepare('DELETE FROM '+table+' WHERE '+(table==='guest_usage'?'user_id':'userId')+'=?').run(userId);
   db.prepare('DELETE FROM user WHERE id=? AND isAnonymous=1').run(userId);
 });
 
 export function cleanExpiredGuests(now=Date.now()) {
-  db.prepare('DELETE FROM guest_upgrade_tokens WHERE expires_at<=?').run(now);
-  db.prepare('DELETE FROM account_mail_tokens WHERE expires_at<=?').run(now);
   // Allow running work to settle after access expires. Failed deletions remain eligible for retry.
   const cutoff = new Date(now-guestLifetimeMs-60*60*1000).toISOString();
   const users = db.prepare(`SELECT u.id FROM user u WHERE u.isAnonymous=1 AND julianday(u.createdAt)<=julianday(?)

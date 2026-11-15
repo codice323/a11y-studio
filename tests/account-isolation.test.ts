@@ -54,7 +54,7 @@ test('注册登录、真实校园项目修复、双账号资源隔离及旧项�
         await page.getByLabel('密码',{exact:true}).fill(password);
         await page.getByLabel('确认密码',{exact:true}).fill(password);
         await page.getByRole('button',{name:'注册',exact:true}).click();
-        await page.getByText(/注册请求已处理/).waitFor();
+        await page.getByText('注册成功，请使用邮箱和密码登录。',{exact:true}).waitFor();
         await login(page,email);
       }
       async function json(context:typeof a,route:string) {

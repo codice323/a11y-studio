@@ -15,7 +15,7 @@ import { actManagedBrowserSession, captureManagedBrowserSession, closeManagedBro
 import {accountFor,authEndpoints,initializeAccounts,requireSession,verifyRequest} from './auth';
 import {cleanExpiredGuests,releaseGuestProject,useGuestBudget} from './guests';
 import {eraseProjectRecords,flushProjectFiles,migrateProjectDeletion} from './project-deletion';
-await initializeAccounts(sessionId=>{closeAccountSession(sessionId);closeManagedCaptureSessionsForAuth(sessionId);});
+await initializeAccounts();
 migrateProjectDeletion();
 const app = express();
 app.disable('x-powered-by');
