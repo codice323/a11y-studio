@@ -13,6 +13,7 @@ import { diagnosePage, locatePageElement } from './page-diagnostics';
 import { db, hash, id, now, project as storedProject, proposal as storedProposal, snapshot, snapshotDir, walk } from './storage';
 import { validSnapshots } from './version-state';
 import { withProposalCandidate } from './repair';
+import { browserCapture } from './browser-capture';
 
 const localOrigin = 'http://a11y.local';
 const sides = ['left','right'] as const;
@@ -55,10 +56,14 @@ type Session = {
 const sessions = new Map<string,Session>();
 const replayPages = new WeakSet<Page>();
 
-function lease(session:Session, side:LiveSide, dir:string, entry:string, start?:string, candidate=false) {
+function isNewPageCrash(error:unknown) {
+  return error instanceof Error && error.message.startsWith('browserContext.newPage: Target crashed');
+}
+
+function lease(session:Session, side:LiveSide, dir:string, entry:string, start?:string, viewport?:{width:number;height:number}) {
   const signal = session.controller.signal;
   return new Promise<void>((resolve,reject) => {
-    const replay = !candidate && !session.stateId && replayAvailable(session.project) && (!start || start === entry);
+    const replay = !session.candidate && !session.stateId && replayAvailable(session.project) && (!start || start === entry);
     const inspect = async (page:Page,_product:unknown,resources:ResourceFailure[],network:BrowserRequestEvidence[]) => {
       page.setDefaultTimeout(2500);
       if(replay) replayPages.add(page);
@@ -75,8 +80,13 @@ function lease(session:Session, side:LiveSide, dir:string, entry:string, start?:
       resolve();
       if (!signal.aborted) await once(signal,'abort');
     };
-    const finished = (replay ? withReplayPage(session.project,session.versions[side],signal,page=>inspect(page,undefined,[],[])) :
-      withRepairPage(dir,entry,signal,inspect,3000,true,true)).catch(error => {
+    const open = () => replay ? withReplayPage(session.project,session.versions[side],signal,page=>inspect(page,undefined,[],[])) :
+      withRepairPage(dir,entry,signal,inspect,3000,true,true,viewport);
+    const finished = open().catch(async error => {
+      if (signal.aborted || !isNewPageCrash(error)) throw error;
+      console.warn('网页预览创建标签页时崩溃，正在重新启动。', error);
+      return open();
+    }).catch(error => {
       reject(error);
       if (!signal.aborted) session.controller.abort();
     });
@@ -106,13 +116,19 @@ export async function startLive(project:string, input:unknown, accountId:string,
     sessions.delete(session.id);
   },{once:true});
   try {
-    const leftReady=single ? undefined : lease(session,'left',snapshotDir(project,left),snapshot(project,left).entry,start);
+    const leftReady=single || proposalId ? undefined : lease(session,'left',snapshotDir(project,left),snapshot(project,left).entry,start);
     // A candidate directory must live as long as its isolated browser can request files.
     const rightReady = proposalId ? new Promise<void>((resolve,reject) => {
       void withProposalCandidate(proposalId,async candidate=>{
-        if(candidate.projectId!==project || candidate.version!==right) throw new Error('候选补丁与当前项目版本不匹配。');
+        if(candidate.projectId!==project || candidate.version!==right || (!single && candidate.version!==left)) throw new Error('候选补丁与当前项目版本不匹配。');
+        session.stateId=candidate.stateId;
         session.selectors={...session.selectors,right:candidate.selector};
-        await lease(session,'right',candidate.directory,candidate.entry,undefined,true);
+        const capturedSize=browserCapture(project)?.viewport;
+        const viewport=capturedSize && capturedSize.width<=4096 && capturedSize.height<=4096 ? capturedSize : undefined;
+        await Promise.all([
+          single ? undefined : lease(session,'left',candidate.original,candidate.entry,undefined,viewport),
+          lease(session,'right',candidate.directory,candidate.entry,undefined,viewport),
+        ]);
         resolve();
         await Promise.allSettled(session.finished);
       }).catch(reject);
@@ -122,9 +138,18 @@ export async function startLive(project:string, input:unknown, accountId:string,
       await session.pages.right!.page.evaluate(y => window.scrollTo({top:y,behavior:'instant'}),initialScroll);
     }
     await Promise.all((single ? ['right'] as const : sides).map(side=>locatePageElement(session.pages[side]!.page,session.selectors?.[side],true)));
+    if (proposalId && !single) {
+      const position=await session.pages.left!.page.evaluate(()=>({left:window.scrollX,top:window.scrollY}));
+      await session.pages.right!.page.evaluate(position=>window.scrollTo({...position,behavior:'instant'}),position);
+    }
     return await inspect(session,undefined,undefined,false);
   } catch (error) {
     controller.abort();
+    await Promise.allSettled(session.finished);
+    if (isNewPageCrash(error)) {
+      console.error('网页预览重新启动后仍无法创建标签页。', error);
+      throw new Error('网页预览浏览器启动失败。请点击「重新打开网页」重试。');
+    }
     throw error;
   } finally { session.pending = false; }
 }

@@ -27,8 +27,16 @@ export async function inspectAudit(projectId: string, auditId: string, selector:
 }
 
 export async function inspectProposal(id: string, signal: AbortSignal) {
-  const response = await fetch(`/api/proposals/${encodeURIComponent(id)}/preview`, { signal });
-  const data = await response.json();
-  if (!response.ok || data.proposalId !== id) throw new Error(data.error ?? '无法读取待应用补丁证据。');
-  return data as ProposalPreview;
+  const timeout = AbortSignal.timeout(60000);
+  try {
+    const response = await fetch(`/api/proposals/${encodeURIComponent(id)}/preview`, {
+      signal: AbortSignal.any([signal, timeout]),
+    });
+    const data = await response.json();
+    if (!response.ok || data.proposalId !== id) throw new Error(data.error ?? '无法读取待应用补丁证据。');
+    return data as ProposalPreview;
+  } catch (error) {
+    if (timeout.aborted && !signal.aborted) throw new Error('读取候选证据超时，请重试预览。');
+    throw error;
+  }
 }

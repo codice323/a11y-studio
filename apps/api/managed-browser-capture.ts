@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { chromium, type Browser, type BrowserContext, type Page, type Route } from 'playwright-core';
 import { ROOT, DATA, hash } from './storage';
-import { parsePublicUrl, requestPublicBrowserResource, type PublicBrowserBudget } from './url-snapshot';
+import { closePublicBrowserConnections, parsePublicUrl, requestPublicBrowserResource, type PublicBrowserBudget } from './url-snapshot';
 import { importBrowserCaptureData } from './browser-capture';
 import { diagnosePage, isWebsiteVerificationPage, locatePageElement, requireTargetPage, verificationPageMessage } from './page-diagnostics';
 import type { LiveFrame } from '../../packages/shared/live-comparison';
@@ -14,6 +14,7 @@ const MAX_SESSIONS = 2;
 const SESSION_TTL = 20 * 60 * 1000;
 const MAX_REQUESTS = 1200;
 const MAX_PARALLEL_REQUESTS = 24;
+const RESERVED_LAYOUT_REQUESTS = 6;
 const NETWORK_BUDGET = 96 * 1024 * 1024;
 const MAX_NAVIGATION_REDIRECTS = 5;
 const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
@@ -29,11 +30,13 @@ type Session = {
   browser: Browser;
   context: BrowserContext;
   page: Page;
+  initialUrl: URL;
+  navigationTargets: WeakMap<Page, URL>;
   controller: AbortController;
   budget: PublicBrowserBudget;
   requests: number;
   activeRequests: number;
-  requestWaiters: Array<() => void>;
+  requestWaiters: Array<{critical:boolean;wake:()=>void}>;
   failedResources: number;
   resourceFailures: Record<string,number>;
   actions: number;
@@ -66,6 +69,7 @@ async function closeSession(session: Session) {
   session.closed = true;
   clearTimeout(session.expires);
   session.controller.abort(new Error('采集会话已结束。'));
+  closePublicBrowserConnections(session.budget);
   sessions.delete(session.id);
   await session.browser.close().catch(() => {});
 }
@@ -104,18 +108,19 @@ function cookieForBrowser(raw: string, requestUrl: URL) {
   return cookie;
 }
 
-async function acquireRequestSlot(session: Session) {
+async function acquireRequestSlot(session: Session, critical: boolean) {
   const signal = session.controller.signal;
-  while (session.activeRequests >= MAX_PARALLEL_REQUESTS) {
+  const limit = MAX_PARALLEL_REQUESTS - (critical ? 0 : RESERVED_LAYOUT_REQUESTS);
+  while (session.activeRequests >= limit) {
     signal.throwIfAborted();
     await new Promise<void>((resolve, reject) => {
-      const wake = () => { signal.removeEventListener('abort', abort); resolve(); };
+      const waiter = {critical,wake:()=>{ signal.removeEventListener('abort', abort); resolve(); }};
       const abort = () => {
-        const index = session.requestWaiters.indexOf(wake);
+        const index = session.requestWaiters.indexOf(waiter);
         if (index !== -1) session.requestWaiters.splice(index, 1);
         reject(signal.reason);
       };
-      session.requestWaiters.push(wake);
+      session.requestWaiters.push(waiter);
       signal.addEventListener('abort', abort, {once:true});
     });
   }
@@ -145,11 +150,13 @@ async function routeResponse(session: Session, route: Route) {
     if (++session.requests > MAX_REQUESTS) {
       throw new Error('采集浏览器的请求已达上限，请重新打开采集。');
     }
-    await acquireRequestSlot(session);
+    const critical = request.resourceType() === 'document' || request.resourceType() === 'stylesheet';
+    await acquireRequestSlot(session,critical);
     acquired = true;
     const url = parsePublicUrl(request.url());
+    if (navigationPage) session.navigationTargets.set(navigationPage,url);
     const response = await requestPublicBrowserResource(request.url(), request.method(), await request.allHeaders(),
-      request.postDataBuffer() ?? undefined, session.budget, session.controller.signal, Boolean(navigationPage));
+      request.postDataBuffer() ?? undefined, session.budget, session.controller.signal, critical);
     const headerValues = response.headers['set-cookie'];
     if (headerValues) {
       const values = Array.isArray(headerValues) ? headerValues : [headerValues];
@@ -206,7 +213,10 @@ async function routeResponse(session: Session, route: Route) {
   } finally {
     if (acquired) {
       session.activeRequests--;
-      session.requestWaiters.shift()?.();
+      const priority = session.requestWaiters.findIndex(waiter=>waiter.critical);
+      const next = priority >= 0 ? priority :
+        session.activeRequests < MAX_PARALLEL_REQUESTS - RESERVED_LAYOUT_REQUESTS ? 0 : -1;
+      if (next >= 0) session.requestWaiters.splice(next,1)[0]?.wake();
     }
   }
 }
@@ -218,6 +228,7 @@ async function openPage(session: Session, input: URL) {
     const timeout = deadline - Date.now();
     if (timeout <= 0) throw new Error('网页连接超时，请点击重试。');
     const requestUrl = new URL(url);
+    session.navigationTargets.set(session.page,url);
     requestUrl.hash = '';
     const opening: NonNullable<Session['openingNavigation']> = {url:requestUrl.href};
     session.openingNavigation = opening;
@@ -260,10 +271,23 @@ async function frame(session: Session): Promise<Frame> {
       scrollHeight:Math.max(document.documentElement.scrollHeight,document.body?.scrollHeight ?? 0) }));
     const target = session.target;
     const highlight = target && target.url === meta.url ? await locatePageElement(session.page, target.selector,false,target.selectors) : undefined;
-    const blocked = isWebsiteVerificationPage(meta.title,visibleText) ? verificationPageMessage : undefined;
+    if (!/^https?:\/\//i.test(meta.url)) {
+      const destination = session.navigationTargets.get(session.page) ?? session.initialUrl;
+      return { image:'data:image/jpeg;base64,' + image.toString('base64'), ...meta, url:destination.href,
+        blocked:'目标网页尚未打开。请点击「刷新页面」重新加载目标地址。', failedResources:session.failedResources,
+        resourceFailures:{...session.resourceFailures} };
+    }
+    const blocked = isWebsiteVerificationPage(meta.title,visibleText) ? verificationPageMessage : await layoutBlock(session.page);
     if (blocked) session.diagnostics.delete(meta.url);
     return { blocked, location:highlight, image:'data:image/jpeg;base64,' + image.toString('base64'), ...meta, failedResources:session.failedResources, resourceFailures:{...session.resourceFailures} };
   });
+}
+
+async function layoutBlock(page: Page) {
+  const missingStyles = await page.evaluate(() =>
+    Array.from(document.querySelectorAll<HTMLLinkElement>('link[rel~="stylesheet"][href]')).some(link =>
+      !link.disabled && (!link.media || matchMedia(link.media).matches) && !link.sheet));
+  return missingStyles ? '当前页面的样式表尚未加载完成，图片和文字可能错位。请等待加载或刷新页面后再检测和采集。' : undefined;
 }
 
 const actionShape = (raw: unknown) => {
@@ -317,7 +341,10 @@ async function perform(session: Session, raw: unknown) {
     } else {
       session.failedResources = 0;
       session.resourceFailures = {};
-      await openPage(session,parsePublicUrl(page.url()));
+      const currentUrl = page.url();
+      const destination = /^https?:\/\//i.test(currentUrl) ? parsePublicUrl(currentUrl) :
+        session.navigationTargets.get(page) ?? session.initialUrl;
+      await openPage(session,destination);
       await page.waitForTimeout(350);
     }
     if (action.action === 'click' || action.action === 'key' || action.action === 'text') await page.waitForTimeout(180);
@@ -350,14 +377,13 @@ async function openManagedBrowserSession(url: URL, ownerUserId: string, authSess
     await context.routeWebSocket('**/*', socket => socket.close());
     const controller = new AbortController();
     session = { id:randomUUID(), ownerUserId, authSessionId, browser, context, page:await context.newPage(), controller,
+      initialUrl:url, navigationTargets:new WeakMap(),
       budget:{remaining:NETWORK_BUDGET}, requests:0, activeRequests:0, requestWaiters:[], failedResources:0, resourceFailures:{}, actions:0, frames:0, queue:Promise.resolve(), expires:setTimeout(()=>{},0), closed:false, diagnostics:new Map(), replay:new Map(),replayBytes:0,replayDocuments:new WeakMap() };
     clearTimeout(session.expires);
     session.expires = setTimeout(()=>void closeSession(session!), SESSION_TTL);
     session.expires.unref?.();
     sessions.set(session.id,session);
-    browser.on('disconnected',()=>{
-      if(!session!.closed){session!.closed=true;clearTimeout(session!.expires);sessions.delete(session!.id);}
-    });
+    browser.on('disconnected',()=>{void closeSession(session!);});
     await context.route('**/*', route => routeResponse(session!,route));
     await context.addInitScript(() => {
       Object.defineProperty(window,'RTCPeerConnection',{value:undefined,configurable:false});
@@ -406,6 +432,8 @@ export async function diagnoseManagedBrowserPage(id: string, ownerUserId: string
     const page = session.page;
     if (session.pendingRedirect || page.url() !== url) throw new Error('网页已切换，请重试检测。');
     await requireTargetPage(page);
+    const blocked = await layoutBlock(page);
+    if (blocked) throw new Error(blocked);
     const cached = session.diagnostics.get(url);
     if (cached && !cached.coverage?.stillLoading && refresh !== true) return cached;
     const result = await diagnosePage(page,url,{waitForContent:true});
@@ -421,6 +449,7 @@ export async function captureManagedBrowserSession(id: string, ownerUserId: stri
   if (expectedUrl !== undefined && (typeof expectedUrl !== 'string' || expectedUrl.length > 2048)) throw new Error('采集页面地址无效。');
   const project = await serialize(session,async () => {
     const page = session.page;
+    parsePublicUrl(page.url());
     const checkPage = () => {
       if (expectedUrl !== undefined && (session.pendingRedirect || session.page !== page || page.url() !== expectedUrl)) {
         throw new Error('网页已切换，请重新选择要修复的问题。');
@@ -428,6 +457,8 @@ export async function captureManagedBrowserSession(id: string, ownerUserId: stri
     };
     checkPage();
     await requireTargetPage(page);
+    const blocked = await layoutBlock(page);
+    if (blocked) throw new Error(blocked);
     const cdp=await session.context.newCDPSession(page);
     try {
       await cdp.send('Page.setBypassCSP',{enabled:true});

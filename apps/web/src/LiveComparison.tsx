@@ -1,3 +1,4 @@
+import { pageLocationMessage } from './page-location';
 import { createPortal } from 'react-dom';
 import { workspaceFetch as fetch } from './workspace-fetch';
 import { useEffect, useRef, useState, type ReactNode } from 'react';
@@ -127,7 +128,7 @@ export function LiveComparison({ project, left, right, names, start, current, on
         notify.current?.({kind:'live',projectId:project,version:single || right === current ? right : left,path:'',status:'failed',error:message});
       }
     }).catch(problem=>{if (active) setError((problem as Error).message);}).finally(() => {
-      if (active) {setTask('');lock.current=false;}
+      if (active) {setTask('');lock.current=false;setSettled(value=>value+1);}
     });
     return () => {
       active=false;
@@ -180,7 +181,7 @@ export function LiveComparison({ project, left, right, names, start, current, on
     }
   }
 
-  function act(side:LiveSide, operation:LiveAction) {
+  function act(side:LiveSide, operation:LiveAction, onComplete?:(ok:boolean)=>void) {
     const previous=latest.current;
     if (!previous) return false;
     if (lock.current) {
@@ -247,6 +248,7 @@ export function LiveComparison({ project, left, right, names, start, current, on
         else if (operation.action!=='scroll') setError('');
       }
       setSession(next);
+      onComplete?.(outcome?.executions?.[side]?.status!=='failed');
       if (operation.action !== 'locate' && operation.action !== 'refresh' && operation.action !== 'scroll') {
         setDiagnosticSide(syncRef.current && next.left.path === next.right.path && right === current && !proposalId ? 'right' : side);
       }
@@ -264,6 +266,7 @@ export function LiveComparison({ project, left, right, names, start, current, on
       pendingActions.current=[];
       record(label[side]+actionNames[operation.action]+'失败',reason);
       setError(reason);
+      onComplete?.(false);
     },operation.action==='refresh'?'正在重新获取画面…':undefined);
     return true;
   }
@@ -366,15 +369,28 @@ export function LiveComparison({ project, left, right, names, start, current, on
   },[activePath,activeVersion,diagnosticSession,diagnosticSide,diagnosticsCache,diagnosticsEnabled,project,proposalId,route,scanRevision,activePageScope]);
 
   const located = useRef('');
+  const marker = useRef<HTMLSpanElement>(null);
+  const [completedLocation,setCompletedLocation] = useState<{key:string;ok:boolean}>();
+  const selector = target?.selector.trim();
+  const entryAlias = activePath === '/' && target?.path === entryTargetPath && target?.path === '/index.html';
+  const locationKey = selector && diagnosticSession && activePath && (target?.path === activePath || entryAlias)
+    ? JSON.stringify([diagnosticSession,diagnosticSide,target.id,activePath,selector]) : '';
+  const locationReady = Boolean(locationKey && completedLocation?.key === locationKey);
+  const currentLocation = locationReady && completedLocation?.ok ? session?.[diagnosticSide].location : undefined;
+  const locationStatus = target && (!selector ? pageLocationMessage(undefined)
+    : !locationKey ? '此问题的位置属于另一页面。'
+    : !locationReady ? '正在定位问题…'
+    : completedLocation?.ok ? pageLocationMessage(currentLocation) : '定位失败，请重新选择问题。');
   useEffect(() => {
-    if (!target?.selector || !diagnosticSession || !activePath || lock.current) return;
-    const entryAlias = activePath === '/' && target.path === entryTargetPath && target.path === '/index.html';
-    if (target.path !== activePath && !entryAlias) return;
-    const key = JSON.stringify([diagnosticSession,diagnosticSide,target.id,activePath,target.selector]);
-    if (located.current === key) return;
-    located.current = key;
-    act(diagnosticSide,{action:'locate',path:activePath,selector:target.selector,selectors:target.selectors});
-  },[activePath,diagnosticSession,diagnosticSide,entryTargetPath,settled,target]);
+    if (!locationKey || !target || !activePath || lock.current || located.current === locationKey) return;
+    located.current = locationKey;
+    act(diagnosticSide,{action:'locate',path:activePath,selector:target.selector,selectors:target.selectors},
+      ok=>setCompletedLocation({key:locationKey,ok}));
+  },[locationKey,settled,target,activePath,diagnosticSide]);
+  useEffect(() => {
+    if (locationKey && currentLocation?.status === 'located')
+      marker.current?.scrollIntoView({block:'nearest',inline:'nearest'});
+  },[locationKey,currentLocation?.status]);
 
   function commitReplayText(input:HTMLTextAreaElement,side:LiveSide) {
     const value=input.value;
@@ -478,10 +494,12 @@ export function LiveComparison({ project, left, right, names, start, current, on
     {session && <div className="panorama-pair live-pair" data-single={single}>
       {(single ? ['right'] as const : sides).map(side=>{
         const frame = session[side];
-        const target = frame.controls[Number(targets[side])];
+        const control = frame.controls[Number(targets[side])];
         const report = scans[side];
         const directInput = single && session.modes[side]==='replay';
-        const boxes = frame.location?.highlights ?? (frame.location?.bounds ? [frame.location.bounds] : []);
+        const location = target && side===diagnosticSide ? currentLocation : target ? undefined : frame.location;
+        const boxes = location?.highlights ?? (location?.bounds ? [location.bounds] : []);
+        const status = target && side===diagnosticSide ? locationStatus : location && pageLocationMessage(location);
         return <section key={side} aria-label={single ? '当前网页' : label[side]+'网页交互对比'}>
           {single && diagnosticsEnabled ? <div className="workspace-state-heading"><h3>{names[side]}</h3><span title={frame.path}>{frame.title || frame.path}</span></div>
             : <h3>{single ? names[side] : label[side]+' · '+names[side]}</h3>}
@@ -491,9 +509,7 @@ export function LiveComparison({ project, left, right, names, start, current, on
               {label[side]}问题
             </button>}<span>{frame.title || frame.path}</span>
           </p>}
-          {frame.location && <p className={proposalId ? "screen-reader-only" : "muted"} role="status">{{
-            located:'已标出问题位置',missing:'此版本没有唯一的匹配元素',hidden:'已找到节点，此元素没有可高亮的画面区域',outside:'问题位置在当前画面之外',
-          }[frame.location.status]}</p>}
+          {status && <p className={proposalId ? "screen-reader-only" : "page-location-status"} role="status">{status}</p>}
           <div className="live-screen-wrap">
           <button type="button" className="live-screen" style={{aspectRatio:`${frame.width ?? 900} / ${frame.height ?? 700}`}} data-viewport-width={frame.width ?? 900} data-viewport-height={frame.height ?? 700} ref={element=>{screens.current[side]=element;}} aria-label={single ? '可操作网页画面' : label[side]+'可操作网页画面'} onClick={event=>{
             if (dragged.current) {dragged.current=false;return;}
@@ -529,10 +545,11 @@ export function LiveComparison({ project, left, right, names, start, current, on
             if (keyboard!==side || !['Tab','Escape','Enter',' '].includes(event.key)) return;
             event.preventDefault();
             act(side,{action:event.key==='Tab' ? event.shiftKey?'shift-tab':'tab' : event.key==='Escape'?'escape':'activate'});
-          }}><img draggable={false} alt="" src={frame.image} width={frame.width ?? 900} height={frame.height ?? 700} />{boxes.map((bounds,index) => <span key={index} className="highlight" aria-hidden="true" style={{
+          }}><img draggable={false} alt="" src={frame.image} width={frame.width ?? 900} height={frame.height ?? 700} />{boxes.map((bounds,index) => <span key={index} ref={index===0 && side===diagnosticSide ? marker : undefined}
+            className={index===0 && target ? "highlight page-location-primary" : "highlight"} aria-hidden="true" style={{
             left:bounds.x/(frame.width ?? 900)*100+'%',top:bounds.y/(frame.height ?? 700)*100+'%',
             width:bounds.width/(frame.width ?? 900)*100+'%',height:bounds.height/(frame.height ?? 700)*100+'%',
-          }} />)}</button>
+          }}>{target && index===0 && <span className="page-location-badge">位置</span>}</span>)}</button>
           {directInput && <textarea ref={typing} className="live-screen-typing" tabIndex={-1}
             aria-label="在回放网页中输入" autoComplete="off" autoCapitalize="off" spellCheck={false}
             onKeyDown={event=>{
@@ -559,8 +576,8 @@ export function LiveComparison({ project, left, right, names, start, current, on
                 <option value="">选择控件</option>
                 {frame.controls.map((control,index)=><option key={index} value={index}>{control.name} ({control.role})</option>)}
               </select></label>
-              <button type="button" className="secondary" disabled={busy||!targets[side]||!target} onClick={()=>act(side,{action:'click',target})}>操作控件</button>
-              <button type="button" className="secondary" disabled={busy||!targets[side]||target?.role!=='textbox'} onClick={()=>act(side,{action:'fill',target})}>填入测试值</button>
+              <button type="button" className="secondary" disabled={busy||!targets[side]||!control} onClick={()=>act(side,{action:'click',target:control})}>操作控件</button>
+              <button type="button" className="secondary" disabled={busy||!targets[side]||control?.role!=='textbox'} onClick={()=>act(side,{action:'fill',target:control})}>填入测试值</button>
             </div>
           </details>
           {scanErrors[side] && <p role="alert">状态检测未完成 · {scanErrors[side].reason}</p>}

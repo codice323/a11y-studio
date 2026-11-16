@@ -853,3 +853,28 @@ footer { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 8p
 .repair-assistant-body #repair-preview-hint { margin-block: 4px 0; }
 
 .repair-status-row { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 16px; }
+
+.page-location-status {
+  margin: .375rem 0;
+  color: var(--muted, #575c60);
+  font-weight: 600;
+}
+.highlight.page-location-primary {
+  z-index: 2;
+  border: 3px solid #9e260e;
+  box-shadow: 0 0 0 2px #fff, 0 0 0 5px #9e260e;
+  scroll-margin-block: 5rem;
+}
+.page-location-badge {
+  position: absolute;
+  top: 100%;
+  left: 50%;
+  transform: translateX(-50%);
+  padding: 2px 6px;
+  border-radius: 4px;
+  color: #fff;
+  background: #9e260e;
+  font-size: .75rem;
+  font-weight: 700;
+  white-space: nowrap;
+}

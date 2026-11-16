@@ -4,6 +4,7 @@ import {db,id,now,hash,DATA,safePath,snapshotDir,snapshot,audit} from './storage
 import { buildReactProject, isReactProject, originAttribute, sourceSelector, type SourceLocation } from './project-build';
 import { visionFindings, scanRules } from './scan-rules';
 import { scanBehavior, unavailableBehavior } from './scan-behavior';
+import { redactModelText } from './ai/redact';
 import type { BehaviorAudit, DetectionEvidence } from '../../packages/shared/types';
 
 let activeScans=0;let liveBrowsers=0;const MAX_SCANS=2;
@@ -17,7 +18,7 @@ export function withSnapshotPage<T>(projectId: string, snapshotId: string, signa
 
 export type BrowserRequestEvidence = { type:string; path:string; status:number | 'blocked' };
 export type ResourceFailure = { type: string; path: string; reason: string; status?:number };
-export async function withRepairPage<T>(dir: string, entry: string, signal: AbortSignal | undefined, inspect: (page: Page, product: Awaited<ReturnType<typeof buildReactProject>> | undefined, resources: ResourceFailure[], network: BrowserRequestEvidence[]) => Promise<T>, waitForSlotMs = 6000, isolated = false, live = false) {
+export async function withRepairPage<T>(dir: string, entry: string, signal: AbortSignal | undefined, inspect: (page: Page, product: Awaited<ReturnType<typeof buildReactProject>> | undefined, resources: ResourceFailure[], network: BrowserRequestEvidence[]) => Promise<T>, waitForSlotMs = 6000, isolated = false, live = false, viewport = {width:900,height:700}) {
  let browser: Browser | undefined;
  const closeBrowser = () => { void browser?.close().catch(() => {}); };
  const engineering = isReactProject(dir);
@@ -35,7 +36,7 @@ export async function withRepairPage<T>(dir: string, entry: string, signal: Abor
   const exe=executable();if(!exe)throw new Error('未找到 Chromium 或 Chrome，请设置 CHROME_PATH。');
   browser=await chromium.launch({executablePath:exe,headless:true,
     ...((engineering || isolated)?{chromiumSandbox:true,args:['--disable-quic','--no-proxy-server','--force-webrtc-ip-handling-policy=disable_non_proxied_udp','--host-resolver-rules=MAP * ~NOTFOUND']}:{}),
-  });localSignal?.throwIfAborted();localSignal?.addEventListener('abort', closeBrowser, { once:true });const context=await browser.newContext({viewport:{width:900,height:700},deviceScaleFactor:1,serviceWorkers:'block',acceptDownloads:false});
+  });localSignal?.throwIfAborted();localSignal?.addEventListener('abort', closeBrowser, { once:true });const context=await browser.newContext({viewport,deviceScaleFactor:1,serviceWorkers:'block',acceptDownloads:false});
   if(product || isolated){
     await context.routeWebSocket('**/*',socket=>socket.close());
     await context.addInitScript(()=>{
@@ -174,7 +175,24 @@ async function scanDirectory(projectId: string, snapshotId: string, dir: string,
    }),
   ]).finally(() => clearTimeout(timeout));
   const rulesMs = performance.now() - rulesStarted;
-  const issues=[];for(const violation of visionFindings(results.violations))for(const node of violation.nodes){const selector=typeof node.target[0]==='string'?node.target[0]:'';let bounds=null;try {const box=selector?await page.locator(selector).first().boundingBox({timeout:1500}):null;if(box)bounds=box;}catch{} issues.push({id:hash(violation.id+'|'+selector).slice(0,20),ruleId:violation.id,selector,impact:violation.impact||'unknown',help:violation.help,description:violation.description,helpUrl:violation.helpUrl,html:node.html,wcag:violation.tags.filter((t:string)=>/^wcag\d/.test(t)),bounds,source:await location(selector)});}
+  const issues=[];
+  for (const violation of visionFindings(results.violations)) for (const node of violation.nodes) {
+    const selector=typeof node.target[0]==='string'?node.target[0]:'';
+    let bounds=null;
+    let textPreview: string | undefined;
+    if (selector) {
+      const element=page.locator(selector);
+      bounds=await element.first().boundingBox({timeout:1500}).catch(()=>null);
+      if (bounds && violation.id==='color-contrast' && node.target.length===1) {
+        const raw=await element.innerText({timeout:1000}).catch(()=>'');
+        const text=redactModelText(raw.slice(0,512).replace(/\s+/g,' ').trim());
+        if (text) textPreview=text.length>56 ? text.slice(0,56)+'…' : text;
+      }
+    }
+    issues.push({id:hash(violation.id+'|'+selector).slice(0,20),ruleId:violation.id,selector,impact:violation.impact||'unknown',
+      help:violation.help,description:violation.description,helpUrl:violation.helpUrl,html:node.html,
+      wcag:violation.tags.filter((t:string)=>/^wcag\d/.test(t)),bounds,textPreview,source:await location(selector)});
+  }
   const functionChecks=await page.evaluate(()=>{const controls=Array.from(document.querySelectorAll<HTMLElement>('a[href],button,input,select,textarea,[tabindex]'));if(controls.length>2000)throw new Error('交互控件超过检测上限。');return controls.map((el,index)=>{
     const style=getComputedStyle(el),visible=style.display!=='none'&&style.visibility!=='hidden'&&el.getClientRects().length>0,disabled=el.hasAttribute('disabled');let focusable=false;
     if(visible&&!disabled&&el.tabIndex>=0){el.focus({preventScroll:true});focusable=document.activeElement===el;el.blur();}

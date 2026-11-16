@@ -95,9 +95,9 @@ function RepairEvidence({ state, stateScoped, issue, history, proposal, view, on
   const reviewEvidenceReady = Boolean(previewData);
   const reviewActions = proposal && <footer className="patch-review">
     <p id="patch-review-status" role="status">{previewData?.before.contrast && candidateContrast && !candidateContrast.uncertain && !previewData.before.contrast.uncertain && `对比度 ${previewData.before.contrast.ratio.toFixed(2)}:1 → ${candidateContrast.ratio.toFixed(2)}:1。`}
-      {applying ? '正在保存补丁。' : preview?.error ? '页面预览失败，请重试。' : !reviewEvidenceReady ? '正在加载预览。' : ''}</p>
+      {applying ? '正在保存补丁。' : preview?.error ?? (!reviewEvidenceReady ? '正在加载预览。' : '')}</p>
     <div className="repair-actions">
-      {reviewHost && preview?.error && <button type="button" className="secondary" disabled={busy}
+      {preview?.error && <button type="button" className="secondary" disabled={busy}
         onClick={() => setAttempt(attempt + 1)}>重试预览</button>}
       <button type="button" className="secondary" disabled={busy} onClick={onReject}>取消</button>
       <button type="button" className="button dark" disabled={busy || !patchReady || !reviewEvidenceReady} aria-describedby="patch-review-status" onClick={()=>onConfirm(displaySemantics || undefined)}>
@@ -117,7 +117,7 @@ function RepairEvidence({ state, stateScoped, issue, history, proposal, view, on
       {view !== 'diff' && (verification.diff || verification.sourceReview) && <> · <button type="button" className="secondary" onClick={() => onView('diff')}>查看补丁</button></>}
     </span></div>}
     {proposal && (view !== 'diff' || contrastReview) && !previewData && <p className="comparison-status" role="status">{preview?.error
-      ? <>候选证据不可用。<button type="button" className="secondary" onClick={() => setAttempt(attempt + 1)}>重试预览</button></>
+      ? '候选证据不可用。'
       : '正在读取候选页面与浏览器语义…'}</p>}
     {view === 'diff' && <div className="diff-wrap source-diffs">
       {proposal || verification?.diff || verification?.sourceReview ? <PatchReview key={proposal?.id ?? verification?.id} proposal={proposal} verification={verification}

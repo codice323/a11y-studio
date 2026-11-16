@@ -15,6 +15,7 @@ export type Issue = {
   help: string;
   description: string;
   html: string;
+  textPreview?: string;
   helpUrl: string;
   wcag?: string[];
   bounds: Bounds | null;

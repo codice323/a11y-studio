@@ -1,0 +1,1004 @@
+/* A11y Studio · Modern Polish Layer
+   Upgrades the editorial theme with contemporary design patterns:
+   – Refined color tokens with better contrast hierarchy
+   – Glassmorphism sidebar & subtle frosted-glass panels
+   – Micro-interactions & smooth transitions everywhere
+   – Improved typography scale & spacing rhythm
+   – Lighter, more refined shadows & borders
+   – Better button hover/active states
+   – Scroll-driven sticky header blur
+   – macOS-style mock browser window chrome
+   – Card-based radio toggles & elegant form controls
+   – High-contrast, clean code diff & semantic tables
+   – Beautiful issue callouts & impact badges
+
+   This file is additive: it sits on top of style.css + editorial-theme.css
+   and only overrides visual presentation, not layout or structure. */
+
+/* ─── 1. Enhanced Design Tokens & Typography ─── */
+.app.editorial {
+  --paper:        #f5f1e8;
+  --paper-raised: #fffdf6;
+  --paper-tint:   #f0ead9;
+  --paper-line:   #ddd4c3;
+  --ink:          #1e2124;
+  --muted:        #62665f;
+  --accent:       #b5523a;
+  --accent-hover: #9b4430;
+  --accent-soft:  #f8ede4;
+  --surface:      #fffdf6;
+  --radius:       12px;
+  --radius-sm:    8px;
+  --radius-lg:    16px;
+  --shadow-xs:    0 1px 2px rgb(45 35 20 / 4%);
+  --shadow:       0 1px 3px rgb(45 35 20 / 4%), 0 4px 16px rgb(45 35 20 / 3%);
+  --shadow-lg:    0 4px 6px rgb(45 35 20 / 4%), 0 12px 40px rgb(45 35 20 / 6%);
+  --shadow-float: 0 16px 48px -8px rgb(20 15 10 / 12%), 0 4px 12px -2px rgb(20 15 10 / 6%);
+  --transition:   180ms cubic-bezier(.4, 0, .2, 1);
+  --transition-bounce: 260ms cubic-bezier(.34, 1.56, .64, 1);
+
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Noto Sans SC", sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+}
+
+/* ─── 2. Global Smoothness ─── */
+.app.editorial * {
+  transition-property: background-color, border-color, color, box-shadow, opacity, transform;
+  transition-duration: var(--transition);
+  transition-timing-function: cubic-bezier(.4, 0, .2, 1);
+}
+
+/* Opt out elements where the blanket transition causes visual jank */
+.app.editorial .spin,
+.app.editorial .screen-image img,
+.app.editorial .live-screen img,
+.app.editorial .managed-capture-screen img,
+.app.editorial .panorama-image img,
+.app.editorial iframe,
+.app.editorial [role="status"],
+.app.editorial .diff,
+.app.editorial .evidence-diff,
+.app.editorial pre {
+  transition: none;
+}
+
+/* ─── 3. Upgraded Sidebar ─── */
+.app.editorial .sidebar {
+  background: linear-gradient(175deg, #0e1d3f 0%, #142650 55%, #1a2f5e 100%);
+  border-right: 1px solid rgb(255 255 255 / 6%);
+  box-shadow: 4px 0 24px rgb(10 15 40 / 14%);
+}
+
+.app.editorial .logomark span {
+  border-radius: 5px;
+  transition: transform var(--transition-bounce);
+}
+
+.app.editorial .logo:hover .logomark span {
+  transform: scale(1.12);
+}
+
+.app.editorial .logo:hover .logomark {
+  transform: rotate(0deg);
+}
+
+.app.editorial .logomark {
+  transition: transform var(--transition-bounce);
+}
+
+.app.editorial .nav {
+  border-radius: 10px;
+  font-weight: 550;
+  letter-spacing: 0.01em;
+  position: relative;
+  overflow: hidden;
+  margin-block: 3px;
+}
+
+.app.editorial .nav::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  background: linear-gradient(135deg, rgb(255 255 255 / 0%) 0%, rgb(255 255 255 / 5%) 100%);
+  opacity: 0;
+  transition: opacity var(--transition);
+}
+
+.app.editorial .nav:hover:not(:disabled)::before {
+  opacity: 1;
+}
+
+.app.editorial .nav.active {
+  background: rgb(255 255 255 / 12%);
+  box-shadow: inset 0 0 0 1px rgb(255 255 255 / 10%);
+  font-weight: 700;
+  color: #fff;
+}
+
+.app.editorial .nav.active::before {
+  opacity: 0;
+}
+
+.app.editorial .sidebox {
+  background: rgb(255 255 255 / 6%);
+  border: 1px solid rgb(255 255 255 / 10%);
+  border-radius: 14px;
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  box-shadow: 0 4px 12px rgb(0 0 0 / 12%);
+}
+
+.app.editorial .sidebox svg {
+  color: #81a3ff;
+}
+
+.app.editorial .sidebar-toggle {
+  border-radius: 10px;
+  border-color: rgb(255 255 255 / 12%);
+  background: rgb(255 255 255 / 8%);
+  backdrop-filter: blur(8px);
+}
+
+.app.editorial .sidebar-toggle:hover {
+  background: rgb(255 255 255 / 16%);
+  transform: scale(1.05);
+}
+
+/* ─── 4. Frosted Topbar ─── */
+.app.editorial .topbar {
+  background: rgb(245 241 232 / 85%);
+  backdrop-filter: blur(16px) saturate(1.4);
+  -webkit-backdrop-filter: blur(16px) saturate(1.4);
+  border-bottom: 1px solid rgb(200 190 170 / 45%);
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  padding-inline: clamp(18px, 3vw, 42px);
+}
+
+.app.editorial .topbar div > span {
+  color: rgb(160 150 135 / 75%);
+  font-size: 13px;
+}
+
+.app.editorial .topbar b {
+  color: var(--ink);
+  font-weight: 650;
+}
+
+/* ─── 5. Refined Cards & Panels ─── */
+.app.editorial .panel,
+.app.editorial .import-card,
+.app.editorial .examples,
+.app.editorial .project-strip,
+.app.editorial .metrics > div,
+.app.editorial .steps > div {
+  border-radius: 14px;
+  border-color: rgb(200 190 170 / 45%);
+  box-shadow: var(--shadow);
+  transition: box-shadow var(--transition), transform var(--transition);
+}
+
+.app.editorial .import-card:hover,
+.app.editorial .examples:hover {
+  box-shadow: var(--shadow-lg);
+}
+
+.app.editorial .hero {
+  border-radius: 16px;
+  border-color: rgb(200 190 170 / 40%);
+  background: linear-gradient(135deg, #faf6ec 0%, #fffdf6 50%, #f8f3e6 100%);
+  box-shadow: var(--shadow);
+  position: relative;
+  overflow: hidden;
+}
+
+.app.editorial .hero::before {
+  content: "";
+  position: absolute;
+  top: -60%;
+  right: -20%;
+  width: 400px;
+  height: 400px;
+  background: radial-gradient(circle, rgb(181 82 58 / 6%) 0%, transparent 70%);
+  pointer-events: none;
+}
+
+.app.editorial .hero h1 {
+  font-weight: 650;
+  letter-spacing: -0.035em;
+  background: linear-gradient(135deg, #1e2124, #4a3528);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+/* ─── 6. Modern Buttons & Actions ─── */
+.app.editorial .button,
+.app.editorial .secondary {
+  border-radius: 9px;
+  font-weight: 620;
+  letter-spacing: 0.01em;
+  position: relative;
+  overflow: hidden;
+}
+
+.app.editorial .button.dark {
+  background: linear-gradient(135deg, var(--accent) 0%, var(--accent-hover) 100%);
+  border-color: var(--accent-hover);
+  color: #fff;
+  box-shadow: 0 1px 3px rgb(181 82 58 / 20%), inset 0 1px 0 rgb(255 255 255 / 14%);
+}
+
+.app.editorial .button.dark:hover:not(:disabled) {
+  background: linear-gradient(135deg, var(--accent-hover) 0%, #873929 100%);
+  box-shadow: 0 2px 8px rgb(181 82 58 / 30%), inset 0 1px 0 rgb(255 255 255 / 14%);
+  transform: translateY(-0.5px);
+}
+
+.app.editorial .button.dark:active:not(:disabled) {
+  transform: translateY(0.5px);
+  box-shadow: 0 1px 2px rgb(181 82 58 / 25%);
+}
+
+.app.editorial .secondary {
+  border-color: rgb(200 190 170 / 55%);
+  box-shadow: var(--shadow-xs);
+}
+
+.app.editorial .secondary:hover:not(:disabled) {
+  background: #f2ece0;
+  border-color: rgb(180 170 150 / 65%);
+  box-shadow: 0 2px 6px rgb(45 35 20 / 6%);
+  transform: translateY(-0.5px);
+}
+
+.app.editorial .secondary:active:not(:disabled) {
+  transform: translateY(0.5px);
+  box-shadow: 0 0 1px rgb(45 35 20 / 8%);
+}
+
+/* ─── 7. Example & Project Cards ─── */
+.app.editorial .example-card {
+  border-radius: 12px;
+  border-color: rgb(200 190 170 / 45%);
+  background: var(--paper-raised);
+  box-shadow: var(--shadow-xs);
+  transition: all var(--transition);
+}
+
+.app.editorial .example-card:hover:not(:disabled) {
+  background: #f8f2e6;
+  border-color: var(--accent);
+  box-shadow: 0 2px 10px rgb(181 82 58 / 8%);
+  transform: translateY(-1px);
+}
+
+.app.editorial .example-card:hover:not(:disabled) > svg {
+  transform: translateX(2px) translateY(-2px);
+}
+
+.app.editorial .example-card > svg {
+  transition: transform var(--transition-bounce);
+}
+
+.app.editorial .example-number {
+  border-radius: 8px;
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-weight: 800;
+  letter-spacing: -0.02em;
+}
+
+.app.editorial .account-project-row {
+  border-radius: 12px;
+  border-color: rgb(200 190 170 / 45%);
+  background: var(--paper-raised);
+  box-shadow: var(--shadow-xs);
+  transition: all var(--transition);
+  overflow: hidden;
+}
+
+.app.editorial .account-project-row:has(.account-project-open:hover) {
+  border-color: rgb(180 170 150 / 65%);
+  box-shadow: 0 2px 8px rgb(45 35 20 / 5%);
+}
+
+.app.editorial .account-project-actions button {
+  border-radius: 6px;
+  font-weight: 600;
+  padding: 4px 8px;
+  color: var(--muted);
+  transition: all var(--transition);
+}
+
+.app.editorial .account-project-actions button:hover:not(:disabled) {
+  color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.app.editorial .account-project-actions button[aria-label^="删除"]:hover:not(:disabled) {
+  color: #991b1b;
+  background: #fee2e2;
+}
+
+/* ─── 8. Steps Flow Cards ─── */
+.app.editorial .steps > div {
+  border-radius: 12px;
+  position: relative;
+  overflow: hidden;
+  box-shadow: var(--shadow-xs);
+}
+
+.app.editorial .steps > div::after {
+  content: "";
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  height: 3px;
+  background: linear-gradient(90deg, var(--accent) 0%, rgb(181 82 58 / 30%) 100%);
+  opacity: 0;
+  transition: opacity var(--transition);
+}
+
+.app.editorial .steps > div:hover::after {
+  opacity: 1;
+}
+
+.app.editorial .steps svg {
+  color: var(--accent);
+}
+
+/* ─── 9. Issue List & Cards ─── */
+.app.editorial .issue {
+  border-radius: 10px;
+  border-color: rgb(220 210 195 / 50%);
+  transition: all var(--transition);
+  position: relative;
+}
+
+.app.editorial .issue:hover {
+  border-color: rgb(200 180 160 / 65%);
+  box-shadow: 0 2px 8px rgb(45 35 20 / 4%);
+  transform: translateX(2px);
+}
+
+.app.editorial .issue.selected {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px rgb(181 82 58 / 20%), 0 2px 8px rgb(181 82 58 / 8%);
+  background: linear-gradient(135deg, #f9f0e8 0%, #f5ece4 100%);
+}
+
+.app.editorial .issue-dot {
+  border-radius: 8px;
+  font-size: 13px;
+  font-weight: 800;
+  box-shadow: inset 0 0 0 1px rgb(181 82 58 / 10%);
+  transition: transform var(--transition-bounce);
+}
+
+.app.editorial .issue:hover .issue-dot {
+  transform: scale(1.08);
+}
+
+.app.editorial .issue-dot.fixed {
+  background: linear-gradient(135deg, #e9f7ef, #daf1e4);
+  color: #136449;
+  box-shadow: inset 0 0 0 1px rgb(19 100 73 / 15%);
+}
+
+/* ─── 10. Segmented Tabs (Evidence & Control Tabs) ─── */
+.app.editorial .evidence-tabs,
+.app.editorial .control-tabs {
+  border-radius: 11px;
+  padding: 5px;
+  background: #eee8dc;
+  border: 1px solid rgb(200 190 170 / 30%);
+}
+
+.app.editorial .evidence-tabs > button,
+.app.editorial .control-tabs button {
+  border-radius: 8px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  transition: all var(--transition);
+}
+
+.app.editorial .control-tabs button[aria-selected="true"],
+.app.editorial .evidence-tabs button:is([aria-pressed="true"], [aria-selected="true"]) {
+  box-shadow: 0 1px 4px rgb(70 47 33 / 10%), 0 2px 8px rgb(70 47 33 / 4%);
+  background: var(--paper-raised);
+  color: var(--accent);
+  transform: scale(1.01);
+}
+
+/* ─── 11. Metrics KPI Cards ─── */
+.app.editorial .metrics > div {
+  border-radius: 14px;
+  transition: all var(--transition);
+  position: relative;
+  overflow: hidden;
+}
+
+.app.editorial .metrics > div:hover {
+  transform: translateY(-2px);
+  box-shadow: var(--shadow-lg);
+}
+
+.app.editorial .metrics strong {
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.03em;
+  font-weight: 750;
+}
+
+.app.editorial .metrics .metric-ok {
+  background: linear-gradient(135deg, #f0f5ec 0%, #e8f0e3 100%);
+  border-color: rgb(180 210 190 / 60%);
+}
+
+.app.editorial .metrics .metric-ok strong {
+  background: linear-gradient(135deg, #136449, #1a7a58);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+/* ─── 12. Severity Badges ─── */
+.app.editorial .severity {
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  padding: 2px 7px;
+  border-radius: 5px;
+  font-size: 11px;
+}
+
+.app.editorial .severity.critical {
+  background: linear-gradient(135deg, #ffebeb, #ffe0e0);
+  color: #8e2b2b;
+  border: 1px solid rgb(142 43 43 / 15%);
+}
+
+.app.editorial .severity.serious {
+  background: linear-gradient(135deg, #fff0df, #fee7cf);
+  color: #7d4a1b;
+  border: 1px solid rgb(125 74 27 / 15%);
+}
+
+.app.editorial .severity.moderate {
+  background: linear-gradient(135deg, #fef7e6, #fdf0ce);
+  color: #7a5c1e;
+  border: 1px solid rgb(122 92 30 / 15%);
+}
+
+.app.editorial .severity.minor {
+  background: linear-gradient(135deg, #f3f4f6, #e5e7eb);
+  color: #4b5563;
+  border: 1px solid rgb(75 85 99 / 15%);
+}
+
+.app.editorial .severity.fixed {
+  background: linear-gradient(135deg, #e9f7ef, #dff0e5);
+  color: #136449;
+  border: 1px solid rgb(19 100 73 / 15%);
+}
+
+/* ─── 13. Dropzone & Upload ─── */
+.app.editorial .dropzone {
+  border-radius: 14px;
+  border: 2px dashed rgb(180 160 130 / 50%);
+  background: linear-gradient(135deg, rgb(250 247 240 / 60%) 0%, rgb(245 240 230 / 80%) 100%);
+  transition: all var(--transition);
+  padding: clamp(18px, 2.4dvh, 26px);
+}
+
+.app.editorial .dropzone:hover {
+  border-color: var(--accent);
+  background: linear-gradient(135deg, rgb(248 237 228 / 60%) 0%, rgb(250 245 236 / 80%) 100%);
+  transform: translateY(-1px);
+}
+
+.app.editorial .upload-icon {
+  background: var(--accent-soft);
+  color: var(--accent);
+  border-radius: 14px;
+  width: 52px;
+  height: 52px;
+  box-shadow: 0 2px 8px rgb(181 82 58 / 12%);
+  display: grid;
+  place-items: center;
+}
+
+/* ─── 14. Dialogs & Modals ─── */
+.app.editorial .modal,
+.app.editorial dialog.account-upgrade-dialog .panel {
+  border-radius: 16px;
+  box-shadow: var(--shadow-float), 0 0 0 1px rgb(200 190 170 / 25%);
+  border: none;
+}
+
+.app.editorial dialog::backdrop {
+  background: rgb(25 20 15 / 50%);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+}
+
+/* ─── 15. Alerts & Busy Indicators ─── */
+.app.editorial .alert {
+  border-radius: 10px;
+  font-weight: 500;
+  box-shadow: var(--shadow-xs);
+}
+
+.app.editorial .alert.error {
+  background: linear-gradient(135deg, #fff0ef, #ffe8e6);
+  border-color: rgb(220 170 160 / 60%);
+  color: #8e3128;
+}
+
+.app.editorial .alert.success {
+  background: linear-gradient(135deg, #e8efe5, #dfe8db);
+  border-color: rgb(170 200 180 / 60%);
+  color: #175b40;
+}
+
+.app.editorial .busy {
+  border: 1px solid rgb(200 190 170 / 50%);
+  background: linear-gradient(135deg, #f3ece2, #efe7dc);
+  border-radius: 10px;
+  box-shadow: var(--shadow-xs);
+}
+
+/* ─── 16. Proposal & Verification Cards ─── */
+.app.editorial .proposal {
+  background: linear-gradient(135deg, #f7f2e8 0%, #f1ecdf 100%);
+  border: 1px solid rgb(210 190 170 / 60%);
+  border-radius: 12px;
+  box-shadow: var(--shadow-xs);
+}
+
+.app.editorial .verification-card {
+  background: linear-gradient(135deg, #f0faf5 0%, #e6f3ed 100%);
+  border-color: rgb(180 210 190 / 60%);
+  border-radius: 12px;
+  box-shadow: var(--shadow-xs);
+}
+
+/* ─── 17. Scrollbar Styling ─── */
+.app.editorial ::-webkit-scrollbar {
+  width: 7px;
+  height: 7px;
+}
+
+.app.editorial ::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.app.editorial ::-webkit-scrollbar-thumb {
+  background: rgb(140 130 115 / 30%);
+  border-radius: 10px;
+}
+
+.app.editorial ::-webkit-scrollbar-thumb:hover {
+  background: rgb(140 130 115 / 50%);
+}
+
+.app.editorial {
+  scrollbar-width: thin;
+  scrollbar-color: rgb(140 130 115 / 30%) transparent;
+}
+
+/* ─── 18. Focus States ─── */
+.app.editorial :focus-visible {
+  outline: 2.5px solid var(--accent);
+  outline-offset: 3px;
+  border-radius: 4px;
+}
+
+.app.editorial .sidebar :focus-visible {
+  outline-color: rgb(200 180 255 / 70%);
+}
+
+/* ─── 19. Form Controls & Inputs ─── */
+.app.editorial :is(input[type="text"], input[type="url"], input[type="email"], input[type="password"], input[type="number"], select, textarea) {
+  border-radius: 9px;
+  border: 1px solid rgb(200 190 170 / 55%);
+  background-color: var(--paper-raised);
+  padding: 8px 12px;
+  font-size: 13px;
+  box-shadow: inset 0 1px 2px rgb(0 0 0 / 3%);
+  transition: border-color var(--transition), box-shadow var(--transition);
+}
+
+.app.editorial :is(input[type="text"], input[type="url"], input[type="email"], input[type="password"], input[type="number"], select, textarea):focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px rgb(181 82 58 / 12%), inset 0 1px 2px rgb(0 0 0 / 2%);
+  outline: none;
+}
+
+.app.editorial .url-form input {
+  padding: 10px 14px;
+  font-size: 14px;
+  border-radius: 10px;
+}
+
+/* ─── 20. Mock Browser Window Chrome ─── */
+.app.editorial .chrome,
+.app.editorial .browser-bar {
+  background: linear-gradient(180deg, #ede7dc 0%, #e6dfd2 100%);
+  border-bottom: 1px solid rgb(200 190 170 / 50%);
+  padding: 8px 12px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.app.editorial .chrome i,
+.app.editorial .traffic i {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  display: inline-block;
+  box-shadow: inset 0 0 0 1px rgb(0 0 0 / 10%);
+}
+
+.app.editorial .chrome i:nth-child(1),
+.app.editorial .traffic i:nth-child(1) {
+  background: #ff5f57;
+}
+
+.app.editorial .chrome i:nth-child(2),
+.app.editorial .traffic i:nth-child(2) {
+  background: #febc2e;
+}
+
+.app.editorial .chrome i:nth-child(3),
+.app.editorial .traffic i:nth-child(3) {
+  background: #28c840;
+}
+
+.app.editorial .address,
+.app.editorial .browser-address {
+  background: var(--paper-raised);
+  border: 1px solid rgb(200 190 170 / 45%);
+  border-radius: 20px;
+  color: var(--muted);
+  padding: 4px 12px;
+  font-size: 11px;
+  letter-spacing: 0.01em;
+  box-shadow: 0 1px 2px rgb(0 0 0 / 4%);
+}
+
+/* ─── 21. AI Repair Assistant Breakdown ─── */
+.app.editorial .repair-copy {
+  margin-block: 10px;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 8px 12px;
+  align-items: baseline;
+}
+
+.app.editorial .repair-copy dt {
+  font-size: 11px;
+  font-weight: 700;
+  padding: 2px 7px;
+  border-radius: 5px;
+  letter-spacing: 0.03em;
+  text-align: center;
+}
+
+.app.editorial .repair-copy dt:nth-of-type(1) {
+  background: #ffebeb;
+  color: #8e2b2b;
+}
+
+.app.editorial .repair-copy dt:nth-of-type(2) {
+  background: #fff0df;
+  color: #7d4a1b;
+}
+
+.app.editorial .repair-copy dt:nth-of-type(3) {
+  background: #e9f7ef;
+  color: #136449;
+}
+
+.app.editorial .repair-copy dd {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.55;
+}
+
+.app.editorial .repair-copy dt:nth-of-type(3) + dd {
+  font-weight: 600;
+  color: #136449;
+  background: #f2faf5;
+  padding: 6px 10px;
+  border-radius: 7px;
+  border: 1px solid #d4ede0;
+}
+
+/* ─── 22. Image Purpose Toggle Cards ─── */
+.app.editorial .image-purpose {
+  border: none;
+  padding: 0;
+  margin: 10px 0;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+  gap: 8px;
+}
+
+.app.editorial .image-purpose legend {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--muted);
+  margin-bottom: 6px;
+}
+
+.app.editorial .image-purpose label {
+  border: 1px solid rgb(200 190 170 / 50%);
+  border-radius: 9px;
+  padding: 8px 12px;
+  background: var(--paper-raised);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  transition: all var(--transition);
+}
+
+.app.editorial .image-purpose label:hover {
+  background: #f8f2e6;
+  border-color: rgb(180 170 150 / 65%);
+}
+
+.app.editorial .image-purpose label:has(input:checked) {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent);
+}
+
+/* ─── 23. Code Diffs & Syntax ─── */
+.app.editorial .diff,
+.app.editorial .evidence-diff {
+  border-radius: 10px;
+  background: #f3efe5;
+  border: 1px solid rgb(200 190 170 / 40%);
+  box-shadow: inset 0 1px 3px rgb(45 35 20 / 4%);
+  font-family: ui-monospace, "SF Mono", Monaco, "Cascadia Code", "Fira Code", monospace;
+  font-size: 12px;
+  line-height: 1.65;
+}
+
+.app.editorial .diff ins,
+.app.editorial .diff .added {
+  background: #dcfce7;
+  color: #15803d;
+  padding: 1px 4px;
+  border-radius: 4px;
+  text-decoration: none;
+  font-weight: 600;
+}
+
+.app.editorial .diff del,
+.app.editorial .diff .removed {
+  background: #fee2e2;
+  color: #b91c1c;
+  padding: 1px 4px;
+  border-radius: 4px;
+  text-decoration: line-through;
+  font-weight: 600;
+}
+
+.app.editorial .diff-legend span:first-child {
+  background: #fee2e2;
+  color: #b91c1c;
+  font-weight: 600;
+  border-radius: 4px;
+  padding: 2px 7px;
+}
+
+.app.editorial .diff-legend span:last-child {
+  background: #dcfce7;
+  color: #15803d;
+  font-weight: 600;
+  border-radius: 4px;
+  padding: 2px 7px;
+}
+
+/* ─── 24. Issue Impact Card ─── */
+.app.editorial .issue-impact {
+  border-radius: 12px;
+  background: linear-gradient(135deg, #f5efe4 0%, #ede6d6 100%);
+  border-color: rgb(215 195 175 / 55%);
+  box-shadow: var(--shadow-xs);
+}
+
+.app.editorial .issue-impact-icon {
+  background: var(--accent-soft);
+  color: var(--accent);
+  border-radius: 10px;
+  box-shadow: 0 1px 3px rgb(181 82 58 / 10%);
+}
+
+/* ─── 25. Inspection Highlights ─── */
+.app.editorial .highlight,
+.app.editorial .panorama-highlight {
+  border: 3px solid #b5381e;
+  border-radius: 4px;
+  box-shadow: 0 0 0 2px #fff, 0 0 0 5px rgb(181 56 30 / 30%);
+}
+
+.app.editorial .location-marker-label {
+  border-radius: 0 0 6px 6px;
+  background: #9b2f17;
+  box-shadow: 0 2px 6px rgb(0 0 0 / 18%);
+}
+
+/* ─── 26. Shots & Comparison Screens ─── */
+.app.editorial .shot {
+  border-radius: 12px;
+  box-shadow: var(--shadow);
+  overflow: hidden;
+  border-color: rgb(200 190 170 / 45%);
+}
+
+.app.editorial .shot figcaption {
+  border-radius: 12px 12px 0 0;
+  background: linear-gradient(135deg, #f4eee3 0%, #f0e8d8 100%);
+  border-bottom: 1px solid rgb(200 190 170 / 40%);
+}
+
+/* ─── 27. AI Pill & Status ─── */
+.app.editorial .ai-pill {
+  background: linear-gradient(135deg, var(--accent-soft) 0%, #f0dfd1 100%);
+  color: var(--accent);
+  border-radius: 20px;
+  padding: 4px 10px;
+  font-weight: 650;
+  box-shadow: 0 1px 3px rgb(181 82 58 / 8%);
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+/* ─── 28. Status Badges & Pills ─── */
+.app.editorial .pill {
+  background: linear-gradient(135deg, #e8efe5, #dfe8db);
+  border-radius: 30px;
+  box-shadow: 0 1px 2px rgb(30 90 60 / 6%);
+}
+
+.app.editorial .pill i,
+.app.editorial .local-status i {
+  box-shadow: 0 0 0 3px rgb(54 183 139 / 20%);
+}
+
+/* ─── 29. Project Toolbar Strip ─── */
+.app.editorial .project-strip {
+  border-radius: 12px;
+  background: var(--paper-raised);
+  border-color: rgb(200 190 170 / 45%);
+  box-shadow: var(--shadow-xs);
+  padding: 8px 14px;
+}
+
+.app.editorial .project-title b {
+  font-size: 15px;
+  letter-spacing: -0.01em;
+}
+
+/* ─── 30. Account Menus & Guest Banners ─── */
+.app.editorial .account-menu .panel {
+  border-radius: 14px;
+  box-shadow: var(--shadow-float);
+  border: 1px solid rgb(200 190 170 / 30%);
+}
+
+.app.editorial .account-guest-notice {
+  border-radius: 10px;
+  background: linear-gradient(135deg, #edf3ff, #e2edff);
+  border: 1px solid #c8dafc;
+  color: #1e3a8a;
+  box-shadow: var(--shadow-xs);
+}
+
+.app.editorial .account-guest-label {
+  border-radius: 20px;
+  background: #edf3ff;
+  color: #1e3a8a;
+  border: 1px solid #d0e0fb;
+  font-weight: 600;
+}
+
+/* ─── 31. Detail Blocks & Accordions ─── */
+.app.editorial details.detail-block {
+  border-radius: 10px;
+  background: #f8f4ec;
+  border: 1px solid rgb(200 190 170 / 35%);
+  padding: 8px 12px;
+}
+
+.app.editorial details.detail-block summary {
+  font-weight: 650;
+  color: var(--ink);
+  cursor: pointer;
+}
+
+/* ─── 32. Semantic Table ─── */
+.app.editorial .semantic-table {
+  border-radius: 8px;
+  overflow: hidden;
+  box-shadow: var(--shadow-xs);
+}
+
+.app.editorial .semantic-table th {
+  background: #eee7da;
+  font-weight: 700;
+  color: var(--ink);
+}
+
+.app.editorial .semantic-table td {
+  background: var(--paper-raised);
+}
+
+.app.editorial .semantic-table .changed {
+  background: #ecfdf5;
+  color: #065f46;
+  font-weight: 700;
+}
+
+/* ─── 33. Subtle Page Load Animation ─── */
+@keyframes editorial-fade-up {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.app.editorial .home-content .hero,
+.app.editorial .home-content .onboarding,
+.app.editorial .home-content .steps {
+  animation: editorial-fade-up 400ms cubic-bezier(.4, 0, .2, 1) both;
+}
+
+.app.editorial .home-content .hero {
+  animation-delay: 0ms;
+}
+
+.app.editorial .home-content .onboarding {
+  animation-delay: 80ms;
+}
+
+.app.editorial .home-content .steps {
+  animation-delay: 150ms;
+}
+
+/* ─── 34. Link Hover ─── */
+.app.editorial a:not(.button):not(.secondary):not(.logo):not(.nav):not(.record-link) {
+  text-decoration-color: rgb(181 82 58 / 30%);
+  text-underline-offset: 3px;
+  transition: text-decoration-color var(--transition), color var(--transition);
+}
+
+.app.editorial a:not(.button):not(.secondary):not(.logo):not(.nav):not(.record-link):hover {
+  text-decoration-color: var(--accent);
+  color: var(--accent);
+}
+
+/* ─── 35. Reduced Motion ─── */
+@media (prefers-reduced-motion: reduce) {
+  .app.editorial * {
+    transition-duration: 0ms !important;
+    animation-duration: 0ms !important;
+  }
+}

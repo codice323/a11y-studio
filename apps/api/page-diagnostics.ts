@@ -3,6 +3,7 @@ import type { PageDiagnostics } from '../../packages/shared/page-diagnostics';
 import type { LiveFrame } from '../../packages/shared/live-comparison';
 import { visionFindings, scanRules } from './scan-rules';
 import { hash } from './storage';
+import { redactModelText } from './ai/redact';
 
 export const verificationPageMessage = '当前页面显示网站安全验证，尚未检测到目标网页。请在原网站完成验证，再返回工作台重新采集正文。';
 
@@ -32,13 +33,14 @@ export async function diagnosePage(page: Page, path: string, options: { waitForC
       impact: node.impact ?? rule.impact ?? 'unknown', html: /^<[\w-]+/.exec(node.html)?.[0] ?? '', bounds: null,
     };
   }));
-  const groups = await page.evaluate(findings => {
+  const {groups,previews} = await page.evaluate(findings => {
     const byRule = new Map<string, {
       id: string;
       ancestors: Element[];
       top: number;
     }[]>();
     const groups: Record<string,string> = {};
+    const previews: Record<string,string> = {};
     for (const {id,selector,ruleId,impact} of findings) {
       if (!selector) continue;
       let matches: NodeListOf<Element>;
@@ -47,6 +49,10 @@ export async function diagnosePage(page: Page, path: string, options: { waitForC
       const element = matches[0];
       const rect = element.getBoundingClientRect();
       if (!rect.width || !rect.height || getComputedStyle(element).visibility !== 'visible') continue;
+      if (ruleId === 'color-contrast' && element instanceof HTMLElement) {
+        const text = element.innerText?.slice(0,512).replace(/\s+/g,' ').trim();
+        if (text) previews[id] = text;
+      }
       const ancestors: Element[] = [];
       for (let parent=element.parentElement; parent && ancestors.length<4; parent=parent.parentElement) {
         if (parent.matches('body,html,main,[role=main]')) break;
@@ -73,7 +79,7 @@ export async function diagnosePage(page: Page, path: string, options: { waitForC
         }
       }
     }
-    return groups;
+    return {groups,previews};
   },findings.map(({id,selector,ruleId,impact})=>({id,selector,ruleId,impact})));
   const title = (await page.title()).slice(0, 160);
   if (page.isClosed() || page.url() !== url) throw new Error('页面在检测过程中发生变化。');
@@ -105,7 +111,11 @@ export async function diagnosePage(page: Page, path: string, options: { waitForC
       bestPractices:await addEvidence(result.bestPractices.violations.filter(rule=>rule.id==='tabindex' || rule.tags.includes('cat.semantics') || rule.tags.includes('cat.keyboard')).map(summarize)),
       stillLoading,
     },
-    findings: findings.map(item=>({...item,locationGroup:groups[item.id]})),
+    findings: findings.map(item=>{
+      const text = previews[item.id] && redactModelText(previews[item.id]);
+      const textPreview = text && (text.length > 56 ? text.slice(0,56)+'…' : text);
+      return {...item,locationGroup:groups[item.id],textPreview};
+    }),
   };
 }
 
@@ -132,26 +142,40 @@ async function waitForPageContent(page: Page) {
 export async function locatePageElement(page: Page, selector?: string, scroll = false, selectors: string[] = []): Promise<LiveFrame['location']> {
   if (!selector || /^(?:html|body|:root)$/i.test(selector.trim())) return undefined;
   return page.evaluate(({selector,scroll,selectors}) => {
-    const elements = [...new Set([selector,...selectors])].flatMap(value => {
-      if (/^(?:html|body|:root)$/i.test(value.trim())) return [];
-      try {
-        const matches = document.querySelectorAll(value);
-        return matches.length === 1 ? [matches[0]] : [];
-      } catch { return []; }
-    });
-    if (!elements.length) return {status:'missing'};
-    const visible = [...new Set(elements)].filter(element => {
-      const rect = element.getBoundingClientRect();
-      return rect.width > 0 && rect.height > 0 && getComputedStyle(element).visibility === 'visible';
-    });
-    if (!visible.length) return {status:'hidden'};
-    if (scroll) visible[0].scrollIntoView({block:'center',inline:'center',behavior:'instant'});
-    const highlights = visible.flatMap(element => {
-      const box = element.getBoundingClientRect();
-      const x = Math.max(0,box.left), y = Math.max(0,box.top);
-      const width = Math.min(innerWidth,box.right)-x, height = Math.min(innerHeight,box.bottom)-y;
-      return width > 0 && height > 0 ? [{x,y,width,height}] : [];
-    });
-    return highlights.length ? {status:'located',bounds:highlights[0],highlights} : {status:'outside'};
+    // Method syntax keeps tsx's name helper out of the serialized browser callback.
+    const probe = {
+      match(value: string) {
+        if (/^(?:html|body|:root)$/i.test(value.trim())) return;
+        try {
+          const matches = document.querySelectorAll(value);
+          if (matches.length === 1) return matches[0];
+        } catch { return; }
+      },
+      visible(element: Element) {
+        const rect = element.getBoundingClientRect();
+        return rect.width > 0 && rect.height > 0 && element.checkVisibility({visibilityProperty:true,opacityProperty:true});
+      },
+      bounds(element: Element) {
+        const box = element.getBoundingClientRect();
+        const x = Math.max(0,box.left), y = Math.max(0,box.top);
+        const width = Math.min(innerWidth,box.right)-x, height = Math.min(innerHeight,box.bottom)-y;
+        if (width > 0 && height > 0) return {x,y,width,height};
+      },
+    };
+
+    const primary = probe.match(selector);
+    if (!primary) return {status:'missing'};
+    if (!probe.visible(primary)) return {status:'hidden'};
+    if (scroll) primary.scrollIntoView({block:'center',inline:'center',behavior:'instant'});
+    const bounds = probe.bounds(primary);
+    if (!bounds) return {status:'outside'};
+    const highlights = [bounds];
+    const elements = new Set(selectors.filter(value=>value!==selector).map(probe.match));
+    for (const element of elements) {
+      if (!element || element===primary || !probe.visible(element)) continue;
+      const bounds = probe.bounds(element);
+      if (bounds) highlights.push(bounds);
+    }
+    return {status:'located',bounds,highlights};
   },{selector,scroll,selectors});
 }

@@ -23,7 +23,16 @@ const redirects = new Set([301, 302, 303, 307, 308]);
 type Address = { address: string; family: number; viaSyntheticDns?: boolean };
 type Resource = { url: URL; type: string; contentType: string; body: Buffer };
 type Budget = { remaining: number };
-export type PublicBrowserBudget = { remaining: number; dnsFallbackCache?: DnsFallbackCache };
+export type PublicBrowserBudget = {
+  remaining: number;
+  dnsFallbackCache?: DnsFallbackCache;
+  connections?: Map<string, http.Agent>;
+};
+
+export function closePublicBrowserConnections(budget: PublicBrowserBudget) {
+  for (const agent of budget.connections?.values() ?? []) agent.destroy();
+  budget.connections?.clear();
+}
 
 export function isPublicAddress(address: string) {
   if (!isIP(address) || address.includes('%')) return false;
@@ -92,6 +101,14 @@ export async function requestPublicBrowserResource(input:string, method:string, 
 function readBrowserResource(url:URL, selected:Address, method:string, headers:Record<string,string>, body:Buffer|undefined,
   budget:PublicBrowserBudget, signal:AbortSignal) {
   const client=url.protocol==='https:'?https:http;
+  // Reuse connections only within this capture and for the same validated endpoint.
+  budget.connections ??= new Map();
+  const endpoint = JSON.stringify([url.origin, selected.address, Boolean(selected.viaSyntheticDns)]);
+  let agent = budget.connections.get(endpoint);
+  if (!agent && budget.connections.size < 32) {
+    agent = new client.Agent({keepAlive:true,maxFreeSockets:2,timeout:10000});
+    budget.connections.set(endpoint,agent);
+  }
   const allowed:Record<string,string>={accept:'*/*','accept-encoding':'identity','user-agent':'Mozilla/5.0 (compatible; A11yStudio/0.1)'};
   for (const [name,value] of Object.entries(headers)) {
     const key=name.toLowerCase();
@@ -103,7 +120,7 @@ function readBrowserResource(url:URL, selected:Address, method:string, headers:R
   const tlsOptions = url.protocol === 'https:' && selected.viaSyntheticDns
     ? { ecdhCurve:'X25519:P-256:P-384' } : {};
   return new Promise<{status:number;headers:import('node:http').IncomingHttpHeaders;body:Buffer}>((resolve,reject)=>{
-    const request=client.request(url,{method,agent:false,family:selected.family,
+    const request=client.request(url,{method,agent:agent ?? false,family:selected.family,
       lookup:(_host,_options,callback)=>callback(null,selected.address,selected.family),headers:allowed,signal,...tlsOptions},response=>{
       const status=response.statusCode??502;
       const rawLimit=5*1024*1024;

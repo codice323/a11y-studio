@@ -1,3 +1,4 @@
+import { pageLocationMessage } from './page-location';
 import { useCallback, useEffect, useImperativeHandle, useRef, useState, type KeyboardEvent, type MouseEvent, type Ref } from 'react';
 import { ArrowLeft, LoaderCircle, LockKeyhole, RotateCcw, ShieldCheck } from 'lucide-react';
 import { workspaceFetch as fetch } from './workspace-fetch';
@@ -31,6 +32,7 @@ export function ManagedBrowserCapture({ref, initialUrl,onClose,closeLabel='结�
   const [loading,setLoading]=useState(true);
   const [attempt,setAttempt]=useState(0);
   const [reloadRevision,setReloadRevision]=useState(0);
+  const [reloadFailure,setReloadFailure]=useState<{url:string;message:string}>();
   const [busy,setBusy]=useState(false);
   const [notice,setNotice]=useState('正在启动隔离浏览器…');
   const screen=useRef<HTMLDivElement>(null);
@@ -62,7 +64,7 @@ export function ManagedBrowserCapture({ref, initialUrl,onClose,closeLabel='结�
       method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(action),
     }));
     chain.current=run.catch(()=>{});
-    return run.then(next=>{if(alive.current)update(next);return next;})
+    return run.then(next=>{if(alive.current && sessionRef.current===id)update(next);return next;})
       .finally(()=>{actionsPending.current--;});
   },[update]);
 
@@ -105,7 +107,8 @@ export function ManagedBrowserCapture({ref, initialUrl,onClose,closeLabel='结�
 
   const currentUrl = frame?.url;
   const currentTitle = frame?.title;
-  const blocked = frame?.blocked;
+  const failedReload = reloadFailure?.url === currentUrl ? reloadFailure?.message : undefined;
+  const blocked = failedReload ?? frame?.blocked;
   const startupError = !sessionId ? error : '';
   const diagnosticsEnabled = Boolean(onDiagnostics);
   useEffect(() => {
@@ -149,10 +152,30 @@ export function ManagedBrowserCapture({ref, initialUrl,onClose,closeLabel='结�
     return () => controller.abort();
   }, [active, diagnosticsEnabled, currentUrl, initialUrl, sessionId, scanRevision, reloadRevision, diagnosticsCache, startupError, blocked]);
 
+  const marker = useRef<HTMLSpanElement>(null);
+  const [completedLocation,setCompletedLocation] = useState<{key:string;ok:boolean}>();
+  const selector = target?.selector.trim();
+  const locationKey = active && sessionId && selector && target && target.path === currentUrl
+    ? JSON.stringify([sessionId,target.id,currentUrl,selector]) : '';
+  const locationReady = Boolean(locationKey && completedLocation?.key===locationKey);
+  const location = locationReady && completedLocation?.ok ? frame?.location : undefined;
+  const locationStatus = target && (!selector ? pageLocationMessage(undefined)
+    : !locationKey ? '此问题的位置属于另一页面。'
+    : !locationReady ? '正在定位问题…'
+    : completedLocation?.ok ? pageLocationMessage(location) : '定位失败，请重新选择问题。');
+  const locationSelectors = target?.selectors;
   useEffect(() => {
-    if (!active || !sessionId || !target?.id || target.path !== currentUrl) return;
-    void sendAction({action:'locate',url:target.path,selector:target.selector,selectors:target.selectors}).catch(problem=>setError((problem as Error).message));
-  },[active,currentUrl,sendAction,sessionId,target?.id,target?.path,target?.selector,target?.selectors]);
+    if (!locationKey) return;
+    let active = true;
+    void sendAction({action:'locate',url:currentUrl,selector,selectors:locationSelectors}).then(
+      ()=>{if(active)setCompletedLocation({key:locationKey,ok:true});},
+      ()=>{if(active)setCompletedLocation({key:locationKey,ok:false});},
+    );
+    return ()=>{active=false;};
+  },[currentUrl,locationKey,locationSelectors,selector,sendAction]);
+  useEffect(() => {
+    if (location?.status==='located') marker.current?.scrollIntoView({block:'nearest',inline:'nearest'});
+  },[locationKey,location?.status]);
 
   useEffect(()=>{
     const node=screen.current;if(!node)return;
@@ -226,13 +249,25 @@ export function ManagedBrowserCapture({ref, initialUrl,onClose,closeLabel='结�
     onClose();
   }
   async function reload(){
+    const url=frameRef.current?.url;
+    busyRef.current=true;
+    setBusy(true);
     try{
-      if(frameRef.current) diagnosticsCache?.delete(frameRef.current.url);
+      if(url) diagnosticsCache?.delete(url);
       setNotice('正在刷新网页…');
       await sendAction({action:'reload'});
+      setReloadFailure(undefined);
       setReloadRevision(value=>value+1);
     }
-    catch(problem){setError((problem as Error).message);setNotice('');}
+    catch(problem){
+      const message=(problem as Error).message;
+      if(url) setReloadFailure({url,message:'刷新失败，当前画面可能是上一次加载的结果。'+message});
+      else setError(message);
+    } finally {
+      setNotice('');
+      busyRef.current=false;
+      setBusy(false);
+    }
   }
 
   return <section className="managed-capture-page" aria-label="URL 网页采集">
@@ -244,10 +279,13 @@ export function ManagedBrowserCapture({ref, initialUrl,onClose,closeLabel='结�
         void sendAction({action:'back'}).catch(problem=>setError((problem as Error).message));
       }}>返回上一页</button></div>
     {error&&<div className="alert error" role="alert">{error}{!sessionId&&<button className="secondary" disabled={loading} onClick={()=>setAttempt(value=>value+1)}>重试</button>}</div>}
+    {failedReload&&<div className="alert error" role="alert">{failedReload}</div>}
     {notice&&<div className="managed-capture-status" role="status"><LoaderCircle className="spin" size={16}/>{notice}</div>}
     <p className="muted managed-capture-hint"><LockKeyhole size={15}/>点击网页里的输入框即可打字。可用滚轮或触控板滚动，也可以按住鼠标拖动。采集时加载的页面和只读接口内容会保存在项目中用于回放，可能包含个人信息；删除项目时一并删除。</p>
     {frame && ((frame.failedResources??0)>0 || (frame.scrollHeight!==undefined && frame.scrollHeight<=frame.height)) && <p className="managed-capture-hint" role="status">
       {(frame.failedResources??0)>0 && <>本次加载有 {frame.failedResources} 项网页资源请求失败，页面内容可能不完整。可以点击“刷新页面”重试。 </>}
+      {Object.keys(frame.resourceFailures ?? {}).some(key => key.startsWith('stylesheet · ')) &&
+        <>原网页样式表加载失败，图片和文字的位置可能错乱。建议刷新后再检测或采集。 </>}
       {frame.scrollHeight!==undefined && frame.scrollHeight<=frame.height && <>当前页面高度未超出画面。</>}
     </p>}
     {frame?.resourceFailures && Object.keys(frame.resourceFailures).length > 0 && <details className="managed-capture-hint">
@@ -257,6 +295,7 @@ export function ManagedBrowserCapture({ref, initialUrl,onClose,closeLabel='结�
         return <li key={key}>{resourceTypes[type] ?? type} · {reason} · {count} 次</li>;
       })}</ul>
     </details>}
+    {locationStatus && <p className="page-location-status" role="status">{locationStatus}</p>}
     {frame?<div ref={screen} className="managed-capture-screen" role="region" aria-label="应用内原网页实时画面"
       onPointerDown={event=>{
         if(event.button!==0||!sessionRef.current||busyRef.current)return;
@@ -295,10 +334,11 @@ export function ManagedBrowserCapture({ref, initialUrl,onClose,closeLabel='结�
         onCompositionStart={()=>{composing.current=true;}}
         onCompositionEnd={event=>{composing.current=false;commitText(event.currentTarget);}}
         onInput={event=>{if(!composing.current)commitText(event.currentTarget);}} />
-      <img src={frame.image} alt={`原网页实时画面：${frame.title||frame.url}`} draggable={false}/>{(frame.location?.highlights ?? (frame.location?.bounds ? [frame.location.bounds] : [])).map((box,index) => <span key={index} className="highlight" aria-hidden="true" style={{
+      <img src={frame.image} alt={`原网页实时画面：${frame.title||frame.url}`} draggable={false}/>{(location?.highlights ?? (location?.bounds ? [location.bounds] : [])).map((box,index) => <span key={index} ref={index===0 ? marker : undefined}
+        className={index===0 ? "highlight page-location-primary" : "highlight"} aria-hidden="true" style={{
         left:box.x/frame.width*100+'%',top:box.y/frame.height*100+'%',
         width:box.width/frame.width*100+'%',height:box.height/frame.height*100+'%',
-      }}/>)}</div>
+      }}>{index===0 && <span className="page-location-badge">位置</span>}</span>)}</div>
       :<div className="managed-capture-placeholder">{loading?<><LoaderCircle className="spin" size={24} aria-hidden="true"/>正在启动网页…</>:error?'网页加载失败':'暂无网页画面'}</div>}
     <div className="managed-capture-foot"><ShieldCheck size={15}/>检测和修复会保存到 A11y Studio 本地副本。采集页不会自动修改目标网站代码。</div>
   </section>;

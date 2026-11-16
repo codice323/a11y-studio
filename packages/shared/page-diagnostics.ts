@@ -8,7 +8,7 @@ export type PageDiagnostics = {
   coverage?: PageDiagnosticCoverage;
 };
 
-type PageFinding = PanoramaIssue & { locationGroup?: string };
+type PageFinding = PanoramaIssue & { locationGroup?: string; textPreview?: string };
 
 export type PageDiagnosticCoverage = {
   review: DiagnosticRuleSummary[];
